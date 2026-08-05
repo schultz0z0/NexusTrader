@@ -49,7 +49,12 @@ class MarketDataHandler:
                     upper = float(s_upper.iloc[-1])
                     lower = float(s_lower.iloc[-1])
 
+                import os
                 import httpx
+                api_host = os.getenv("API_HOST", "127.0.0.1")
+                api_port = os.getenv("API_PORT", "8000")
+                tick_url = f"http://{api_host}:{api_port}/api/v1/bot/tick"
+
                 # Transmite o Tick REAL e os Indicadores REAIS para a Interface Web
                 tick_payload = {
                     "type": "tick",
@@ -61,11 +66,11 @@ class MarketDataHandler:
                     "sma": sma
                 }
                 
-                # Send to FastAPI server running on port 8000
+                # Send to FastAPI server
                 async def send_to_api():
                     try:
                         async with httpx.AsyncClient() as client:
-                            await client.post("http://127.0.0.1:8000/api/v1/bot/tick", json=tick_payload, timeout=2.0)
+                            await client.post(tick_url, json=tick_payload, timeout=2.0)
                     except Exception as e:
                         # Silently ignore connection errors if API is offline
                         pass

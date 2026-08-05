@@ -32,6 +32,8 @@ services:
       - .env
     environment:
       - DB_PATH=/app/data/nexus_trader.db
+      - API_HOST=nexus-api
+      - API_PORT=8000
     volumes:
       - nexus-data:/app/data
 
