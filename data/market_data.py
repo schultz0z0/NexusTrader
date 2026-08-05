@@ -45,9 +45,13 @@ class MarketDataHandler:
                     s_upper = s_sma + (s_std * 2.0)
                     s_lower = s_sma - (s_std * 2.0)
                     
+                    import math
                     sma = float(s_sma.iloc[-1])
                     upper = float(s_upper.iloc[-1])
                     lower = float(s_lower.iloc[-1])
+                    if math.isnan(sma): sma = None
+                    if math.isnan(upper): upper = None
+                    if math.isnan(lower): lower = None
 
                 import os
                 import httpx
@@ -70,10 +74,11 @@ class MarketDataHandler:
                 async def send_to_api():
                     try:
                         async with httpx.AsyncClient() as client:
-                            await client.post(tick_url, json=tick_payload, timeout=2.0)
+                            resp = await client.post(tick_url, json=tick_payload, timeout=2.0)
+                            if resp.status_code != 200:
+                                logger.error(f"Erro ao enviar tick para API. Status: {resp.status_code}")
                     except Exception as e:
-                        # Silently ignore connection errors if API is offline
-                        pass
+                        logger.error(f"Exceção ao enviar tick: {e}")
                 
                 import asyncio
                 asyncio.create_task(send_to_api())
