@@ -13,14 +13,10 @@ class DatabaseRepository:
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
 
-    async def _connect(self):
-        db = await aiosqlite.connect(self.db_path, timeout=30.0)
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA busy_timeout=30000;")
-        return db
-
     async def init_db(self):
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA busy_timeout=30000;")
             await db.executescript(DatabaseModels.create_tables_sql())
             
             # Insere configuracao inicial de risco se tabela estiver vazia
@@ -35,7 +31,8 @@ class DatabaseRepository:
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
 
     async def get_risk_config(self) -> dict:
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM risk_configs ORDER BY id DESC LIMIT 1") as cursor:
                 row = await cursor.fetchone()
@@ -52,7 +49,8 @@ class DatabaseRepository:
                 }
 
     async def update_risk_config(self, config: dict):
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO risk_configs (initial_stake, stop_loss_daily, take_profit_daily, max_daily_trades, max_single_stake, max_consecutive_losses, cooldown_minutes)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -69,7 +67,8 @@ class DatabaseRepository:
             logger.info("Configuracao de risco atualizada dinamicamente no BD.")
 
     async def get_bot_settings(self) -> dict:
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM bot_settings ORDER BY id DESC LIMIT 1") as cursor:
                 row = await cursor.fetchone()
@@ -83,7 +82,8 @@ class DatabaseRepository:
                 }
 
     async def update_bot_settings(self, settings: dict):
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO bot_settings (account_id, account_type, symbol, strategy)
                 VALUES (?, ?, ?, ?)
@@ -97,7 +97,8 @@ class DatabaseRepository:
             logger.info("Configuracao do robo atualizada dinamicamente no BD.")
 
     async def create_session(self, session_id: str):
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute(
                 "INSERT INTO sessions (id) VALUES (?)",
                 (session_id,)
@@ -105,7 +106,8 @@ class DatabaseRepository:
             await db.commit()
 
     async def save_trade(self, trade_data: dict):
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO trades (session_id, strategy_name, symbol, contract_type, contract_id, stake, payout, profit, result)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -124,7 +126,8 @@ class DatabaseRepository:
 
     async def get_daily_stats(self) -> dict:
         """Calcula PnL e quantidade de trades do dia atual."""
-        async with await self._connect() as db:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
             async with db.execute("""
                 SELECT 
                     COALESCE(SUM(profit), 0.0) as total_profit,

@@ -12,6 +12,8 @@ services:
       - DB_PATH=/app/data/nexus_trader.db
     volumes:
       - nexus-data:/app/data
+    ports:
+      - "${HOST_PORT:-8989}:8000"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN}`)"
