@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexusTrader - Dashboard Automático (Deriv Real-Time Feed)</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --deriv-red: #FF444F;
+            --deriv-red-hover: #E61935;
+            --bg-deep: #0E0E0E;
+            --bg-card: #1E222B;
+            --border-card: #2A2E39;
+            --text-main: #FFFFFF;
+            --text-muted: #848E9C;
+            --win-green: #00C853;
+            --loss-red: #FF444F;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-deep);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        header {
+            background-color: #131722;
+            border-bottom: 1px solid var(--border-card);
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .brand-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-logo {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--deriv-red) 0%, #D43D47 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 18px;
+            box-shadow: 0 4px 12px rgba(255, 68, 79, 0.3);
+        }
+
+        .brand-title {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-title span {
+            color: var(--deriv-red);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .account-badge {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-card);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .account-badge .dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--win-green);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--win-green);
+        }
+
+        .btn-toggle-bot {
+            background-color: var(--deriv-red);
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 14px rgba(255, 68, 79, 0.4);
+        }
+
+        .btn-toggle-bot.stopped {
+            background-color: #373C48;
+            box-shadow: none;
+        }
+
+        /* Container Principal */
+        main {
+            padding: 32px;
+            max-width: 1440px;
+            margin: 0 auto;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+        }
+
+        .metric-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 14px;
+            padding: 22px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .metric-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .metric-value.positive { color: var(--win-green); }
+        .metric-value.negative { color: var(--loss-red); }
+
+        .metric-subtext {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 24px;
+        }
+
+        @media (max-width: 1024px) {
+            .dashboard-grid { grid-template-columns: 1fr; }
+        }
+
+        .panel-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-card);
+            padding-bottom: 14px;
+        }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 340px;
+            width: 100%;
+        }
+
+        /* Formulario */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .form-input {
+            background-color: #131722;
+            border: 1px solid var(--border-card);
+            color: var(--text-main);
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            outline: none;
+        }
+
+        .form-input:focus {
+            border-color: var(--deriv-red);
+        }
+
+        .btn-save-config {
+            background: linear-gradient(135deg, var(--deriv-red) 0%, #D43D47 100%);
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(255, 68, 79, 0.3);
+        }
+
+        /* Tabela */
+        .trades-table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 13px;
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 500;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-card);
+        }
+
+        td {
+            padding: 14px 16px;
+            border-bottom: 1px solid #232733;
+        }
+
+        .badge-result {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }
+
+        .badge-result.won {
+            background-color: rgba(0, 200, 83, 0.15);
+            color: var(--win-green);
+        }
+
+        .badge-result.lost {
+            background-color: rgba(255, 68, 79, 0.15);
+            color: var(--loss-red);
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background-color: #1E222B;
+            border: 1px solid var(--deriv-red);
+            color: white;
+            padding: 14px 24px;
+            border-radius: 10px;
+            font-size: 14px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            display: none;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="brand-container">
+            <div class="brand-logo">N</div>
+            <div class="brand-title">Nexus<span>Trader</span></div>
+        </div>
+
+        <div class="header-actions">
+            <div class="account-badge" id="accountBadgeTop">
+                <div class="dot"></div>
+                <span>Conta Atual: <strong id="accId">Carregando...</strong></span>
+            </div>
+            <button id="btnToggleBot" class="btn-toggle-bot" onclick="toggleBot()">
+                <span id="botIcon">🟢</span>
+                <span id="botBtnText">ROBÔ OPERANDO</span>
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Metricas -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">PnL Acumulado Hoje</div>
+                <div id="pnlValue" class="metric-value positive">+$0.00 USD</div>
+                <div class="metric-subtext">Meta de Lucro: <span id="metaTp">$100.00</span></div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Taxa de Acerto (Win Rate)</div>
+                <div id="winRateValue" class="metric-value">0.0%</div>
+                <div class="metric-subtext"><span id="winCount">0</span> Wins / <span id="lossCount">0</span> Losses</div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Total de Operações</div>
+                <div id="totalTradesValue" class="metric-value">0</div>
+                <div class="metric-subtext">Limite Diário: <span id="metaTrades">50</span> trades</div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Última Cotação (R_100)</div>
+                <div id="lastTickValue" class="metric-value" style="color: #FFFFFF;">583.24</div>
+                <div class="metric-subtext">Feed de Ticks Deriv Real</div>
+            </div>
+        </div>
+
+        <!-- Grafico em Tempo Real & Configuracoes -->
+        <div class="dashboard-grid">
+            <div class="panel-card">
+                <div class="panel-header">
+                    <div class="panel-title">📈 Volatility 100 Index (R_100) - Ticks & Bandas de Bollinger REAIS</div>
+                    <span id="wsStatus" style="font-size: 12px; color: var(--win-green); font-weight: 600;">● Conectado ao Feed Deriv</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="liveChart"></canvas>
+                </div>
+            </div>
+
+            <div class="panel-card">
+                <div class="panel-header">
+                    <div class="panel-title">🤖 Configuração do Robô (Conta & Ativo)</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Selecione a Conta</label>
+                    <select id="cfgAccountId" class="form-input">
+                        <option value="">Carregando contas...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Selecione o Ativo (Mercado)</label>
+                    <select id="cfgSymbol" class="form-input">
+                        <option value="">Carregando ativos...</option>
+                    </select>
+                </div>
+                
+                <div style="display: flex; gap: 10px; margin-bottom: 24px;">
+                    <button class="btn-save-config" onclick="saveBotSettings()" style="flex: 2;">
+                        Aplicar Mudança
+                    </button>
+                    <button class="btn-save-config" onclick="testTelegramNotification()" style="flex: 1; background: #0088cc;">
+                        Testar Telegram 📱
+                    </button>
+                </div>
+
+                <div class="panel-header">
+                    <div class="panel-title">🎛️ Gestão Dinâmica de Risco & Banca</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Valor Inicial da Entrada ($ Stake)</label>
+                    <input type="number" id="cfgInitialStake" class="form-input" value="1.0" step="0.1">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Daily Stop Loss ($ USD)</label>
+                    <input type="number" id="cfgStopLoss" class="form-input" value="50.0">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Daily Take Profit ($ USD)</label>
+                    <input type="number" id="cfgTakeProfit" class="form-input" value="100.0">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Stake Máxima Segura ($ USD)</label>
+                    <input type="number" id="cfgMaxStake" class="form-input" value="20.0">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Níveis Máximos de Martingale</label>
+                    <input type="number" id="cfgMaxMartingale" class="form-input" value="3">
+                </div>
+
+                <button class="btn-save-config" onclick="saveRiskConfig()">
+                    Salvar e Aplicar no Robô
+                </button>
+            </div>
+        </div>
+
+        <!-- Tabela -->
+        <div class="panel-card">
+            <div class="panel-header">
+                <div class="panel-title">📜 Histórico de Operações Recentes (Conta Demo)</div>
+            </div>
+            <div class="trades-table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID Contrato</th>
+                            <th>Ativo</th>
+                            <th>Tipo</th>
+                            <th>Stake</th>
+                            <th>Payout</th>
+                            <th>Lucro/Prejuízo</th>
+                            <th>Resultado</th>
+                            <th>Horário</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTableBody">
+                        <tr>
+                            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">
+                                Conectando ao robô de operações...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <div id="toast" class="toast">Configuração salva com sucesso!</div>
+
+    <script>
+        let isRunning = true;
+        let chartInstance = null;
+        const maxDataPoints = 30;
+
+        function initChart() {
+            const ctx = document.getElementById('liveChart').getContext('2d');
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Preço Real (R_100)',
+                            data: [],
+                            borderColor: '#FFFFFF',
+                            borderWidth: 2,
+                            tension: 0.2,
+                            pointRadius: 2,
+                            pointBackgroundColor: '#FFFFFF'
+                        },
+                        {
+                            label: 'Banda Superior (BB Upper)',
+                            data: [],
+                            borderColor: '#FF444F',
+                            borderWidth: 1.5,
+                            borderDash: [4, 4],
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'Média Móvel (BB SMA 20)',
+                            data: [],
+                            borderColor: '#FFB300',
+                            borderWidth: 1,
+                            borderDash: [2, 2],
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'Banda Inferior (BB Lower)',
+                            data: [],
+                            borderColor: '#00C853',
+                            borderWidth: 1.5,
+                            borderDash: [4, 4],
+                            pointRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { labels: { color: '#848E9C', font: { family: 'Inter' } } }
+                    },
+                    scales: {
+                        x: { grid: { color: '#2A2E39' }, ticks: { color: '#848E9C', maxTicksLimit: 8 } },
+                        y: { grid: { color: '#2A2E39' }, ticks: { color: '#848E9C' } }
+                    }
+                }
+            });
+        }
+
+        // Conectar WebSocket ao Feed em Tempo Real
+        function connectLiveWebSocket() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws/live`;
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                document.getElementById('wsStatus').innerText = '● Conectado ao Feed Deriv (Live)';
+                document.getElementById('wsStatus').style.color = 'var(--win-green)';
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'tick') {
+                    updateChartRealData(data);
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('wsStatus').innerText = '○ Reconectando ao Feed...';
+                document.getElementById('wsStatus').style.color = 'var(--loss-red)';
+                setTimeout(connectLiveWebSocket, 3000);
+            };
+        }
+
+        function updateChartRealData(tickData) {
+            const price = tickData.price;
+            const timeStr = new Date(tickData.epoch * 1000).toLocaleTimeString();
+            
+            document.getElementById('lastTickValue').innerText = price.toFixed(2);
+
+            const labels = chartInstance.data.labels;
+            const priceDs = chartInstance.data.datasets[0].data;
+            const upperDs = chartInstance.data.datasets[1].data;
+            const smaDs = chartInstance.data.datasets[2].data;
+            const lowerDs = chartInstance.data.datasets[3].data;
+
+            labels.push(timeStr);
+            priceDs.push(price);
+            upperDs.push(tickData.upper !== null ? tickData.upper : price);
+            smaDs.push(tickData.sma !== null ? tickData.sma : price);
+            lowerDs.push(tickData.lower !== null ? tickData.lower : price);
+
+            if (labels.length > maxDataPoints) {
+                labels.shift();
+                priceDs.shift();
+                upperDs.shift();
+                smaDs.shift();
+                lowerDs.shift();
+            }
+
+            chartInstance.update('none');
+        }
+
+        async function toggleBot() {
+            const endpoint = isRunning ? '/api/v1/bot/stop' : '/api/v1/bot/start';
+            const res = await fetch(endpoint, { method: 'POST' });
+            const data = await res.json();
+            
+            isRunning = !isRunning;
+            const btn = document.getElementById('btnToggleBot');
+            const icon = document.getElementById('botIcon');
+            const txt = document.getElementById('botBtnText');
+            
+            if (isRunning) {
+                btn.classList.remove('stopped');
+                icon.innerText = '🟢';
+                txt.innerText = 'ROBÔ OPERANDO';
+            } else {
+                btn.classList.add('stopped');
+                icon.innerText = '🔴';
+                txt.innerText = 'ROBÔ PAUSADO';
+            }
+            showToast(data.message);
+        }
+
+        async function saveRiskConfig() {
+            const payload = {
+                initial_stake: parseFloat(document.getElementById('cfgInitialStake').value),
+                stop_loss_daily: parseFloat(document.getElementById('cfgStopLoss').value),
+                take_profit_daily: parseFloat(document.getElementById('cfgTakeProfit').value),
+                max_single_stake: parseFloat(document.getElementById('cfgMaxStake').value),
+                max_consecutive_losses: parseInt(document.getElementById('cfgMaxMartingale').value),
+                max_daily_trades: 50,
+                cooldown_minutes: 15
+            };
+
+            const res = await fetch('/api/v1/config/risk', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            showToast(data.message || 'Configuração salva no BD!');
+            fetchConfig();
+        }
+
+        async function fetchConfig() {
+            const res = await fetch('/api/v1/config/risk');
+            const json = await res.json();
+            if (json.data) {
+                document.getElementById('cfgInitialStake').value = json.data.initial_stake || 1.0;
+                document.getElementById('cfgStopLoss').value = json.data.stop_loss_daily;
+                document.getElementById('cfgTakeProfit').value = json.data.take_profit_daily;
+                document.getElementById('cfgMaxStake').value = json.data.max_single_stake;
+                document.getElementById('cfgMaxMartingale').value = json.data.max_consecutive_losses;
+                document.getElementById('metaTp').innerText = `$${json.data.take_profit_daily.toFixed(2)}`;
+            }
+        }
+
+        async function fetchTradesAndStats() {
+            try {
+                const statsRes = await fetch('/api/v1/trades/stats');
+                const statsJson = await statsRes.json();
+                if (statsJson.data) {
+                    const pnl = statsJson.data.daily_pnl || 0;
+                    const trades = statsJson.data.daily_trades || 0;
+                    const pnlEl = document.getElementById('pnlValue');
+                    pnlEl.innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} USD`;
+                    pnlEl.className = `metric-value ${pnl >= 0 ? 'positive' : 'negative'}`;
+                    document.getElementById('totalTradesValue').innerText = trades;
+                }
+
+                const listRes = await fetch('/api/v1/trades/list?limit=10');
+                const listJson = await listRes.json();
+                if (listJson.data && listJson.data.length > 0) {
+                    const tbody = document.getElementById('tradesTableBody');
+                    tbody.innerHTML = listJson.data.map(t => `
+                        <tr>
+                            <td>#${t.contract_id || t.id}</td>
+                            <td>${t.symbol}</td>
+                            <td><strong style="color: ${t.contract_type === 'CALL' ? 'var(--win-green)' : 'var(--loss-red)'}">${t.contract_type}</strong></td>
+                            <td>$${(t.stake || 0).toFixed(2)}</td>
+                            <td>$${(t.payout || 0).toFixed(2)}</td>
+                            <td style="color: ${(t.profit || 0) >= 0 ? 'var(--win-green)' : 'var(--loss-red)'}; font-weight: 600;">
+                                ${(t.profit || 0) >= 0 ? '+' : ''}$${(t.profit || 0).toFixed(2)}
+                            </td>
+                            <td><span class="badge-result ${t.result}">${(t.result || 'won').toUpperCase()}</span></td>
+                            <td>${t.created_at ? t.created_at.split(' ')[1] : 'Agora'}</td>
+                        </tr>
+                    `).join('');
+                }
+            } catch (e) {
+                console.error("Erro ao carregar dados:", e);
+            }
+        }
+
+        async function fetchAccountsAndAssets() {
+            try {
+                // Buscar Accounts
+                const accRes = await fetch('/api/v1/bot/accounts');
+                const accJson = await accRes.json();
+                const accSelect = document.getElementById('cfgAccountId');
+                if (accJson.data && accJson.data.length > 0) {
+                    accSelect.innerHTML = accJson.data.map(acc => {
+                        const id = acc.account_id || acc.loginid;
+                        const bal = acc.balance !== undefined ? `$${acc.balance}` : '';
+                        const curr = acc.currency || '';
+                        const type = acc.account_type === 'demo' ? '(Demo)' : '(Real)';
+                        return `<option value="${id}" data-type="${acc.account_type || 'demo'}">${id} ${type} - ${bal} ${curr}</option>`;
+                    }).join('');
+                } else {
+                    accSelect.innerHTML = '<option value="">Nenhuma conta encontrada</option>';
+                }
+
+                // Buscar Assets
+                const assetRes = await fetch('/api/v1/bot/assets');
+                const assetJson = await assetRes.json();
+                const assetSelect = document.getElementById('cfgSymbol');
+                if (assetJson.data) {
+                    assetSelect.innerHTML = assetJson.data.map(a => 
+                        `<option value="${a.symbol}">${a.name} (${a.symbol})</option>`
+                    ).join('');
+                }
+
+                // Buscar Settings Atuais
+                const setRes = await fetch('/api/v1/bot/settings');
+                const setJson = await setRes.json();
+                if (setJson.data) {
+                    if (setJson.data.account_id) accSelect.value = setJson.data.account_id;
+                    if (setJson.data.symbol) assetSelect.value = setJson.data.symbol;
+                    
+                    const accTypeStr = setJson.data.account_type === 'demo' ? 'Demo' : 'Real';
+                    document.getElementById('accId').innerText = `${setJson.data.account_id} (${accTypeStr})`;
+                    
+                    if(setJson.data.account_type === 'demo') {
+                        document.getElementById('accountBadgeTop').style.border = '1px solid var(--border-card)';
+                    } else {
+                        document.getElementById('accountBadgeTop').style.border = '1px solid var(--win-green)';
+                    }
+                }
+            } catch (e) {
+                console.error("Erro ao carregar contas/ativos:", e);
+            }
+        }
+
+        async function saveBotSettings() {
+            const accSelect = document.getElementById('cfgAccountId');
+            const assetSelect = document.getElementById('cfgSymbol');
+            const selectedAcc = accSelect.options[accSelect.selectedIndex];
+            
+            if(!selectedAcc || !selectedAcc.value) return showToast("Selecione uma conta válida.");
+
+            const payload = {
+                account_id: selectedAcc.value,
+                account_type: selectedAcc.getAttribute('data-type') || 'demo',
+                symbol: assetSelect.value
+            };
+
+            const res = await fetch('/api/v1/bot/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            showToast(data.message || 'Configurações de robô salvas!');
+            setTimeout(() => window.location.reload(), 2000); // Reload para limpar gráfico
+        }
+
+        async function testTelegramNotification() {
+            try {
+                showToast("Enviando mensagem de teste ao Telegram...");
+                const res = await fetch('/api/v1/notifications/test-telegram', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || "Teste concluído!");
+            } catch (e) {
+                showToast("Erro ao testar Telegram.");
+            }
+        }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.style.display = 'block';
+            setTimeout(() => { t.style.display = 'none'; }, 3000);
+        }
+
+        window.onload = () => {
+            initChart();
+            connectLiveWebSocket();
+            fetchAccountsAndAssets();
+            fetchConfig();
+            fetchTradesAndStats();
+            setInterval(fetchTradesAndStats, 4000);
+        };
+    </script>
+</body>
+</html>

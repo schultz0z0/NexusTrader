@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  nexus-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexustrader-api
+    restart: unless-stopped
+    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/nexus_trader.db
+    volumes:
+      - nexus-data:/app/data
+    ports:
+      - "8000:8000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.nexustrader.entrypoints=websecure"
+      - "traefik.http.routers.nexustrader.tls.certresolver=letsencrypt"
+      - "traefik.http.services.nexustrader.loadbalancer.server.port=8000"
+
+  nexus-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexustrader-bot
+    restart: unless-stopped
+    command: python main.py
+    depends_on:
+      - nexus-api
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/nexus_trader.db
+    volumes:
+      - nexus-data:/app/data
+
+volumes:
+  nexus-data:
+    driver: local
