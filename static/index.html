@@ -1,780 +1,134 @@
-<!DOCTYPE html>
-<html lang="pt-BR" class="dark">
+<!doctype html>
+<html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NexusTrader - Dashboard Automático (Deriv Real-Time Feed)</title>
-    <!-- Google Fonts: Inter -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        :root {
-            --deriv-red: #FF444F;
-            --deriv-red-hover: #E61935;
-            --bg-deep: #0E0E0E;
-            --bg-card: #1E222B;
-            --border-card: #2A2E39;
-            --text-main: #FFFFFF;
-            --text-muted: #848E9C;
-            --win-green: #00C853;
-            --loss-red: #FF444F;
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        }
-
-        body {
-            background-color: var(--bg-deep);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            overflow-x: hidden;
-        }
-
-        /* Header */
-        header {
-            background-color: #131722;
-            border-bottom: 1px solid var(--border-card);
-            padding: 16px 32px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-
-        .brand-container {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .brand-logo {
-            width: 36px;
-            height: 36px;
-            background: linear-gradient(135deg, var(--deriv-red) 0%, #D43D47 100%);
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 800;
-            font-size: 18px;
-            box-shadow: 0 4px 12px rgba(255, 68, 79, 0.3);
-        }
-
-        .brand-title {
-            font-size: 20px;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-        }
-
-        .brand-title span {
-            color: var(--deriv-red);
-        }
-
-        .header-actions {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .account-badge {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-card);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .account-badge .dot {
-            width: 8px;
-            height: 8px;
-            background-color: var(--win-green);
-            border-radius: 50%;
-            box-shadow: 0 0 8px var(--win-green);
-        }
-
-        .btn-toggle-bot {
-            background-color: var(--deriv-red);
-            color: white;
-            border: none;
-            padding: 10px 24px;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            box-shadow: 0 4px 14px rgba(255, 68, 79, 0.4);
-        }
-
-        .btn-toggle-bot.stopped {
-            background-color: #373C48;
-            box-shadow: none;
-        }
-
-        /* Container Principal */
-        main {
-            padding: 32px;
-            max-width: 1440px;
-            margin: 0 auto;
-            width: 100%;
-            display: flex;
-            flex-direction: column;
-            gap: 28px;
-        }
-
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 20px;
-        }
-
-        .metric-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-card);
-            border-radius: 14px;
-            padding: 22px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .metric-label {
-            font-size: 13px;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-
-        .metric-value {
-            font-size: 28px;
-            font-weight: 700;
-        }
-
-        .metric-value.positive { color: var(--win-green); }
-        .metric-value.negative { color: var(--loss-red); }
-
-        .metric-subtext {
-            font-size: 12px;
-            color: var(--text-muted);
-        }
-
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 24px;
-        }
-
-        @media (max-width: 1024px) {
-            .dashboard-grid { grid-template-columns: 1fr; }
-        }
-
-        .panel-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-card);
-            border-radius: 16px;
-            padding: 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-
-        .panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid var(--border-card);
-            padding-bottom: 14px;
-        }
-
-        .panel-title {
-            font-size: 16px;
-            font-weight: 600;
-        }
-
-        .chart-container {
-            position: relative;
-            height: 340px;
-            width: 100%;
-        }
-
-        /* Formulario */
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .form-label {
-            font-size: 13px;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-
-        .form-input {
-            background-color: #131722;
-            border: 1px solid var(--border-card);
-            color: var(--text-main);
-            padding: 12px 14px;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            outline: none;
-        }
-
-        .form-input:focus {
-            border-color: var(--deriv-red);
-        }
-
-        .btn-save-config {
-            background: linear-gradient(135deg, var(--deriv-red) 0%, #D43D47 100%);
-            color: white;
-            border: none;
-            padding: 14px;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            cursor: pointer;
-            box-shadow: 0 4px 14px rgba(255, 68, 79, 0.3);
-        }
-
-        /* Tabela */
-        .trades-table-container {
-            overflow-x: auto;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-            font-size: 13px;
-        }
-
-        th {
-            color: var(--text-muted);
-            font-weight: 500;
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border-card);
-        }
-
-        td {
-            padding: 14px 16px;
-            border-bottom: 1px solid #232733;
-        }
-
-        .badge-result {
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            display: inline-block;
-        }
-
-        .badge-result.won {
-            background-color: rgba(0, 200, 83, 0.15);
-            color: var(--win-green);
-        }
-
-        .badge-result.lost {
-            background-color: rgba(255, 68, 79, 0.15);
-            color: var(--loss-red);
-        }
-
-        .toast {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            background-color: #1E222B;
-            border: 1px solid var(--deriv-red);
-            color: white;
-            padding: 14px 24px;
-            border-radius: 10px;
-            font-size: 14px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-            display: none;
-            z-index: 1000;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080b12">
+  <title>NexusTrader — Trading Automation Desk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <header>
-        <div class="brand-container">
-            <div class="brand-logo">N</div>
-            <div class="brand-title">Nexus<span>Trader</span></div>
-        </div>
-
-        <div class="header-actions">
-            <div class="account-badge" id="accountBadgeTop">
-                <div class="dot"></div>
-                <span>Conta Atual: <strong id="accId">Carregando...</strong></span>
-            </div>
-            <button id="btnToggleBot" class="btn-toggle-bot" onclick="toggleBot()">
-                <span id="botIcon">🟢</span>
-                <span id="botBtnText">ROBÔ OPERANDO</span>
-            </button>
-        </div>
+  <div class="shell">
+    <header class="command-bar">
+      <a class="brand" href="/" aria-label="NexusTrader">
+        <span class="brand-mark"><span></span></span>
+        <span><strong>NEXUS</strong><small>TRADER</small></span>
+      </a>
+      <div class="environment"><span class="pulse"></span> AMBIENTE DEMO</div>
+      <div class="command-spacer"></div>
+      <div id="connection-status" class="connection is-offline"><i></i><span>Desconectado</span></div>
+      <button id="open-config" class="icon-button" type="button" title="Configurar robô" aria-label="Configurar robô">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Zm8.4-2.1-1.7-1a7.4 7.4 0 0 0 0-.8l1.7-1a1 1 0 0 0 .4-1.3l-1.7-3a1 1 0 0 0-1.3-.4l-1.7 1a8 8 0 0 0-.7-.4v-2A1 1 0 0 0 14.4 3h-3.5a1 1 0 0 0-1 1v2l-.7.4-1.7-1a1 1 0 0 0-1.3.4l-1.8 3a1 1 0 0 0 .4 1.3l1.7 1v.8l-1.7 1a1 1 0 0 0-.4 1.3l1.8 3a1 1 0 0 0 1.3.4l1.7-1 .7.4v2a1 1 0 0 0 1 1h3.5a1 1 0 0 0 1-1v-2l.7-.4 1.7 1a1 1 0 0 0 1.3-.4l1.7-3a1 1 0 0 0-.4-1.3Z"/></svg>
+      </button>
+      <button id="stop-all" class="danger-button" type="button"><span></span> PARAR TUDO</button>
     </header>
 
-    <main>
-        <!-- Metricas -->
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-label">PnL Acumulado Hoje</div>
-                <div id="pnlValue" class="metric-value positive">+$0.00 USD</div>
-                <div class="metric-subtext">Meta de Lucro: <span id="metaTp">$100.00</span></div>
-            </div>
+    <aside class="bot-rail">
+      <div class="rail-title"><span>ROBÔS</span><button id="new-bot" aria-label="Novo robô" title="Novo robô">+</button></div>
+      <nav id="bot-list" class="bot-list" aria-label="Lista de robôs"></nav>
+      <div class="rail-foot"><span class="shield">D</span><p><strong>Demo lock</strong><small>Ordens reais bloqueadas</small></p></div>
+    </aside>
 
-            <div class="metric-card">
-                <div class="metric-label">Taxa de Acerto (Win Rate)</div>
-                <div id="winRateValue" class="metric-value">0.0%</div>
-                <div class="metric-subtext"><span id="winCount">0</span> Wins / <span id="lossCount">0</span> Losses</div>
-            </div>
-
-            <div class="metric-card">
-                <div class="metric-label">Total de Operações</div>
-                <div id="totalTradesValue" class="metric-value">0</div>
-                <div class="metric-subtext">Limite Diário: <span id="metaTrades">50</span> trades</div>
-            </div>
-
-            <div class="metric-card">
-                <div class="metric-label">Última Cotação (R_100)</div>
-                <div id="lastTickValue" class="metric-value" style="color: #FFFFFF;">583.24</div>
-                <div class="metric-subtext">Feed de Ticks Deriv Real</div>
-            </div>
+    <main class="workspace">
+      <section class="chart-panel panel">
+        <header class="panel-head chart-head">
+          <div>
+            <div class="eyebrow">MERCADO AO VIVO</div>
+            <div class="market-line"><h1 id="market-symbol">—</h1><span id="market-name">Selecione um robô</span></div>
+          </div>
+          <div class="quote-block"><span id="live-price">—</span><small id="price-change">Aguardando mercado</small></div>
+          <div class="timeframe" aria-label="Timeframe atual"><button class="active" id="timeframe-label">1m</button></div>
+        </header>
+        <div class="chart-wrap">
+          <div id="chart" aria-label="Gráfico de mercado em tempo real"></div>
+          <div id="chart-state" class="chart-state">
+            <span class="loader"></span><strong>Aguardando stream de mercado</strong><small>O histórico aparece assim que o robô conecta à Deriv.</small>
+          </div>
+          <div class="chart-legend"><span class="legend-price">Preço</span><span class="legend-upper">BB superior</span><span class="legend-mid">Média</span><span class="legend-lower">BB inferior</span></div>
+          <a class="tv-attribution" href="https://www.tradingview.com/" target="_blank" rel="noopener">Charts by TradingView</a>
         </div>
+      </section>
 
-        <!-- Grafico em Tempo Real & Configuracoes -->
-        <div class="dashboard-grid">
-            <div class="panel-card">
-                <div class="panel-header">
-                    <div class="panel-title">📈 Volatility 100 Index (R_100) - Ticks & Bandas de Bollinger REAIS</div>
-                    <span id="wsStatus" style="font-size: 12px; color: var(--win-green); font-weight: 600;">● Conectado ao Feed Deriv</span>
-                </div>
-                <div class="chart-container">
-                    <canvas id="liveChart"></canvas>
-                </div>
-            </div>
+      <aside class="inspector">
+        <section class="panel operation-panel">
+          <header class="panel-head"><div><div class="eyebrow">OPERAÇÃO ATUAL</div><h2>Contrato ao vivo</h2></div><span id="operation-state" class="status-chip neutral">SEM POSIÇÃO</span></header>
+          <div id="active-trade" class="active-trade empty">
+            <div class="radar"><i></i><i></i><b></b></div>
+            <strong>Nenhuma posição aberta</strong>
+            <p>O contrato aparecerá aqui desde a compra até a liquidação.</p>
+          </div>
+        </section>
 
-            <div class="panel-card">
-                <div class="panel-header">
-                    <div class="panel-title">🤖 Configuração do Robô (Conta & Ativo)</div>
-                </div>
+        <section class="panel risk-panel">
+          <header class="panel-head"><div><div class="eyebrow">CONTROLE DE RISCO</div><h2>Sessão de hoje</h2></div></header>
+          <div class="metric-grid">
+            <article><span>Resultado</span><strong id="metric-pnl">$ 0,00</strong></article>
+            <article><span>Assertividade</span><strong id="metric-winrate">0%</strong></article>
+            <article><span>Meta</span><strong id="metric-target">$ 0,00</strong></article>
+            <article><span>Stop</span><strong id="metric-stop">$ 0,00</strong></article>
+          </div>
+          <div class="risk-progress"><span><i id="risk-progress-bar"></i></span><small id="risk-progress-text">0% da meta</small></div>
+        </section>
 
-                <div class="form-group">
-                    <label class="form-label">Selecione a Conta</label>
-                    <select id="cfgAccountId" class="form-input">
-                        <option value="">Carregando contas...</option>
-                    </select>
-                </div>
+        <section class="panel bot-actions">
+          <div><span id="selected-bot-name">Nenhum robô</span><small id="selected-bot-strategy">—</small></div>
+          <button id="toggle-bot" class="primary-button" type="button" disabled>INICIAR ROBÔ</button>
+        </section>
+      </aside>
 
-                <div class="form-group">
-                    <label class="form-label">Selecione o Ativo (Mercado)</label>
-                    <select id="cfgSymbol" class="form-input">
-                        <option value="">Carregando ativos...</option>
-                    </select>
-                </div>
-                
-                <div style="display: flex; gap: 10px; margin-bottom: 24px;">
-                    <button class="btn-save-config" onclick="saveBotSettings()" style="flex: 2;">
-                        Aplicar Mudança
-                    </button>
-                    <button class="btn-save-config" onclick="testTelegramNotification()" style="flex: 1; background: #0088cc;">
-                        Testar Telegram 📱
-                    </button>
-                </div>
-
-                <div class="panel-header">
-                    <div class="panel-title">🎛️ Gestão Dinâmica de Risco & Banca</div>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Valor Inicial da Entrada ($ Stake)</label>
-                    <input type="number" id="cfgInitialStake" class="form-input" value="1.0" step="0.1">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Daily Stop Loss ($ USD)</label>
-                    <input type="number" id="cfgStopLoss" class="form-input" value="50.0">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Daily Take Profit ($ USD)</label>
-                    <input type="number" id="cfgTakeProfit" class="form-input" value="100.0">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Stake Máxima Segura ($ USD)</label>
-                    <input type="number" id="cfgMaxStake" class="form-input" value="20.0">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Níveis Máximos de Martingale</label>
-                    <input type="number" id="cfgMaxMartingale" class="form-input" value="3">
-                </div>
-
-                <button class="btn-save-config" onclick="saveRiskConfig()">
-                    Salvar e Aplicar no Robô
-                </button>
-            </div>
+      <section class="history-panel panel">
+        <header class="panel-head">
+          <div><div class="eyebrow">JOURNAL DA SESSÃO</div><h2>Operações recentes</h2></div>
+          <div class="history-summary"><span id="trade-count">0 operações</span><span id="win-count">0 wins</span><span id="loss-count">0 losses</span></div>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Horário</th><th>Ativo</th><th>Direção</th><th>Entrada</th><th>Saída</th><th>Stake</th><th>Resultado</th><th>P&amp;L</th></tr></thead>
+            <tbody id="trade-history"><tr class="empty-row"><td colspan="8">As operações encerradas aparecerão aqui em tempo real.</td></tr></tbody>
+          </table>
         </div>
-
-        <!-- Tabela -->
-        <div class="panel-card">
-            <div class="panel-header">
-                <div class="panel-title">📜 Histórico de Operações Recentes (Conta Demo)</div>
-            </div>
-            <div class="trades-table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID Contrato</th>
-                            <th>Ativo</th>
-                            <th>Tipo</th>
-                            <th>Stake</th>
-                            <th>Payout</th>
-                            <th>Lucro/Prejuízo</th>
-                            <th>Resultado</th>
-                            <th>Horário</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tradesTableBody">
-                        <tr>
-                            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">
-                                Conectando ao robô de operações...
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+      </section>
     </main>
+  </div>
 
-    <div id="toast" class="toast">Configuração salva com sucesso!</div>
+  <div id="drawer-backdrop" class="backdrop" hidden></div>
+  <aside id="bot-config" class="config-drawer" aria-hidden="true">
+    <header><div><div class="eyebrow">CONFIGURAÇÃO OPERACIONAL</div><h2 id="config-title">Editar robô</h2></div><button id="close-config" aria-label="Fechar">×</button></header>
+    <form id="config-form">
+      <input id="config-id" type="hidden">
+      <fieldset><legend>Identidade e mercado</legend>
+        <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: BB Vol 100 — 1m"></label>
+        <label>Conta demo Deriv<input name="account_id" required placeholder="Ex.: VRTC123456"></label>
+        <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
+      </fieldset>
+      <fieldset><legend>Estratégia</legend>
+        <label>Modelo<select name="strategy_id"><option value="bollinger">Bollinger Mean Reversion</option></select></label>
+        <div class="form-row"><label>Período<input name="period" type="number" min="5" value="20"></label><label>Desvio padrão<input name="std_dev" type="number" min="0.5" step="0.1" value="2"></label></div>
+        <div class="form-row"><label>Expiração<input name="duration" type="number" min="1" value="5"></label><label>Unidade<select name="duration_unit"><option value="t">Ticks</option><option value="m">Minutos</option></select></label></div>
+      </fieldset>
+      <fieldset><legend>Gestão de stake</legend>
+        <div class="form-row"><label>Stake inicial (USD)<input name="initial_stake" type="number" min="0.35" step="0.01" value="1"></label><label>Modelo<select name="money_management"><option value="fixed">Mão fixa</option><option value="martingale">Martingale</option><option value="soros">Soros</option></select></label></div>
+        <div class="form-row"><label>Multiplicador<input name="multiplier" type="number" min="1" step="0.1" value="2"></label><label>Níveis máximos<input name="max_levels" type="number" min="0" value="3"></label></div>
+      </fieldset>
+      <fieldset><legend>Proteção da banca</legend>
+        <div class="form-row"><label>Meta diária (USD)<input name="take_profit_daily" type="number" min="0" step="0.01" value="100"></label><label>Stop diário (USD)<input name="stop_loss_daily" type="number" min="0" step="0.01" value="50"></label></div>
+        <div class="form-row"><label>Máx. operações<input name="max_daily_trades" type="number" min="1" value="50"></label><label>Stake máxima<input name="max_single_stake" type="number" min="0.35" step="0.01" value="20"></label></div>
+        <div class="form-row"><label>Losses consecutivos<input name="max_consecutive_losses" type="number" min="1" value="3"></label><label>Cooldown (min)<input name="cooldown_minutes" type="number" min="0" value="15"></label></div>
+      </fieldset>
+      <div id="form-error" class="form-error" hidden></div>
+      <div class="drawer-actions"><button id="cancel-config" type="button" class="secondary-button">Cancelar</button><button type="submit" class="primary-button">SALVAR CONFIGURAÇÃO</button></div>
+    </form>
+  </aside>
 
-    <script>
-        let isRunning = true;
-        let chartInstance = null;
-        const maxDataPoints = 30;
+  <div id="auth-gate" class="auth-gate" hidden>
+    <form id="auth-form" class="auth-card"><span class="brand-mark"><span></span></span><div><div class="eyebrow">ACESSO RESTRITO</div><h2>NexusTrader Desk</h2><p>Informe a chave do dashboard configurada no servidor.</p></div><label>Chave de acesso<input id="api-key" type="password" autocomplete="current-password" required></label><button class="primary-button" type="submit">ENTRAR</button><small id="auth-error"></small></form>
+  </div>
 
-        function initChart() {
-            const ctx = document.getElementById('liveChart').getContext('2d');
-            chartInstance = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Preço Real (R_100)',
-                            data: [],
-                            borderColor: '#FFFFFF',
-                            borderWidth: 2,
-                            tension: 0.2,
-                            pointRadius: 2,
-                            pointBackgroundColor: '#FFFFFF'
-                        },
-                        {
-                            label: 'Banda Superior (BB Upper)',
-                            data: [],
-                            borderColor: '#FF444F',
-                            borderWidth: 1.5,
-                            borderDash: [4, 4],
-                            pointRadius: 0
-                        },
-                        {
-                            label: 'Média Móvel (BB SMA 20)',
-                            data: [],
-                            borderColor: '#FFB300',
-                            borderWidth: 1,
-                            borderDash: [2, 2],
-                            pointRadius: 0
-                        },
-                        {
-                            label: 'Banda Inferior (BB Lower)',
-                            data: [],
-                            borderColor: '#00C853',
-                            borderWidth: 1.5,
-                            borderDash: [4, 4],
-                            pointRadius: 0
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: false,
-                    plugins: {
-                        legend: { labels: { color: '#848E9C', font: { family: 'Inter' } } }
-                    },
-                    scales: {
-                        x: { grid: { color: '#2A2E39' }, ticks: { color: '#848E9C', maxTicksLimit: 8 } },
-                        y: { grid: { color: '#2A2E39' }, ticks: { color: '#848E9C' } }
-                    }
-                }
-            });
-        }
-
-        // Conectar WebSocket ao Feed em Tempo Real
-        function connectLiveWebSocket() {
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws/live`;
-            const ws = new WebSocket(wsUrl);
-
-            ws.onopen = () => {
-                document.getElementById('wsStatus').innerText = '● Conectado ao Feed Deriv (Live)';
-                document.getElementById('wsStatus').style.color = 'var(--win-green)';
-            };
-
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === 'tick') {
-                    updateChartRealData(data);
-                }
-            };
-
-            ws.onclose = () => {
-                document.getElementById('wsStatus').innerText = '○ Reconectando ao Feed...';
-                document.getElementById('wsStatus').style.color = 'var(--loss-red)';
-                setTimeout(connectLiveWebSocket, 3000);
-            };
-        }
-
-        function updateChartRealData(tickData) {
-            const price = tickData.price;
-            const timeStr = new Date(tickData.epoch * 1000).toLocaleTimeString();
-            
-            document.getElementById('lastTickValue').innerText = price.toFixed(2);
-
-            const labels = chartInstance.data.labels;
-            const priceDs = chartInstance.data.datasets[0].data;
-            const upperDs = chartInstance.data.datasets[1].data;
-            const smaDs = chartInstance.data.datasets[2].data;
-            const lowerDs = chartInstance.data.datasets[3].data;
-
-            labels.push(timeStr);
-            priceDs.push(price);
-            upperDs.push(tickData.upper !== null ? tickData.upper : price);
-            smaDs.push(tickData.sma !== null ? tickData.sma : price);
-            lowerDs.push(tickData.lower !== null ? tickData.lower : price);
-
-            if (labels.length > maxDataPoints) {
-                labels.shift();
-                priceDs.shift();
-                upperDs.shift();
-                smaDs.shift();
-                lowerDs.shift();
-            }
-
-            chartInstance.update('none');
-        }
-
-        async function toggleBot() {
-            const endpoint = isRunning ? '/api/v1/bot/stop' : '/api/v1/bot/start';
-            const res = await fetch(endpoint, { method: 'POST' });
-            const data = await res.json();
-            
-            isRunning = !isRunning;
-            const btn = document.getElementById('btnToggleBot');
-            const icon = document.getElementById('botIcon');
-            const txt = document.getElementById('botBtnText');
-            
-            if (isRunning) {
-                btn.classList.remove('stopped');
-                icon.innerText = '🟢';
-                txt.innerText = 'ROBÔ OPERANDO';
-            } else {
-                btn.classList.add('stopped');
-                icon.innerText = '🔴';
-                txt.innerText = 'ROBÔ PAUSADO';
-            }
-            showToast(data.message);
-        }
-
-        async function saveRiskConfig() {
-            const payload = {
-                initial_stake: parseFloat(document.getElementById('cfgInitialStake').value),
-                stop_loss_daily: parseFloat(document.getElementById('cfgStopLoss').value),
-                take_profit_daily: parseFloat(document.getElementById('cfgTakeProfit').value),
-                max_single_stake: parseFloat(document.getElementById('cfgMaxStake').value),
-                max_consecutive_losses: parseInt(document.getElementById('cfgMaxMartingale').value),
-                max_daily_trades: 50,
-                cooldown_minutes: 15
-            };
-
-            const res = await fetch('/api/v1/config/risk', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            const data = await res.json();
-            showToast(data.message || 'Configuração salva no BD!');
-            fetchConfig();
-        }
-
-        async function fetchConfig() {
-            const res = await fetch('/api/v1/config/risk');
-            const json = await res.json();
-            if (json.data) {
-                document.getElementById('cfgInitialStake').value = json.data.initial_stake || 1.0;
-                document.getElementById('cfgStopLoss').value = json.data.stop_loss_daily;
-                document.getElementById('cfgTakeProfit').value = json.data.take_profit_daily;
-                document.getElementById('cfgMaxStake').value = json.data.max_single_stake;
-                document.getElementById('cfgMaxMartingale').value = json.data.max_consecutive_losses;
-                document.getElementById('metaTp').innerText = `$${json.data.take_profit_daily.toFixed(2)}`;
-            }
-        }
-
-        async function fetchTradesAndStats() {
-            try {
-                const statsRes = await fetch('/api/v1/trades/stats');
-                const statsJson = await statsRes.json();
-                if (statsJson.data) {
-                    const pnl = statsJson.data.daily_pnl || 0;
-                    const trades = statsJson.data.daily_trades || 0;
-                    const pnlEl = document.getElementById('pnlValue');
-                    pnlEl.innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} USD`;
-                    pnlEl.className = `metric-value ${pnl >= 0 ? 'positive' : 'negative'}`;
-                    document.getElementById('totalTradesValue').innerText = trades;
-                }
-
-                const listRes = await fetch('/api/v1/trades/list?limit=10');
-                const listJson = await listRes.json();
-                if (listJson.data && listJson.data.length > 0) {
-                    const tbody = document.getElementById('tradesTableBody');
-                    tbody.innerHTML = listJson.data.map(t => `
-                        <tr>
-                            <td>#${t.contract_id || t.id}</td>
-                            <td>${t.symbol}</td>
-                            <td><strong style="color: ${t.contract_type === 'CALL' ? 'var(--win-green)' : 'var(--loss-red)'}">${t.contract_type}</strong></td>
-                            <td>$${(t.stake || 0).toFixed(2)}</td>
-                            <td>$${(t.payout || 0).toFixed(2)}</td>
-                            <td style="color: ${(t.profit || 0) >= 0 ? 'var(--win-green)' : 'var(--loss-red)'}; font-weight: 600;">
-                                ${(t.profit || 0) >= 0 ? '+' : ''}$${(t.profit || 0).toFixed(2)}
-                            </td>
-                            <td><span class="badge-result ${t.result}">${(t.result || 'won').toUpperCase()}</span></td>
-                            <td>${t.created_at ? t.created_at.split(' ')[1] : 'Agora'}</td>
-                        </tr>
-                    `).join('');
-                }
-            } catch (e) {
-                console.error("Erro ao carregar dados:", e);
-            }
-        }
-
-        async function fetchAccountsAndAssets() {
-            try {
-                // Buscar Accounts
-                const accRes = await fetch('/api/v1/bot/accounts');
-                const accJson = await accRes.json();
-                const accSelect = document.getElementById('cfgAccountId');
-                if (accJson.data && accJson.data.length > 0) {
-                    accSelect.innerHTML = accJson.data.map(acc => {
-                        const id = acc.account_id || acc.loginid;
-                        const bal = acc.balance !== undefined ? `$${acc.balance}` : '';
-                        const curr = acc.currency || '';
-                        const type = acc.account_type === 'demo' ? '(Demo)' : '(Real)';
-                        return `<option value="${id}" data-type="${acc.account_type || 'demo'}">${id} ${type} - ${bal} ${curr}</option>`;
-                    }).join('');
-                } else {
-                    accSelect.innerHTML = '<option value="">Nenhuma conta encontrada</option>';
-                }
-
-                // Buscar Assets
-                const assetRes = await fetch('/api/v1/bot/assets');
-                const assetJson = await assetRes.json();
-                const assetSelect = document.getElementById('cfgSymbol');
-                if (assetJson.data) {
-                    assetSelect.innerHTML = assetJson.data.map(a => 
-                        `<option value="${a.symbol}">${a.name} (${a.symbol})</option>`
-                    ).join('');
-                }
-
-                // Buscar Settings Atuais
-                const setRes = await fetch('/api/v1/bot/settings');
-                const setJson = await setRes.json();
-                if (setJson.data) {
-                    if (setJson.data.account_id) accSelect.value = setJson.data.account_id;
-                    if (setJson.data.symbol) assetSelect.value = setJson.data.symbol;
-                    
-                    const accTypeStr = setJson.data.account_type === 'demo' ? 'Demo' : 'Real';
-                    document.getElementById('accId').innerText = `${setJson.data.account_id} (${accTypeStr})`;
-                    
-                    if(setJson.data.account_type === 'demo') {
-                        document.getElementById('accountBadgeTop').style.border = '1px solid var(--border-card)';
-                    } else {
-                        document.getElementById('accountBadgeTop').style.border = '1px solid var(--win-green)';
-                    }
-                }
-            } catch (e) {
-                console.error("Erro ao carregar contas/ativos:", e);
-            }
-        }
-
-        async function saveBotSettings() {
-            const accSelect = document.getElementById('cfgAccountId');
-            const assetSelect = document.getElementById('cfgSymbol');
-            const selectedAcc = accSelect.options[accSelect.selectedIndex];
-            
-            if(!selectedAcc || !selectedAcc.value) return showToast("Selecione uma conta válida.");
-
-            const payload = {
-                account_id: selectedAcc.value,
-                account_type: selectedAcc.getAttribute('data-type') || 'demo',
-                symbol: assetSelect.value
-            };
-
-            const res = await fetch('/api/v1/bot/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            const data = await res.json();
-            showToast(data.message || 'Configurações de robô salvas!');
-            setTimeout(() => window.location.reload(), 2000); // Reload para limpar gráfico
-        }
-
-        async function testTelegramNotification() {
-            try {
-                showToast("Enviando mensagem de teste ao Telegram...");
-                const res = await fetch('/api/v1/notifications/test-telegram', { method: 'POST' });
-                const data = await res.json();
-                showToast(data.message || "Teste concluído!");
-            } catch (e) {
-                showToast("Erro ao testar Telegram.");
-            }
-        }
-
-        function showToast(msg) {
-            const t = document.getElementById('toast');
-            t.innerText = msg;
-            t.style.display = 'block';
-            setTimeout(() => { t.style.display = 'none'; }, 3000);
-        }
-
-        window.onload = () => {
-            initChart();
-            connectLiveWebSocket();
-            fetchAccountsAndAssets();
-            fetchConfig();
-            fetchTradesAndStats();
-            setInterval(fetchTradesAndStats, 4000);
-        };
-    </script>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>
