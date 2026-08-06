@@ -21,6 +21,28 @@ python main.py
 
 O bot publica eventos em `API_BASE_URL`; localmente o padrão é `http://127.0.0.1:8000`.
 
+### Stack local segura conectada à DEMO
+
+Com o `.env` preenchido com as credenciais da Deriv, inicie API e orquestrador juntos:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1
+```
+
+O launcher abre somente `http://127.0.0.1:8990`, usa o banco isolado
+`storage/nexus_trader.dev.db` e força `ALLOW_REAL_TRADING=false`. Assim, uma conta
+REAL é rejeitada pelo backend mesmo que exista no seletor.
+
+No painel:
+
+1. Informe a chave local já presente no `.env`.
+2. Selecione explicitamente a conta identificada como **DEMO**.
+3. Confirme o único perfil suportado: **Donchian+ZigZag**, símbolo **R_75**, gráfico de **1 minuto** e expiração de **2 minutos**.
+4. Inicie somente um bot e acompanhe o histórico inicial, os ticks, a abertura, as atualizações e o fechamento de uma operação demo.
+5. Pare o bot e aguarde `STOPPED` antes de pressionar `Ctrl+C` no launcher.
+
+O launcher não edita o `.env`, não seleciona conta e não inicia o bot automaticamente.
+
 ## Testes
 
 ```bash
