@@ -1,16 +1,11 @@
-from fastapi import APIRouter
+"""Compatibility facade for v2 clients; state always comes from the database."""
+
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional
-from database.repository import DatabaseRepository
+
 from core.auth import AuthManager
 
-router = APIRouter(prefix="/api/v1/bot", tags=["BotControl"])
-db = DatabaseRepository()
-
-# Estado global compartilhado (Sera substituido pelo BD em partes)
-BOT_STATE = {
-    "status": "RUNNING",  # RUNNING, PAUSED, STOPPED
-}
+router = APIRouter(prefix="/api/v1/bot", tags=["Legacy compatibility"])
 
 SUPPORTED_ASSETS = [
     {"symbol": "R_10", "name": "Volatility 10 Index"},
@@ -25,60 +20,64 @@ SUPPORTED_ASSETS = [
     {"symbol": "1HZ100V", "name": "Volatility 100 (1s) Index"},
 ]
 
-@router.get("/status")
-async def get_bot_status():
-    settings = await db.get_bot_settings()
-    BOT_STATE.update(settings)
-    return {"status": "success", "data": BOT_STATE}
-
-@router.get("/settings")
-async def get_bot_settings():
-    settings = await db.get_bot_settings()
-    return {"status": "success", "data": settings}
 
 class BotSettingsSchema(BaseModel):
     account_id: str
-    account_type: str
-    symbol: str
+    account_type: str = "demo"
+    symbol: str = "R_100"
+
+
+async def _default(request):
+    bot = await request.app.state.repository.get_default_bot()
+    if not bot:
+        raise HTTPException(404, "Robo padrao nao encontrado")
+    return bot
+
+
+@router.get("/status")
+async def get_bot_status(request: Request):
+    return {"status": "success", "data": await _default(request)}
+
+
+@router.get("/settings")
+async def get_bot_settings(request: Request):
+    return {"status": "success", "data": await _default(request)}
+
 
 @router.post("/settings")
-async def update_bot_settings(payload: BotSettingsSchema):
-    await db.update_bot_settings(payload.model_dump())
-    return {"status": "success", "message": "Configurações do robô atualizadas. O motor será reiniciado para aplicar.", "data": payload.model_dump()}
+async def update_bot_settings(payload: BotSettingsSchema, request: Request):
+    if payload.account_type.lower() != "demo":
+        raise HTTPException(422, "Somente contas demo estao habilitadas")
+    bot = await _default(request)
+    updated = await request.app.state.repository.update_bot(bot["id"], payload.model_dump())
+    return {"status": "success", "data": updated}
+
+
+@router.post("/start")
+async def start_bot(request: Request):
+    bot = await _default(request)
+    if not bot.get("account_id"):
+        raise HTTPException(422, "Configure a conta demo antes de iniciar")
+    updated = await request.app.state.repository.set_desired_state(bot["id"], "RUNNING")
+    return {"status": "success", "data": updated}
+
+
+@router.post("/stop")
+async def stop_bot(request: Request):
+    bot = await _default(request)
+    updated = await request.app.state.repository.set_desired_state(bot["id"], "STOPPED")
+    return {"status": "success", "data": updated}
+
 
 @router.get("/accounts")
 async def list_accounts():
     auth = AuthManager()
-    accounts = await auth.list_accounts()
-    await auth.close()
-    return {"status": "success", "data": accounts}
+    try:
+        return {"status": "success", "data": await auth.list_accounts()}
+    finally:
+        await auth.close()
+
 
 @router.get("/assets")
 async def list_assets():
     return {"status": "success", "data": SUPPORTED_ASSETS}
-
-@router.post("/start")
-async def start_bot():
-    BOT_STATE["status"] = "RUNNING"
-    return {"status": "success", "message": "NexusTrader INICIADO com sucesso!", "data": BOT_STATE}
-
-@router.post("/stop")
-async def stop_bot():
-    BOT_STATE["status"] = "STOPPED"
-    return {"status": "success", "message": "NexusTrader PAUSADO com sucesso!", "data": BOT_STATE}
-
-from api.websocket_manager import ws_manager
-
-class TickData(BaseModel):
-    type: str
-    symbol: str
-    price: float
-    epoch: int
-    upper: Optional[float] = None
-    lower: Optional[float] = None
-    sma: Optional[float] = None
-
-@router.post("/tick")
-async def broadcast_tick(tick: TickData):
-    await ws_manager.broadcast(tick.dict())
-    return {"status": "success"}

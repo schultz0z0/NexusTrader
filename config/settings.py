@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     def validate_production_secrets(self):
         if self.DOMAIN and not self.INTERNAL_API_TOKEN.strip():
             raise ValueError("INTERNAL_API_TOKEN e obrigatorio quando DOMAIN esta configurado")
+        if self.DOMAIN and not self.DASHBOARD_API_KEY.strip():
+            raise ValueError("DASHBOARD_API_KEY e obrigatorio quando DOMAIN esta configurado")
         if self.EVENT_QUEUE_MAX < 100:
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         return self

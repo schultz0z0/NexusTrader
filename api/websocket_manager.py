@@ -1,42 +1,35 @@
-import asyncio
 import json
-from typing import List
-from fastapi import WebSocket
+from collections import defaultdict
+
 from utils.logger import setup_logger
 
 logger = setup_logger("WebSocketManager")
 
+
 class LiveWebSocketManager:
-    """
-    Gerencia conexoes WebSocket ativas com o Dashboard Web
-    e transmite ticks/indicadores em tempo real.
-    """
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self._connections = defaultdict(set)
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, bot_id, websocket, snapshot):
         await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"Dashboard Web conectado via WebSocket. Total conexoes: {len(self.active_connections)}")
+        self._connections[bot_id].add(websocket)
+        await websocket.send_json({"type": "snapshot", "bot_id": bot_id, "data": snapshot})
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            logger.info("Dashboard Web desconectado.")
+    def disconnect(self, bot_id, websocket):
+        self._connections[bot_id].discard(websocket)
+        if not self._connections[bot_id]:
+            self._connections.pop(bot_id, None)
 
-    async def broadcast(self, data: dict):
-        if not self.active_connections:
-            return
-            
-        message = json.dumps(data)
-        to_remove = []
-        for connection in self.active_connections:
+    async def broadcast(self, bot_id, event):
+        stale = []
+        for websocket in tuple(self._connections.get(bot_id, ())):
             try:
-                await connection.send_text(message)
+                await websocket.send_text(json.dumps(event))
             except Exception:
-                to_remove.append(connection)
-                
-        for conn in to_remove:
-            self.disconnect(conn)
+                stale.append(websocket)
+        for websocket in stale:
+            self.disconnect(bot_id, websocket)
+
 
 ws_manager = LiveWebSocketManager()
+

@@ -11,6 +11,17 @@ class SettingsContractTests(unittest.TestCase):
                 DERIV_API_TOKEN="test-token",
                 DOMAIN="trade.example.com",
                 INTERNAL_API_TOKEN="",
+                DASHBOARD_API_KEY="dashboard-secret",
+            )
+
+    def test_dashboard_key_must_not_be_empty_in_production(self):
+        with self.assertRaises(ValueError):
+            Settings(
+                DERIV_APP_ID="test-app",
+                DERIV_API_TOKEN="test-token",
+                DOMAIN="trade.example.com",
+                INTERNAL_API_TOKEN="internal-secret",
+                DASHBOARD_API_KEY="",
             )
 
     def test_demo_execution_is_default(self):

@@ -214,6 +214,11 @@ class DatabaseRepository:
             async with db.execute("SELECT * FROM bot_instances WHERE id = ?", (bot_id,)) as cursor:
                 return self._decode_bot(await cursor.fetchone())
 
+    async def delete_bot(self, bot_id: str):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("DELETE FROM bot_instances WHERE id = ?", (bot_id,))
+            await db.commit()
+
     async def get_default_bot(self):
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             db.row_factory = aiosqlite.Row
