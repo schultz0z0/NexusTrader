@@ -171,7 +171,10 @@ class BotSession:
                 await self._publish("risk.blocked", reason="circuit_breaker", remaining_seconds=remaining)
                 await asyncio.sleep(1)
                 continue
-            signal = strategy.analyze(self._market_data.get_tick_history(symbol))
+            signal = strategy.analyze(
+                self._market_data.get_tick_history(symbol),
+                candles=self._market_data.get_candle_history(symbol)
+            )
             if not signal:
                 await asyncio.sleep(0.2)
                 continue

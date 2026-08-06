@@ -57,6 +57,10 @@ class LiveStore:
                 "timeframe_seconds": event.get("timeframe_seconds", 60),
                 "points": list(event.get("points", []))[-self.history_limit:],
             }
+            if "donchian" in event:
+                state["market"]["donchian"] = deepcopy(event["donchian"])
+            if "zigzag" in event:
+                state["market"]["zigzag"] = deepcopy(event["zigzag"])
         elif event_type == "market.tick":
             state["last_tick"] = deepcopy(event)
             point = (

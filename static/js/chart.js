@@ -39,6 +39,7 @@ export class TradingChart {
     this.upper = this.addSeries(LightweightCharts.LineSeries, { ...bandOptions, color: COLORS.band });
     this.middle = this.addSeries(LightweightCharts.LineSeries, { ...bandOptions, color: COLORS.middle, lineStyle: 2 });
     this.lower = this.addSeries(LightweightCharts.LineSeries, { ...bandOptions, color: COLORS.band });
+    this.zigzag = this.addSeries(LightweightCharts.LineSeries, { color: "#f4bd50", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
   }
 
   setHistory(market) {
@@ -49,9 +50,10 @@ export class TradingChart {
     this.contextKey = contextKey;
     const points = (market?.points || []).filter((point) => Number.isFinite(point.time));
     this.primary.setData(points);
-    this.upper.setData([]);
-    this.middle.setData([]);
-    this.lower.setData([]);
+    this.upper.setData(market?.donchian?.upper || []);
+    this.middle.setData(market?.donchian?.middle || []);
+    this.lower.setData(market?.donchian?.lower || []);
+    this.zigzag.setData(market?.zigzag || []);
     this.chart.timeScale().fitContent();
   }
 
@@ -59,9 +61,11 @@ export class TradingChart {
     const point = this.mode === "line" ? { time: event.epoch, value: event.price } : event.candle;
     if (point?.time) this.primary.update(point);
     const bb = event.bollinger || {};
-    if (bb.upper != null) this.upper.update({ time: event.epoch, value: bb.upper });
-    if (bb.middle != null) this.middle.update({ time: event.epoch, value: bb.middle });
-    if (bb.lower != null) this.lower.update({ time: event.epoch, value: bb.lower });
+    const bandTime = point?.time || event.epoch;
+    if (bb.upper != null) this.upper.update({ time: bandTime, value: bb.upper });
+    if (bb.middle != null) this.middle.update({ time: bandTime, value: bb.middle });
+    if (bb.lower != null) this.lower.update({ time: bandTime, value: bb.lower });
+    if (event.zigzag) this.zigzag.setData(event.zigzag);
   }
 
   showTrade(trade) {

@@ -16,11 +16,17 @@ class DonchianZigZagStrategy(BaseStrategy):
         super().__init__(money_manager or MoneyManager())
         self.period = 21
         self.zigzag_dev = 1.0 # 1%
-        # Parametros fixos exigidos pela estrategia
         self.duration = 2
         self.duration_unit = 'm'
+        self._last_signal_time = 0
         
         logger.info("Estrategia Donchian ZigZag inicializada.")
+
+    def name(self) -> str:
+        return f"DonchianZigZag({self.period}, {self.zigzag_dev})"
+
+    def get_contract_params(self) -> dict:
+        return {"duration": self.duration, "duration_unit": self.duration_unit}
 
     def _calculate_donchian(self, df: pd.DataFrame) -> pd.DataFrame:
         df['donchian_upper'] = df['high'].rolling(window=self.period).max()
@@ -28,14 +34,10 @@ class DonchianZigZagStrategy(BaseStrategy):
         return df
         
     def analyze(self, ticks: List[Dict[str, Any]], candles: Optional[List[Dict[str, Any]]] = None) -> Optional[Signal]:
-        if len(ticks) < self.period:
+        if not candles or len(candles) < self.period:
             return None
             
-        # O MarketDataHandler envia `ticks` contendo apenas 'quote' e 'epoch'.
-        # Como o robô roda em timeframe de 1m, criamos o dataframe com os precos 
-        # (close simulando o tick) para a matematica do Donchian funcionar.
-        quotes = [t['quote'] for t in ticks]
-        df = pd.DataFrame({'high': quotes, 'low': quotes, 'close': quotes})
+        df = pd.DataFrame(candles)
         
         # Calcula Donchian
         df = self._calculate_donchian(df)
@@ -47,8 +49,8 @@ class DonchianZigZagStrategy(BaseStrategy):
         d_lower = current_candle['donchian_lower']
         
         # Preco atual e tempo
-        current_price = quotes[-1]
-        last_time = ticks[-1].get('epoch', 0)
+        current_price = ticks[-1]['quote'] if ticks else df.iloc[-1]['close']
+        last_time = ticks[-1].get('epoch', 0) if ticks else df.iloc[-1]['time']
         
         if last_time <= self._last_signal_time:
             return None
