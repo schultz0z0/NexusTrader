@@ -4,7 +4,10 @@ export class TradingChart {
   constructor(container) {
     this.container = container;
     this.mode = null;
+    this.contextKey = null;
     this.markers = [];
+    this.markerMap = new Map();
+    this.markerPrimitive = null;
     this.priceLine = null;
     this.chart = LightweightCharts.createChart(container, {
       width: container.clientWidth, height: container.clientHeight,
@@ -25,10 +28,10 @@ export class TradingChart {
     return this.chart.addLineSeries(options);
   }
 
-  ensureMode(mode) {
-    if (this.mode === mode) return;
+  ensureMode(mode, force = false) {
+    if (this.mode === mode && !force) return;
     [this.primary, this.upper, this.middle, this.lower].filter(Boolean).forEach((series) => this.chart.removeSeries(series));
-    this.mode = mode; this.markers = []; this.priceLine = null;
+    this.mode = mode; this.markers = []; this.markerMap.clear(); this.markerPrimitive = null; this.priceLine = null;
     this.primary = mode === "line"
       ? this.addSeries(LightweightCharts.LineSeries, { color: COLORS.line, lineWidth: 2, crosshairMarkerRadius: 3, priceLineVisible: true })
       : this.addSeries(LightweightCharts.CandlestickSeries, { upColor: COLORS.up, downColor: COLORS.down, borderVisible: false, wickUpColor: COLORS.up, wickDownColor: COLORS.down });
@@ -39,9 +42,16 @@ export class TradingChart {
   }
 
   setHistory(market) {
-    this.ensureMode(market?.mode || "candles");
+    const mode = market?.mode || "candles";
+    const contextKey = `${market?.symbol || ""}:${Number(market?.timeframe_seconds || 60)}:${mode}`;
+    const contextChanged = contextKey !== this.contextKey;
+    this.ensureMode(mode, contextChanged);
+    this.contextKey = contextKey;
     const points = (market?.points || []).filter((point) => Number.isFinite(point.time));
     this.primary.setData(points);
+    this.upper.setData([]);
+    this.middle.setData([]);
+    this.lower.setData([]);
     this.chart.timeScale().fitContent();
   }
 
@@ -60,20 +70,27 @@ export class TradingChart {
     const price = Number(trade.entry_spot);
     if (Number.isFinite(price)) this.priceLine = this.primary.createPriceLine({ price, color: "#f4bd50", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: `ENTRY ${trade.contract_type || ""}` });
     if (trade.purchase_time) {
-      this.markers.push({ time: trade.purchase_time, position: trade.contract_type === "CALL" ? "belowBar" : "aboveBar", color: trade.contract_type === "CALL" ? COLORS.up : COLORS.down, shape: trade.contract_type === "CALL" ? "arrowUp" : "arrowDown", text: trade.contract_type });
+      this.upsertMarker(`entry:${trade.contract_id}`, { time: trade.purchase_time, position: trade.contract_type === "CALL" ? "belowBar" : "aboveBar", color: trade.contract_type === "CALL" ? COLORS.up : COLORS.down, shape: trade.contract_type === "CALL" ? "arrowUp" : "arrowDown", text: trade.contract_type });
       this.applyMarkers();
     }
   }
 
   closeTrade(trade) {
-    if (trade?.expiry_time) this.markers.push({ time: trade.expiry_time, position: "aboveBar", color: Number(trade.profit) >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: Number(trade.profit) >= 0 ? "WIN" : "LOSS" });
+    if (trade?.expiry_time) this.upsertMarker(`exit:${trade.contract_id}`, { time: trade.expiry_time, position: "aboveBar", color: Number(trade.profit) >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: Number(trade.profit) >= 0 ? "WIN" : "LOSS" });
     this.applyMarkers();
     this.showTrade(null);
   }
 
+  upsertMarker(key, marker) {
+    this.markerMap.set(key, marker);
+    this.markers = [...this.markerMap.values()].sort((a, b) => a.time - b.time);
+  }
+
   applyMarkers() {
     const ordered = [...this.markers].sort((a, b) => a.time - b.time);
-    if (LightweightCharts.createSeriesMarkers) LightweightCharts.createSeriesMarkers(this.primary, ordered);
-    else this.primary.setMarkers?.(ordered);
+    if (LightweightCharts.createSeriesMarkers) {
+      if (!this.markerPrimitive) this.markerPrimitive = LightweightCharts.createSeriesMarkers(this.primary, ordered);
+      else this.markerPrimitive.setMarkers(ordered);
+    } else this.primary.setMarkers?.(ordered);
   }
 }
