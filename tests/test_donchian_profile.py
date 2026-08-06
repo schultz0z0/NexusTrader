@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from api.routes.bots import BotPayload
 from database.repository import DatabaseRepository
 from strategies.donchian_zigzag import DonchianZigZagStrategy
+from utils.indicators import calculate_zigzag
 
 
 class DonchianProfileTests(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +45,37 @@ class DonchianProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.zigzag_dev, 0.0)
         self.assertEqual(strategy.duration, 2)
         self.assertEqual(strategy.duration_unit, "m")
+
+    async def test_production_zigzag_preserves_alternating_pivots(self):
+        candles = [
+            {"time": index * 60, "high": high, "low": low, "close": (high + low) / 2}
+            for index, (high, low) in enumerate(
+                [
+                    (100, 99),
+                    (101, 100),
+                    (102, 101),
+                    (101, 98),
+                    (100, 97),
+                    (103, 99),
+                    (104, 100),
+                    (101, 96),
+                ]
+            )
+        ]
+
+        pivots = calculate_zigzag(candles, depth=3, deviation=0.0, backstep=1)
+
+        self.assertGreaterEqual(len(pivots), 2)
+        self.assertTrue(all(left["type"] != right["type"] for left, right in zip(pivots, pivots[1:])))
+        self.assertTrue(all(point["time"] in {candle["time"] for candle in candles} for point in pivots))
+
+    async def test_production_zigzag_requires_its_configured_depth(self):
+        candles = [
+            {"time": index * 60, "high": 100 + index, "low": 99 + index, "close": 99.5 + index}
+            for index in range(14)
+        ]
+
+        self.assertEqual(calculate_zigzag(candles, depth=15, deviation=0.0, backstep=3), [])
 
 
 if __name__ == "__main__":
