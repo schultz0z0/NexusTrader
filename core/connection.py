@@ -44,6 +44,7 @@ class NexusConnection:
         self._listener_task = None
         self._reconnect_task = None
         self._heartbeat_task = None
+        self._handler_tasks = set()
         self._subscriptions: Dict[str, SubscriptionRecord] = {}
         self._pending_requests = {}
         self._pending_subscription_keys = {}
@@ -131,16 +132,23 @@ class NexusConnection:
                     if len(matches) == 1:
                         record = matches[0]
                 if record:
-                    try:
-                        await record.handler(data)
-                    except Exception as exc:
-                        logger.exception(f"Falha no handler da subscription {record.key}: {exc}")
+                    task = asyncio.create_task(self._run_handler(record, data))
+                    self._handler_tasks.add(task)
+                    task.add_done_callback(self._handler_tasks.discard)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if not self._closing:
                 logger.warning(f"Conexao WebSocket interrompida: {exc}")
                 await self._handle_connection_loss(exc)
+
+    async def _run_handler(self, record, data):
+        try:
+            await record.handler(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"Falha no handler da subscription {record.key}: {exc}")
 
     async def _handle_connection_loss(self, exc):
         self._is_connected = False
@@ -283,6 +291,7 @@ class NexusConnection:
         self._fail_pending(ConnectionError("Connection closed"))
 
         tasks = [self._reconnect_task, self._heartbeat_task, self._listener_task]
+        tasks.extend(self._handler_tasks)
         for task in tasks:
             if task and not task.done():
                 task.cancel()

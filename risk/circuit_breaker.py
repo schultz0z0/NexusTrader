@@ -34,7 +34,7 @@ class CircuitBreaker:
             self.consecutive_losses += 1
             logger.warning(f"CircuitBreaker: Loss consecutivo #{self.consecutive_losses}/{self.max_consecutive_losses}")
             
-            if self.consecutive_losses > self.max_consecutive_losses:
+            if self.consecutive_losses >= self.max_consecutive_losses:
                 self.tripped_at = time.time()
                 logger.error(
                     f"[CIRCUIT BREAKER] DISPARADO! {self.consecutive_losses} losses consecutivos. "

@@ -40,6 +40,8 @@ class FakeWebSocket:
             }))
         elif "ping" in request:
             await self.incoming.put(json.dumps({"msg_type": "ping", "req_id": request["req_id"], "ping": "pong"}))
+        elif "forget" in request:
+            await self.incoming.put(json.dumps({"msg_type": "forget", "req_id": request["req_id"], "forget": request["forget"]}))
 
     def __aiter__(self):
         return self
@@ -102,6 +104,19 @@ class ConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(second_requests), 1)
         self.assertEqual(self.auth.requested_accounts, ["DOT-DEMO", "DOT-DEMO"])
         self.assertGreaterEqual(len(received), 2)
+
+    async def test_subscription_handler_can_unsubscribe_without_blocking_listener(self):
+        handler_finished = asyncio.Event()
+
+        async def handler(message):
+            await self.connection.unsubscribe("ticks:R_100")
+            handler_finished.set()
+
+        await self.connection.connect("DOT-DEMO")
+        await self.connection.subscribe("ticks:R_100", {"ticks": "R_100"}, handler)
+        await asyncio.wait_for(handler_finished.wait(), timeout=0.2)
+
+        self.assertEqual(self.connection._pending_requests, {})
 
 
 if __name__ == "__main__":

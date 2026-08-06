@@ -1,12 +1,15 @@
 from utils.logger import setup_logger
+from trading.safety import ensure_demo_account
 
 logger = setup_logger("OrderExecutor")
 
 class OrderExecutor:
-    def __init__(self, connection):
+    def __init__(self, connection, account_type="demo"):
         self.connection = connection
+        self.account_type = account_type
 
     async def buy(self, proposal_id: str, price: float) -> dict:
+        ensure_demo_account(self.account_type)
         request = {
             "buy": proposal_id,
             "price": price
