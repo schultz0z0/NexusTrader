@@ -44,5 +44,6 @@ logs/
 # IDE & OS files
 .vscode/
 .idea/
+.worktrees/
 .DS_Store
 Thumbs.db
