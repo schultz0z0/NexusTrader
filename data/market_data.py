@@ -64,52 +64,9 @@ class MarketDataHandler:
             
         donchian = {"upper": upper_hist, "middle": middle_hist, "lower": lower_hist}
         
-        # ZigZag History (Depth 15, Deviation 1%)
-        last_pivot_type = None
-        last_val = points[0].get("close", points[0].get("value", 0))
-        last_time = points[0]["time"]
-        zigzag = [{"time": last_time, "value": last_val}]
-        
-        dev = 0.01 # 1%
-        
-        for i in range(1, len(points)):
-            c = points[i]
-            high = c.get("high", c.get("value", c.get("close", 0)))
-            low = c.get("low", c.get("value", c.get("close", 0)))
-            t = c["time"]
-            
-            if last_pivot_type == 1:
-                if high > last_val:
-                    last_val = high
-                    last_time = t
-                    zigzag[-1] = {"time": last_time, "value": last_val}
-                elif low < last_val * (1 - dev):
-                    last_pivot_type = -1
-                    last_val = low
-                    last_time = t
-                    zigzag.append({"time": last_time, "value": last_val})
-            elif last_pivot_type == -1:
-                if low < last_val:
-                    last_val = low
-                    last_time = t
-                    zigzag[-1] = {"time": last_time, "value": last_val}
-                elif high > last_val * (1 + dev):
-                    last_pivot_type = 1
-                    last_val = high
-                    last_time = t
-                    zigzag.append({"time": last_time, "value": last_val})
-            else:
-                if high > last_val * (1 + dev):
-                    last_pivot_type = 1
-                    last_val = high
-                    last_time = t
-                    zigzag.append({"time": last_time, "value": last_val})
-                elif low < last_val * (1 - dev):
-                    last_pivot_type = -1
-                    last_val = low
-                    last_time = t
-                    zigzag.append({"time": last_time, "value": last_val})
-                    
+        from utils.indicators import calculate_zigzag
+        zigzag = calculate_zigzag(points, depth=15, deviation=1.0, backstep=3)
+
         return donchian, zigzag
 
     async def _load_and_publish_history(self):

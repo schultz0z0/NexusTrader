@@ -61,12 +61,25 @@ class DonchianZigZagStrategy(BaseStrategy):
         is_touching_upper = current_price >= d_upper
         is_touching_lower = current_price <= d_lower
         
-        # Filtro de Deviation (1%) do ZigZag
-        min_recente = df['low'].tail(15).min()
-        max_recente = df['high'].tail(15).max()
+        from utils.indicators import calculate_zigzag
         
-        valido_para_put = is_touching_upper and (current_price >= min_recente * (1 + self.zigzag_dev/100))
-        valido_para_call = is_touching_lower and (current_price <= max_recente * (1 - self.zigzag_dev/100))
+        zz = calculate_zigzag(candles, depth=15, deviation=self.zigzag_dev, backstep=3)
+        if not zz or len(zz) < 2:
+            return None
+            
+        last_pivot = zz[-2]
+        current_leg_type = zz[-1]["type"]
+        
+        valido_para_put = False
+        valido_para_call = False
+        
+        if is_touching_upper and last_pivot["type"] == "low" and current_leg_type == "high":
+            if current_price >= last_pivot["value"] * (1 + self.zigzag_dev/100):
+                valido_para_put = True
+                
+        if is_touching_lower and last_pivot["type"] == "high" and current_leg_type == "low":
+            if current_price <= last_pivot["value"] * (1 - self.zigzag_dev/100):
+                valido_para_call = True
         
         if valido_para_put:
             logger.info(f"Preço {current_price} tocou Donchian Upper e validou ZigZag 1%. Sinal PUT.")
