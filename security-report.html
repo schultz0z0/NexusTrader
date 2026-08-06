@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security Audit — NexusTrader</title>
+<style>
+:root{--critical:#dc2626;--high:#ea580c;--medium:#ca8a04;--low:#16a34a;--info:#6b7280;--pass:#16a34a;--fail:#dc2626;--bg:#0f172a;--surface:#1e293b;--surface2:#334155;--text:#f1f5f9;--muted:#94a3b8;--border:#475569;--accent:#3b82f6}
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:Inter,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;padding:2rem;max-width:1200px;margin:auto}h1{font-size:1.75rem}h2{font-size:1.35rem;margin:2.5rem 0 1rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}h3{font-size:1.1rem;margin:1.5rem 0 .5rem}p,li{color:var(--muted)}code,pre{background:#0f172a;border:1px solid var(--border);border-radius:4px}code{padding:.15em .4em}pre{padding:1rem;overflow:auto;margin:.75rem 0}pre code{border:0;padding:0}.badge{display:inline-block;padding:.2em .6em;border-radius:4px;font-size:.75rem;font-weight:700;color:white;text-transform:uppercase}.badge-medium{background:var(--medium)}.badge-pass{background:var(--pass)}.badge-fail{background:var(--fail)}.badge-info{background:var(--info)}.summary-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem}.summary-card{background:var(--surface);border-radius:8px;padding:1rem;text-align:center;border-left:4px solid var(--border)}.summary-card .count{font-size:2rem;font-weight:700}.summary-card.medium{border-left-color:var(--medium)}.summary-card.medium .count{color:var(--medium)}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{padding:.6rem .8rem;text-align:left;border-bottom:1px solid var(--border)}th{background:var(--surface)}.finding,.pentest-item{background:var(--surface);border-radius:8px;padding:1.25rem;margin:1rem 0}.finding{border-left:4px solid var(--medium)}.finding-header{display:flex;gap:.75rem;align-items:center}.finding-title{font-weight:600}.finding-meta{color:var(--muted);font-size:.8rem}.filters{display:flex;gap:.5rem}.filter-btn{padding:.4em .8em;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--muted);cursor:pointer}.filter-btn.active,.filter-btn:hover{background:var(--accent);color:white}.meta-grid{display:grid;grid-template-columns:auto 1fr;gap:.25rem 1rem;margin:1rem 0}.meta-grid dt{color:var(--muted)}details summary{cursor:pointer;padding:.5rem;font-weight:600}.result-pass{color:var(--pass);font-weight:700}.result-fail{color:var(--fail);font-weight:700}.cve-not-exploitable{color:var(--pass)}.cve-review{color:var(--medium)}@media(max-width:768px){body{padding:1rem}.summary-grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<h1>🛡️ Security Audit Report</h1>
+<dl class="meta-grid">
+<dt>Repository</dt><dd>schultz0z0/NexusTrader</dd>
+<dt>Date</dt><dd>2026-08-06</dd>
+<dt>Target</dt><dd>main, produção passiva e localhost Deriv DEMO</dd>
+<dt>Methodology</dt><dd>SAST + revisão de histórico Git + produção passiva + integração ativa localhost/DEMO</dd>
+<dt>Scan ID</dt><dd>6fd8dce1-389f-4791-be3f-f40b4eb9d9d0</dd>
+</dl>
+<h2>Resumo</h2>
+<div class="summary-grid">
+<div class="summary-card"><div class="count">0</div><div>Critical</div></div>
+<div class="summary-card"><div class="count">0</div><div>High</div></div>
+<div class="summary-card medium"><div class="count">4</div><div>Medium</div></div>
+<div class="summary-card"><div class="count">0</div><div>Low</div></div>
+<div class="summary-card"><div class="count">0</div><div>Info</div></div>
+</div>
+<p>Quatro achados confirmados: três foram corrigidos e validados nesta auditoria. Permanece aberta a rotação do token Telegram comprometido no histórico. Nenhum PAT Deriv atual foi encontrado no histórico.</p>
+<h2>Achados</h2>
+<div class="filters"><button class="filter-btn active" onclick="filterFindings('all')">Todos</button><button class="filter-btn" onclick="filterFindings('medium')">Medium</button><button class="filter-btn" onclick="filterFindings('open')">Abertos</button><button class="filter-btn" onclick="filterFindings('fixed')">Corrigidos</button></div>
+<div class="finding" data-severity="medium" data-status="open">
+<div class="finding-header"><span class="badge badge-medium">MEDIUM</span><span class="finding-title">Token Telegram ativo exposto no histórico Git — ABERTO</span></div>
+<div class="finding-meta"><code>deploy/DEPLOY.md:43</code> · CWE-798</div>
+<p>O token ativo coincide com credencial publicada no commit 43789a1. O valor foi deliberadamente omitido.</p>
+<details><summary>Evidência</summary><pre><code>Git histórico → configuração Telegram → api.telegram.org/bot{token}</code></pre></details>
+<details><summary>Remediação</summary><p>Revogar no BotFather, emitir novo token, atualizar o VPS e depois reescrever o histórico.</p></details>
+</div>
+<div class="finding" data-severity="medium" data-status="fixed">
+<div class="finding-header"><span class="badge badge-medium">MEDIUM</span><span class="finding-title">Dashboard suscetível a clickjacking — CORRIGIDO</span></div>
+<div class="finding-meta"><code>api/app.py:63</code> · CWE-1021</div>
+<p>Produção não restringia framing e controles autenticados podiam ser sobrepostos por site externo.</p>
+<details><summary>Evidência</summary><pre><code>Resposta anterior: sem X-Frame-Options e sem CSP frame-ancestors.</code></pre></details>
+<details><summary>Remediação</summary><p>Middleware envia X-Frame-Options: DENY, CSP frame-ancestors 'none' e Referrer-Policy: no-referrer. Teste HTTP passou.</p></details>
+</div>
+<div class="finding" data-severity="medium" data-status="fixed">
+<div class="finding-header"><span class="badge badge-medium">MEDIUM</span><span class="finding-title">Chave de controle exposta na URL WebSocket — CORRIGIDO</span></div>
+<div class="finding-meta"><code>static/js/api.js:35</code> · CWE-598</div>
+<p>A chave persistente era incluída na query e reproduzida no access log Uvicorn.</p>
+<details><summary>Evidência</summary><pre><code>localStorage → websocketUrl ?key=... → access log.</code></pre></details>
+<details><summary>Remediação</summary><p>Ticket aleatório bot-scoped, TTL 20 segundos e uso único. A chave permanece apenas no header da emissão do ticket.</p></details>
+</div>
+<div class="finding" data-severity="medium" data-status="fixed">
+<div class="finding-header"><span class="badge badge-medium">MEDIUM</span><span class="finding-title">Autenticação fail-open fora do Compose — CORRIGIDO</span></div>
+<div class="finding-meta"><code>api/auth.py:6</code> · CWE-306</div>
+<p>Segredos vazios aceitavam chamadas quando o processo era iniciado diretamente sem DOMAIN.</p>
+<details><summary>Evidência</summary><pre><code>if expected and supplied != expected: reject
+expected vazio → nenhuma rejeição.</code></pre></details>
+<details><summary>Remediação</summary><p>Fail-closed por padrão no Settings e nas dependências. Bypass somente em DEV_MODE explícito; launcher usa loopback.</p></details>
+</div>
+<h2>Análise de CVEs × Contexto</h2>
+<table><thead><tr><th>#</th><th>Advisory</th><th>Pacote</th><th>Precondição</th><th>Presente?</th><th>Sev. real</th><th>Razão</th></tr></thead><tbody>
+<tr><td>1</td><td><a href="https://github.com/advisories/GHSA-mf9w-mj56-hr94">GHSA-mf9w-mj56-hr94</a></td><td>python-dotenv 1.0.1</td><td>Uso de set_key/unset_key com input não confiável</td><td class="cve-not-exploitable">Não</td><td><span class="badge badge-info">INFO</span></td><td>Funções vulneráveis não são chamadas; atualizar por higiene.</td></tr>
+<tr><td>2</td><td><a href="https://github.com/advisories?query=starlette">Advisories Starlette</a></td><td>starlette 0.36.3</td><td>Varia por multipart/range e versão</td><td class="cve-review">Revisar</td><td><span class="badge badge-info">INFO</span></td><td>Não há upload multipart no app; atualização deve acompanhar FastAPI e suíte.</td></tr>
+</tbody></table>
+<h2>Pentest — testes executados</h2>
+<div class="pentest-item"><strong>P1: Controle REST sem chave em produção </strong><span class="result-pass">PASS</span><details><summary>Detalhes</summary><p>GET /api/v1/bots retornou 401; health permaneceu público.</p></details></div>
+<div class="pentest-item"><strong>P2: Cabeçalhos anti-framing em produção </strong><span class="result-fail">FAIL → FIXED</span><details><summary>Detalhes</summary><p>Ausentes em produção; middleware local validado.</p></details></div>
+<div class="pentest-item"><strong>P3: Chave na query WebSocket </strong><span class="result-fail">FAIL → FIXED</span><details><summary>Detalhes</summary><p>Vazamento reproduzido no log local; ticket single-use passou em teste e navegador.</p></details></div>
+<div class="pentest-item"><strong>P4: Lifecycle de contrato DEMO 2m </strong><span class="result-fail">EXTERNAL BLOCK</span><details><summary>Detalhes</summary><p>A Deriv retornou is_expired=1, is_settleable=1, is_sold=0 após date_settlement. sell retornou BetExpired e sell_expired não é reconhecido na API nova.</p></details></div>
+<div class="pentest-item"><strong>P5: Stack e gráfico localhost </strong><span class="result-pass">PASS</span><details><summary>Detalhes</summary><p>500 candles, tick vivo, Donchian, ZigZag, WebSocket e zero erros de console.</p></details></div>
+<h2>Verificado seguro ✅</h2>
+<table><thead><tr><th>Teste</th><th>Resultado</th><th>Evidência</th></tr></thead><tbody>
+<tr><td>SQL injection</td><td><span class="badge badge-pass">PASS</span></td><td>Statements usam parâmetros; nomes de colunas têm allowlist.</td></tr>
+<tr><td>CORS</td><td><span class="badge badge-pass">PASS</span></td><td>allow_origins vazio e credentials false.</td></tr>
+<tr><td>Conta real no perfil dev</td><td><span class="badge badge-pass">PASS</span></td><td>ALLOW_REAL_TRADING=false e conta DEMO validada no backend.</td></tr>
+<tr><td>Segredos Deriv atuais no Git</td><td><span class="badge badge-pass">PASS</span></td><td>PAT, internal token e dashboard key atuais não encontrados.</td></tr>
+<tr><td>Estratégia</td><td><span class="badge badge-pass">PASS</span></td><td>Zero diff nos arquivos de Donchian+ZigZag e indicadores.</td></tr>
+</tbody></table>
+<h2>Remediação prioritária</h2>
+<table><thead><tr><th>#</th><th>Ação</th><th>Esforço</th><th>Impacto</th></tr></thead><tbody>
+<tr><td>1</td><td>Rotacionar token Telegram no BotFather</td><td>Baixo</td><td>Fecha o único achado aberto</td></tr>
+<tr><td>2</td><td>Abrir chamado Deriv com resposta de settlement sanitizada</td><td>Baixo</td><td>Desbloqueia lifecycle real</td></tr>
+<tr><td>3</td><td>Adicionar reconciliação de compra ambígua via transaction stream</td><td>Médio</td><td>Evita contrato órfão</td></tr>
+<tr><td>4</td><td>Persistir estado de risk/money management</td><td>Médio</td><td>Consistência após restart</td></tr>
+<tr><td>5</td><td>Atualizar FastAPI/Starlette/dotenv com suíte completa</td><td>Médio</td><td>Reduz dívida de dependências</td></tr>
+</tbody></table>
+<script>
+function filterFindings(filter){document.querySelectorAll('.finding').forEach(function(el){el.style.display=(filter==='all'||el.dataset.severity===filter||el.dataset.status===filter)?'':'none'});document.querySelectorAll('.filter-btn').forEach(function(btn){btn.classList.toggle('active',btn.textContent.toLowerCase().indexOf(filter)>=0||(filter==='all'&&btn.textContent==='Todos'))})}
+</script>
+<footer style="margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);text-align:center;font-size:.8rem;color:var(--muted)">Generated by <strong>security-specialist</strong> skill by <a href="https://github.com/fabricioctelles/skills" style="color:var(--accent)">github.com/fabricioctelles/skills</a></footer>
+</body>
+</html>

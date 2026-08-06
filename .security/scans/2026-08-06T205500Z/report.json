@@ -1,0 +1,101 @@
+{
+  "scan_metadata": {
+    "scan_id": "6fd8dce1-389f-4791-be3f-f40b4eb9d9d0",
+    "timestamp": "2026-08-06T20:55:00Z",
+    "target": "schultz0z0/NexusTrader main; passive production; active localhost DEMO",
+    "tools_used": [
+      "manual SAST",
+      "git history secret review",
+      "pip-audit",
+      "pytest",
+      "node test",
+      "Playwright CLI",
+      "Deriv authenticated WebSocket DEMO"
+    ],
+    "scan_duration_seconds": 7200
+  },
+  "summary": {
+    "total_findings": 4,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 4,
+      "low": 0,
+      "informational": 0
+    },
+    "by_status": {
+      "open": 1,
+      "fixed": 3,
+      "tracked": 0,
+      "false_positive": 0
+    },
+    "by_category": {
+      "CWE-798": 1,
+      "CWE-1021": 1,
+      "CWE-598": 1,
+      "CWE-306": 1
+    }
+  },
+  "findings": [
+    {
+      "id": "ba6264c2-e46e-4f6b-8333-d72f03f1d49f",
+      "title": "Token Telegram ativo exposto no histórico Git",
+      "severity": "medium",
+      "category": "CWE-798",
+      "location": {
+        "file": "deploy/DEPLOY.md",
+        "line": 43,
+        "function": "historical_deploy_instructions"
+      },
+      "status": "open",
+      "evidence": "Correspondência exata confirmada no commit 43789a1 sem reproduzir o valor.",
+      "rationale": "O token continua recuperável até rotação no BotFather.",
+      "tracking_url": null
+    },
+    {
+      "id": "a8a62986-b8a2-4feb-8a70-d843a922397f",
+      "title": "Dashboard suscetível a clickjacking",
+      "severity": "medium",
+      "category": "CWE-1021",
+      "location": {
+        "file": "api/app.py",
+        "line": 63,
+        "function": "security_headers"
+      },
+      "status": "fixed",
+      "evidence": "Produção não enviava proteção anti-framing; teste HTTP confirma o middleware.",
+      "rationale": "Exigia operador autenticado, mas podia alcançar comandos de trading.",
+      "tracking_url": null
+    },
+    {
+      "id": "9fcd95b0-087c-42ae-9cc6-1ed304a2a6f9",
+      "title": "Chave de controle exposta na URL WebSocket",
+      "severity": "medium",
+      "category": "CWE-598",
+      "location": {
+        "file": "static/js/api.js",
+        "line": 35,
+        "function": "websocketUrl"
+      },
+      "status": "fixed",
+      "evidence": "Query com chave foi reproduzida no access log local.",
+      "rationale": "Ticket bot-scoped, TTL 20s e single-use removeu a chave persistente da URL.",
+      "tracking_url": null
+    },
+    {
+      "id": "16a98fd8-0cfc-44b5-84aa-934e314afc98",
+      "title": "Autenticação fail-open fora do Compose",
+      "severity": "medium",
+      "category": "CWE-306",
+      "location": {
+        "file": "api/auth.py",
+        "line": 6,
+        "function": "require_dashboard_key"
+      },
+      "status": "fixed",
+      "evidence": "Segredo expected vazio aceitava qualquer header na implementação anterior.",
+      "rationale": "Settings e dependências agora falham fechado fora de DEV_MODE explícito.",
+      "tracking_url": null
+    }
+  ]
+}

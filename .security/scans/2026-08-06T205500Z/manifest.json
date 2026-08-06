@@ -1,0 +1,10 @@
+{
+  "scan_id": "6fd8dce1-389f-4791-be3f-f40b4eb9d9d0",
+  "completed_at": "2026-08-06T20:55:00Z",
+  "files": {
+    "findings.json": "498adab2a093a0e16859f3bdade962c8ee54ae40b62ee8893dca514106567ad1",
+    "report.json": "ff61445bf3c25d8f6ad79bfcd4b437dafb41059260ff6290adaad145e3a47022",
+    "security-report.html": "e2b53391c0c54461b06714838a37f51f49177f2d0de1033962cb06ce864803b3",
+    "architecture.md": "4c28ad3e4a2106846244dbdb353133d9d048a2d82cec1a7205cb60ebbb299437"
+  }
+}

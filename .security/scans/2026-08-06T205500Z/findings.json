@@ -1,0 +1,305 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "Token Telegram ativo exposto no histórico Git",
+    "description": "A credencial Telegram carregada no ambiente atual coincide com o token publicado no commit histórico 43789a1. O valor não é reproduzido neste relatório. Estado: aberto até rotação pelo BotFather.",
+    "root_cause": "A documentação de deploy em deploy/DEPLOY.md não evitou a inclusão de credencial real, permitindo recuperação permanente do token pelo histórico Git.",
+    "intended_behavior": "O bot deve receber o token apenas por secret store ou variável de ambiente nunca versionada.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "deploy/DEPLOY.md",
+        "line": 43,
+        "scope": "historical_deploy_instructions",
+        "description": "Commit público armazenou o token e o chat id em texto claro."
+      },
+      {
+        "kind": "propagation",
+        "file": "notifications/telegram_notifier.py",
+        "line": 14,
+        "scope": "__init__",
+        "description": "A aplicação carrega o mesmo token ativo da configuração."
+      },
+      {
+        "kind": "sink",
+        "file": "notifications/telegram_notifier.py",
+        "line": 16,
+        "scope": "__init__",
+        "description": "O token compõe a URL autenticada da Telegram Bot API."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "network_routing",
+        "description": "O atacante consegue ler o histórico do repositório Git."
+      },
+      {
+        "kind": "data_state",
+        "description": "O token ainda não foi revogado no BotFather."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "Leitor não confiável do repositório público.",
+      "payloads": [
+        "Token recuperado do commit histórico, omitido deste relatório."
+      ],
+      "instructions": [
+        "Ler deploy/DEPLOY.md no commit 43789a1.",
+        "Recuperar a credencial publicada.",
+        "Usar a Telegram Bot API com a credencial ainda válida."
+      ],
+      "expected_result": "O atacante assume a identidade do bot e pode enviar alertas falsos ou consultar updates disponíveis."
+    },
+    "remediation": {
+      "strategy": "Revogar imediatamente no BotFather, emitir um token novo, atualizar o ambiente e só depois reescrever o histórico Git.",
+      "code_changes": [
+        {
+          "file_name": "deploy/DEPLOY.md",
+          "fixed_code": "Documentar somente placeholders e secret injection; nunca exemplos reais."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "high",
+        "reason": "A credencial é recuperável por qualquer leitor do histórico."
+      },
+      "impact": {
+        "score": "medium",
+        "reason": "Permite personificação do canal de alertas, mas não expõe diretamente o PAT Deriv."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "A correspondência exata foi verificada localmente sem registrar o segredo."
+    }
+  },
+  {
+    "verdict": "confirmed",
+    "title": "Dashboard suscetível a clickjacking",
+    "description": "Produção não enviava X-Frame-Options nem CSP frame-ancestors. Um site externo podia enquadrar o painel já autenticado e sobrepor controles. Estado: corrigido e testado.",
+    "root_cause": "A criação da aplicação em api/app.py não adicionava política anti-framing, permitindo renderização do dashboard autenticado em iframe externo.",
+    "intended_behavior": "O painel operacional deve ser renderizado apenas como documento top-level da própria origem.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "api/app.py",
+        "line": 114,
+        "scope": "dashboard",
+        "description": "A rota servia o HTML sem proteção de framing."
+      },
+      {
+        "kind": "propagation",
+        "file": "static/js/app.js",
+        "line": 297,
+        "scope": "load",
+        "description": "O painel restaurava a sessão autenticada do operador."
+      },
+      {
+        "kind": "sink",
+        "file": "static/js/app.js",
+        "line": 287,
+        "scope": "toggle-bot click handler",
+        "description": "Clique induzido podia emitir comando de start/stop."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "user_interaction",
+        "description": "Operador autenticado visita uma página controlada pelo atacante e interage com a sobreposição."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "Autor de site externo sem credenciais do NexusTrader.",
+      "payloads": [
+        "<iframe src=\"https://trade.solucoes-nexus.tech/\"></iframe>"
+      ],
+      "instructions": [
+        "Hospedar página com iframe transparente apontando para o dashboard.",
+        "Posicionar um elemento visual sobre o controle real.",
+        "Induzir o operador autenticado a clicar."
+      ],
+      "expected_result": "O clique alcança o controle do dashboard no frame."
+    },
+    "remediation": {
+      "strategy": "Enviar CSP frame-ancestors none e X-Frame-Options DENY em todas as respostas.",
+      "code_changes": [
+        {
+          "file_name": "api/app.py",
+          "fixed_code": "Middleware security_headers adiciona DENY, frame-ancestors none e no-referrer."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "Exige sessão autenticada e interação da vítima."
+      },
+      "impact": {
+        "score": "high",
+        "reason": "Um comando induzido pode iniciar automação de trading."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "Cabeçalhos ausentes foram observados em produção e o fix foi coberto por teste HTTP."
+    }
+  },
+  {
+    "verdict": "confirmed",
+    "title": "Chave de controle exposta na URL WebSocket",
+    "description": "O frontend anexava a chave do dashboard à query WebSocket e o access log padrão do Uvicorn registrava o caminho completo. Estado: corrigido com ticket de curta duração e uso único.",
+    "root_cause": "websocketUrl em static/js/api.js colocava a credencial persistente na query string, permitindo vazamento para logs de acesso.",
+    "intended_behavior": "A chave persistente deve trafegar somente em header de requisição protegida; o upgrade WebSocket deve usar credencial efêmera.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "static/js/api.js",
+        "line": 7,
+        "scope": "getApiKey",
+        "description": "A chave persistente era recuperada do localStorage."
+      },
+      {
+        "kind": "propagation",
+        "file": "static/js/api.js",
+        "line": 35,
+        "scope": "websocketUrl",
+        "description": "A chave era serializada na URL de upgrade."
+      },
+      {
+        "kind": "sink",
+        "file": "api/app.py",
+        "line": 100,
+        "scope": "live_bot",
+        "description": "O servidor recebia a credencial pela query, visível ao access logger."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "authorization_role",
+        "description": "O atacante possui acesso aos logs, a um bundle de diagnóstico ou a telemetria de URL."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "Pessoa com acesso somente leitura aos logs do serviço.",
+      "payloads": [
+        "Linha de log de upgrade WebSocket com query sanitizada neste relatório."
+      ],
+      "instructions": [
+        "Ler uma entrada de access log anterior ao fix.",
+        "Extrair o parâmetro key.",
+        "Reutilizar a chave em um endpoint de controle."
+      ],
+      "expected_result": "A requisição autenticada é aceita com a chave recuperada."
+    },
+    "remediation": {
+      "strategy": "Trocar a query persistente por ticket criptograficamente aleatório, bot-scoped, TTL 20 segundos e single-use; desabilitar access log até rotação.",
+      "code_changes": [
+        {
+          "file_name": "api/ws_tickets.py",
+          "fixed_code": "WebSocketTicketStore.issue e consume implementam TTL, escopo e consumo único."
+        },
+        {
+          "file_name": "static/js/api.js",
+          "fixed_code": "wsTicket autentica por header e websocketUrl recebe somente o ticket efêmero."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "Requer acesso a logs, mas a reprodução local confirmou o vazamento."
+      },
+      "impact": {
+        "score": "high",
+        "reason": "A chave dá acesso aos controles administrativos de bot."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "Fluxo source-to-log reproduzido e substituição validada por testes e navegador."
+    }
+  },
+  {
+    "verdict": "confirmed",
+    "title": "Autenticação fail-open fora do Compose",
+    "description": "Quando segredos estavam vazios e DOMAIN omitido, as dependências aceitavam qualquer chamada. Estado: corrigido; produção falha fechado e bypass exige DEV_MODE explícito.",
+    "root_cause": "require_dashboard_key em api/auth.py não rejeitava segredo esperado vazio, permitindo controle sem autenticação em execução direta.",
+    "intended_behavior": "Toda execução não marcada explicitamente como desenvolvimento deve exigir dashboard key e internal token não vazios.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "api/auth.py",
+        "line": 6,
+        "scope": "require_dashboard_key",
+        "description": "Header X-API-Key entrava vazio ou arbitrário."
+      },
+      {
+        "kind": "propagation",
+        "file": "config/settings.py",
+        "line": 45,
+        "scope": "validate_production_secrets",
+        "description": "A validação antiga só exigia segredos quando DOMAIN era preenchido."
+      },
+      {
+        "kind": "sink",
+        "file": "api/app.py",
+        "line": 69,
+        "scope": "create_app",
+        "description": "Rotas administrativas usavam a dependência fail-open."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "system_configuration",
+        "description": "Servidor iniciado diretamente com DOMAIN e segredos vazios."
+      },
+      {
+        "kind": "network_routing",
+        "description": "A porta do servidor direto fica acessível a host não confiável."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "Cliente de rede sem qualquer credencial.",
+      "payloads": [
+        "GET /api/v1/bots sem X-API-Key"
+      ],
+      "instructions": [
+        "Iniciar Uvicorn diretamente com segredos vazios no código anterior.",
+        "Enviar chamada administrativa sem header."
+      ],
+      "expected_result": "A chamada alcança o handler em vez de retornar 401/503."
+    },
+    "remediation": {
+      "strategy": "Falhar fechado por padrão no Settings e nas dependências; permitir vazio somente em DEV_MODE explícito limitado a loopback.",
+      "code_changes": [
+        {
+          "file_name": "config/settings.py",
+          "fixed_code": "DEV_MODE false por padrão e model validator exige os dois segredos."
+        },
+        {
+          "file_name": "api/auth.py",
+          "fixed_code": "Segredo vazio fora de DEV_MODE retorna indisponível ou nega WebSocket."
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "O Compose oficial mitigava, mas execução direta era uma operação documentada."
+      },
+      "impact": {
+        "score": "high",
+        "reason": "Expunha configuração e start/stop sem autenticação."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "Condição verificada no código e coberta por teste de Settings fail-closed."
+    }
+  }
+]
