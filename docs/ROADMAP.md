@@ -6,8 +6,8 @@
 - Reconexão supervisionada e restauração de subscriptions.
 - Orquestração persistente de múltiplos robôs isolados.
 - Parada segura e lifecycle idempotente de contratos.
-- Conta demo obrigatória em todas as camadas de execução.
-- Histórico de ticks/candles, atualização incremental e gráfico 1s/1m/5m.
+- Conta demo por padrão e conta real protegida por flag, revalidação e confirmação.
+- Histórico de candles, atualização incremental e gráfico Donchian+ZigZag em 1m.
 - Operação aberta, marcador no gráfico, P&L, expiração e journal ao vivo.
 - Dashboard de trading responsivo, API autenticada e documentação operacional.
 

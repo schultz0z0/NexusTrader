@@ -16,13 +16,12 @@ Esse encadeamento elimina o erro anterior no qual uma URL OTP era obtida, descar
 
 | Mensagem | Uso |
 |---|---|
-| `ticks_history` + `style=ticks` | Linha histórica para índice de 1 segundo |
-| `ticks_history` + `style=candles` + `granularity` | OHLC de 60 ou 300 segundos |
+| `ticks_history` + `style=candles` + `granularity=60` | OHLC histórico de 1 minuto |
 | `ticks` + `subscribe=1` | Stream de preço ao vivo |
 | `proposal` | Cotação do contrato antes da compra |
-| `buy` | Compra somente depois de nova checagem demo-only |
+| `buy` | Compra somente depois de revalidar conta e liberação operacional |
 | `proposal_open_contract` + `subscribe=1` | P&L, spot e status até `is_sold=1` |
-| `portfolio` | Reconciliação de contratos persistidos como abertos após crash |
+| `portfolio` | Ajuda a reconciliar contratos; ownership persistido também é resubscrito mesmo quando ausente da resposta |
 | `forget` | Cancelamento de uma assinatura remota |
 | `ping` | Heartbeat da conexão |
 
@@ -30,15 +29,19 @@ Requisições são correlacionadas por `req_id`. Assinaturas possuem chaves est�
 
 ## Contratos e durações
 
-O modelo atual envia `CALL` ou `PUT`, `basis=stake`, moeda USD e o ativo em `underlying_symbol`. A duração é configurável e não deve ser confundida com o timeframe visual:
+O modelo atual envia `CALL` ou `PUT`, `basis=stake`, moeda USD e o ativo em
+`underlying_symbol`. O único perfil habilitado usa `R_75`, `duration=2` e
+`duration_unit=m`. A expiração não deve ser confundida com o timeframe visual:
 
-- `duration_unit=t`: expiração em ticks;
-- `duration_unit=m`: expiração em minutos;
-- gráfico 1s: linha;
-- gráfico 60s/300s: velas OHLC.
+- `duration_unit=m`: expiração em minutos (2 no perfil vigente);
+- `granularity=60`: velas OHLC de 1 minuto.
 
 Antes de adicionar outro tipo de contrato, confirme disponibilidade e parâmetros no [API Explorer oficial](https://developers.deriv.com/).
 
 ## Segurança operacional
 
-`account_type=real` é rejeitado tanto pela API de configuração quanto pela sessão e pelo executor imediatamente antes de `buy`. Essa defesa em profundidade evita que uma alteração isolada de interface habilite capital real.
+`account_type=real` é bloqueado por padrão e somente passa quando
+`ALLOW_REAL_TRADING=true`; conta e tipo são revalidados na Deriv no start e a flag é
+conferida novamente imediatamente antes de `buy`. O dashboard também exige confirmação.
+O launcher local força a flag para `false`, portanto toda validação de desenvolvimento é
+DEMO.

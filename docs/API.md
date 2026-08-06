@@ -4,7 +4,10 @@ Base: `/api/v1`. Quando `DOMAIN` está configurado, `DASHBOARD_API_KEY` e `INTER
 
 ## Autenticação
 
-Rotas do dashboard recebem `X-API-Key: <DASHBOARD_API_KEY>`. O WebSocket recebe a mesma chave no parâmetro `?key=`. A rota de eventos entre containers aceita apenas `X-Internal-Token`.
+Rotas do dashboard recebem `X-API-Key: <DASHBOARD_API_KEY>`. Antes de abrir o WebSocket,
+o frontend solicita um ticket curto e de uso único em `POST /ws-tickets/{bot_id}`; a
+chave permanente não entra na URL. A rota de eventos entre containers aceita apenas
+`X-Internal-Token`.
 
 ## Robôs
 
@@ -25,15 +28,15 @@ Exemplo de criação:
 
 ```json
 {
-  "name": "BB Vol 100 — 1m",
-  "strategy_id": "bollinger",
-  "strategy_config": {"period": 20, "std_dev": 2.0},
+  "name": "Donchian R_75 — 1m",
+  "strategy_id": "donchian",
+  "strategy_config": {},
   "account_id": "DOT123456",
   "account_type": "demo",
-  "symbol": "R_100",
+  "symbol": "R_75",
   "timeframe_seconds": 60,
-  "duration": 5,
-  "duration_unit": "t",
+  "duration": 2,
+  "duration_unit": "m",
   "initial_stake": 1.0,
   "money_management": "fixed",
   "money_config": {},
@@ -50,7 +53,8 @@ Exemplo de criação:
 
 ## WebSocket
 
-`GET /api/v1/ws/bots/{bot_id}?key=<chave>` envia primeiro:
+Primeiro solicite `POST /api/v1/ws-tickets/{bot_id}` com `X-API-Key`. Em seguida,
+`GET /api/v1/ws/bots/{bot_id}?ticket=<ticket>` envia:
 
 ```json
 {"type":"snapshot","bot_id":"...","data":{"market":{},"last_tick":null,"active_trade":null,"recent_trades":[]}}

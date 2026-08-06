@@ -12,14 +12,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Para desenvolvimento sem `DOMAIN`, as chaves podem ficar vazias. Use apenas conta demo.
-
-```bash
-python -m uvicorn api.app:app --reload --port 8000
-python main.py
-```
-
-O bot publica eventos em `API_BASE_URL`; localmente o padrão é `http://127.0.0.1:8000`.
+O fluxo recomendado é o launcher seguro abaixo. A execução manual separada é útil apenas
+para diagnóstico: replique todos os overrides definidos em `scripts/start_dev.ps1`, em
+especial `DEV_MODE=true`, `ALLOW_REAL_TRADING=false`, `DERIV_ACCOUNT_TYPE=demo`, banco
+isolado e `API_BASE_URL`. A autenticação não fica aberta por ausência acidental de
+`DOMAIN`. Use somente conta DEMO.
 
 ### Stack local segura conectada à DEMO
 
@@ -49,18 +46,27 @@ O launcher não edita o `.env`, não seleciona conta e não inicia o bot automat
 python -m unittest discover -s tests -v
 python -m compileall -q api core data database risk strategies trading
 node --check static/js/app.js
+node --test tests/js/*.test.mjs
+python -m pip check
 ```
 
 Os testes cobrem configuração, banco, reconexão/replay, candles, fila limitada, risco, lifecycle, orquestração, API e contrato do frontend.
 
-Smoke test opcional usando as credenciais do `.env`:
+Smoke test opcional e somente leitura usando as credenciais do `.env`:
 
 ```bash
 python -m scripts.smoke_deriv
-python -m scripts.smoke_deriv --trade --stake 1.0  # somente demo, compra 5 ticks
 ```
 
+Para validar compra e settlement, use o fluxo integral pelo dashboard: ele aplica o
+perfil protegido R_75/1m/2m e registra ownership, eventos e journal. Não use o modo de
+compra direta do utilitário como validação da estratégia.
+
 ## Criando uma estratégia
+
+Esta seção descreve uma extensão futura da arquitetura. No estado atual, criar, ativar
+ou modificar estratégia exige autorização explícita do proprietário; Donchian+ZigZag
+deve permanecer intacta.
 
 1. Implemente `BaseStrategy` sem I/O e sem estado global.
 2. Retorne `Signal` apenas depois de dados suficientes e impeça sinal duplicado no mesmo epoch.
@@ -69,7 +75,10 @@ python -m scripts.smoke_deriv --trade --stake 1.0  # somente demo, compra 5 tick
 5. Escreva testes determinísticos com séries conhecidas, inclusive mercado lateral, tendência, gaps e dados insuficientes.
 6. Valide em replay/backtest e depois em demo antes de permitir execução contínua.
 
-Indicadores devem ser tratados como filtros probabilísticos. Para operações de 1/5 minutos, inclua no estudo custos/payout, latência, regime do mercado, horário, tamanho da amostra, drawdown e risco de overfitting. Não selecione parâmetros apenas pelo melhor resultado histórico.
+Indicadores devem ser tratados como filtros probabilísticos. Para operações de 1 minuto
+com expiração de 2 minutos, inclua no estudo custos/payout, latência, regime do mercado,
+horário, tamanho da amostra, drawdown e risco de overfitting. Não selecione parâmetros
+apenas pelo melhor resultado histórico.
 
 ## Eventos
 

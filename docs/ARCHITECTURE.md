@@ -24,7 +24,7 @@ flowchart LR
 
 - `api/app.py`: ciclo de vida FastAPI, health check, rotas e WebSocket.
 - `api/routes/bots.py`: CRUD, start/stop, trades e snapshot por robô.
-- `api/live_store.py`: read model limitado para histórico, último tick, posição e trades recentes.
+- `api/live_store.py`: read model limitado para histórico, indicadores, último tick, posição e trades recentes; recompõe contexto após restart da API.
 - `api/websocket_manager.py`: conexões agrupadas por `bot_id`; um cliente não recebe eventos de outro robô.
 
 ### Plano de execução
@@ -37,10 +37,10 @@ flowchart LR
 ### Mercado e negociação
 
 - `data/market_data.py`: carrega `ticks_history`, assina ticks e normaliza histórico/live.
-- `data/candles.py`: agrega ticks em OHLC sem reescrever candles fechados por ticks atrasados.
-- `strategies/bollinger.py`: estratégia de validação baseada em reversão às Bandas de Bollinger.
+- `data/candles.py`: agrega ticks em OHLC, continua a última vela histórica e não reescreve candles fechados por ticks atrasados.
+- `strategies/donchian_zigzag.py`: única estratégia habilitada; Donchian(21) validado pelo ZigZag causal do projeto (depth 15, deviation 0, backstep 3), em R_75/1m/2m.
 - `risk/`: meta, stop, número/stake máximos e circuit breaker.
-- `trading/`: proposal, compra demo-only e acompanhamento de `proposal_open_contract`.
+- `trading/`: proposal, revalidação da autorização de conta, compra e acompanhamento de `proposal_open_contract`.
 
 ## Estados
 
@@ -50,7 +50,7 @@ flowchart LR
 
 SQLite opera em WAL e `busy_timeout`. `bot_instances` mantém configuração JSON e uma revisão incremental. Trades são únicos por `(bot_id, contract_id)`, permitindo que atualizações abertas/fechadas sejam aplicadas novamente sem duplicar o journal.
 
-O `LiveStore` é descartável: depois de reiniciar a API, o histórico persistente continua no banco e o mercado é repovoado quando cada sessão publica novo histórico.
+O `LiveStore` é descartável: depois de reiniciar a API, o histórico persistente continua no banco e o mercado é repovoado quando cada sessão publica novo histórico. A sessão republica o snapshot completo periodicamente para reparar perdas transitórias de eventos.
 
 ## Escala futura
 
