@@ -8,14 +8,14 @@ router = APIRouter(prefix="/api/v1/bots", tags=["Bots"])
 
 class BotPayload(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    strategy_id: str = "bollinger"
-    strategy_config: dict = Field(default_factory=lambda: {"period": 20, "std_dev": 2.0})
+    strategy_id: str = "donchian"
+    strategy_config: dict = Field(default_factory=dict)
     account_id: str = ""
     account_type: str = "demo"
-    symbol: str = "R_100"
+    symbol: str = "R_75"
     timeframe_seconds: int = Field(default=60, ge=1)
-    duration: int = Field(default=5, ge=1)
-    duration_unit: str = "t"
+    duration: int = Field(default=2, ge=1)
+    duration_unit: str = "m"
     initial_stake: float = Field(default=1.0, gt=0)
     money_management: str = "fixed"
     money_config: dict = Field(default_factory=dict)
@@ -23,6 +23,8 @@ class BotPayload(BaseModel):
 
     @model_validator(mode="after")
     def demo_only(self):
+        if self.strategy_id != "donchian":
+            raise ValueError("Somente a estrategia Donchian + ZigZag esta habilitada")
         if self.account_type.lower() != "demo" and not settings.ALLOW_REAL_TRADING:
             raise ValueError("Somente contas demo estao habilitadas")
         if self.money_management not in {"fixed", "martingale", "soros"}:

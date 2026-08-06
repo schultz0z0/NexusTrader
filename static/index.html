@@ -106,11 +106,11 @@
     <form id="config-form">
       <input id="config-id" type="hidden">
       <fieldset><legend>Identidade e mercado</legend>
-        <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: BB Vol 100 — 1m"></label>
+        <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: Donchian R_75 — 1m"></label>
         <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>
-        <label>Modelo<select name="strategy_id" id="strategy-select"><option value="bollinger">Bollinger Mean Reversion</option><option value="donchian">Donchian + ZigZag</option></select></label>
+        <label>Modelo<select name="strategy_id" id="strategy-select"><option value="donchian" selected>Donchian + ZigZag</option></select></label>
         <div class="form-row" id="bollinger-config-row"><label>Período<input name="period" type="number" min="5" value="20"></label><label>Desvio padrão<input name="std_dev" type="number" min="0.5" step="0.1" value="2"></label></div>
         <div class="form-row" id="duration-config-row"><label>Expiração<input name="duration" type="number" min="1" value="5"></label><label>Unidade<select name="duration_unit"><option value="t">Ticks</option><option value="m">Minutos</option></select></label></div>
       </fieldset>
