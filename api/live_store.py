@@ -45,7 +45,11 @@ class LiveStore:
                 return False
         state["last_event_epoch"] = event.get("epoch")
         if event_type == "runtime.status":
-            state["runtime"] = {"status": event.get("status"), "error": event.get("error")}
+            status = event.get("status")
+            state["runtime"] = {"status": status, "error": event.get("error")}
+            if status == "STARTING":
+                state["active_trade"] = None
+                state["recent_trades"] = []
         elif event_type == "market.history":
             state["market"] = {
                 "mode": event.get("mode", "candles"),

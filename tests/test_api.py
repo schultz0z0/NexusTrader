@@ -6,8 +6,10 @@ class TestFastAPIApp(unittest.TestCase):
     def setUp(self):
         import asyncio
         from database.repository import DatabaseRepository
+        from config.settings import settings
         asyncio.run(DatabaseRepository().init_db())
-        self.client = TestClient(app)
+        headers = {"X-API-Key": settings.DASHBOARD_API_KEY} if settings.DASHBOARD_API_KEY else {}
+        self.client = TestClient(app, headers=headers)
 
     def test_dashboard_root(self):
         response = self.client.get("/")

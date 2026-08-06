@@ -86,6 +86,16 @@ export class TradingChart {
     this.markers = [...this.markerMap.values()].sort((a, b) => a.time - b.time);
   }
 
+  clearMarkers() {
+    this.markers = [];
+    this.markerMap.clear();
+    this.applyMarkers();
+    if (this.priceLine) {
+      this.primary.removePriceLine(this.priceLine);
+      this.priceLine = null;
+    }
+  }
+
   applyMarkers() {
     const ordered = [...this.markers].sort((a, b) => a.time - b.time);
     if (LightweightCharts.createSeriesMarkers) {

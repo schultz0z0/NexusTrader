@@ -25,14 +25,20 @@ class FakeConnection:
 
 class DemoExecutionGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_account_cannot_execute(self):
-        with self.assertRaises(RealTradingDisabled):
-            ensure_demo_account({"account_type": "real"})
+        from config.settings import settings
+        previous = settings.ALLOW_REAL_TRADING
+        settings.ALLOW_REAL_TRADING = False
+        try:
+            with self.assertRaises(RealTradingDisabled):
+                ensure_demo_account({"account_type": "real"})
 
-        connection = FakeConnection()
-        executor = OrderExecutor(connection, account_type="real")
-        with self.assertRaises(RealTradingDisabled):
-            await executor.buy("proposal-id", 1.0)
-        self.assertEqual(connection.sent, [])
+            connection = FakeConnection()
+            executor = OrderExecutor(connection, account_type="real")
+            with self.assertRaises(RealTradingDisabled):
+                await executor.buy("proposal-id", 1.0)
+            self.assertEqual(connection.sent, [])
+        finally:
+            settings.ALLOW_REAL_TRADING = previous
 
     async def test_demo_account_can_execute(self):
         connection = FakeConnection()

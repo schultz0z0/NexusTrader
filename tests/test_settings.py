@@ -26,6 +26,7 @@ class SettingsContractTests(unittest.TestCase):
 
     def test_demo_execution_is_default(self):
         configured = Settings(
+            _env_file=None,
             DERIV_APP_ID="test-app",
             DERIV_API_TOKEN="test-token",
         )

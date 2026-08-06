@@ -52,7 +52,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.repository = DatabaseRepository(str(Path(self.tempdir.name) / "control.db"))
         self.live_store = LiveStore()
-        self.client_context = TestClient(create_app(self.repository, self.live_store))
+        headers = {"X-API-Key": settings.DASHBOARD_API_KEY} if settings.DASHBOARD_API_KEY else {}
+        self.client_context = TestClient(create_app(self.repository, self.live_store), headers=headers)
         self.client = self.client_context.__enter__()
 
     def tearDown(self):
@@ -88,7 +89,8 @@ class ControlPlaneTests(unittest.TestCase):
                 {"account_id": "DOT200", "account_type": "demo", "balance": "1000.00", "currency": "USD", "status": "active"},
             ]
 
-        with TestClient(create_app(self.repository, self.live_store, account_provider=account_provider)) as client:
+        headers = {"X-API-Key": settings.DASHBOARD_API_KEY} if settings.DASHBOARD_API_KEY else {}
+        with TestClient(create_app(self.repository, self.live_store, account_provider=account_provider), headers=headers) as client:
             response = client.get("/api/v1/accounts")
 
         self.assertEqual(response.status_code, 200)
@@ -96,12 +98,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(response.json()["data"][1]["balance"], 1000.0)
 
     def test_real_account_configuration_is_rejected(self):
-        response = self.client.post("/api/v1/bots", json={
-            "name": "Conta real",
-            "account_id": "CR100",
-            "account_type": "real",
-            "symbol": "R_100",
-        })
+        previous = settings.ALLOW_REAL_TRADING
+        settings.ALLOW_REAL_TRADING = False
+        try:
+            response = self.client.post("/api/v1/bots", json={
+                "name": "Conta real",
+                "account_id": "CR100",
+                "account_type": "real",
+                "symbol": "R_100",
+            })
+        finally:
+            settings.ALLOW_REAL_TRADING = previous
         self.assertEqual(response.status_code, 422)
 
     def test_internal_events_require_internal_token_and_feed_bot_snapshot(self):
@@ -131,16 +138,22 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(snapshot.json()["data"]["last_tick"]["price"], 100.5)
 
     def test_duplicate_event_is_idempotent(self):
-        event = {
-            "event_id": "evt-same",
-            "schema_version": 1,
-            "type": "trade.closed",
-            "bot_id": "bot-a",
-            "epoch": 123,
-            "trade": {"contract_id": 42, "profit": 0.9},
-        }
-        first = self.client.post("/api/v1/internal/events", json=event)
-        second = self.client.post("/api/v1/internal/events", json=event)
+        previous = settings.INTERNAL_API_TOKEN
+        settings.INTERNAL_API_TOKEN = "internal-secret"
+        try:
+            event = {
+                "event_id": "evt-same",
+                "schema_version": 1,
+                "type": "trade.closed",
+                "bot_id": "bot-a",
+                "epoch": 123,
+                "trade": {"contract_id": 42, "profit": 0.9},
+            }
+            headers = {"X-Internal-Token": "internal-secret"}
+            first = self.client.post("/api/v1/internal/events", json=event, headers=headers)
+            second = self.client.post("/api/v1/internal/events", json=event, headers=headers)
+        finally:
+            settings.INTERNAL_API_TOKEN = previous
 
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.json()["duplicate"], True)
