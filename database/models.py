@@ -31,6 +31,7 @@ class DatabaseModels:
 
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id TEXT,
             session_id TEXT,
             strategy_name TEXT,
             symbol TEXT,
@@ -40,6 +41,11 @@ class DatabaseModels:
             payout REAL,
             profit REAL,
             result TEXT,
+            status TEXT DEFAULT 'closed',
+            entry_spot REAL,
+            exit_spot REAL,
+            purchase_time INTEGER,
+            expiry_time INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(session_id) REFERENCES sessions(id)
         );
@@ -52,4 +58,29 @@ class DatabaseModels:
             strategy TEXT DEFAULT 'BollingerBands(20, 2.0)',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS bot_instances (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            strategy_id TEXT NOT NULL DEFAULT 'bollinger',
+            strategy_config TEXT NOT NULL DEFAULT '{}',
+            account_id TEXT NOT NULL,
+            account_type TEXT NOT NULL DEFAULT 'demo',
+            symbol TEXT NOT NULL DEFAULT 'R_100',
+            timeframe_seconds INTEGER NOT NULL DEFAULT 60,
+            duration INTEGER NOT NULL DEFAULT 5,
+            duration_unit TEXT NOT NULL DEFAULT 't',
+            initial_stake REAL NOT NULL DEFAULT 1.0,
+            money_management TEXT NOT NULL DEFAULT 'fixed',
+            money_config TEXT NOT NULL DEFAULT '{}',
+            risk_config TEXT NOT NULL DEFAULT '{}',
+            desired_state TEXT NOT NULL DEFAULT 'STOPPED',
+            runtime_state TEXT NOT NULL DEFAULT 'STOPPED',
+            heartbeat_at TIMESTAMP,
+            last_error TEXT,
+            config_revision INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         """
