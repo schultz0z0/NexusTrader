@@ -26,6 +26,19 @@ class CandleAggregator:
         self.timeframe_seconds = int(timeframe_seconds)
         self.current = None
 
+    def seed(self, candle) -> Candle:
+        """Continue the latest historical bucket without losing its OHLC."""
+        source = candle.as_dict() if isinstance(candle, Candle) else candle
+        bucket = int(source["time"]) - (int(source["time"]) % self.timeframe_seconds)
+        self.current = Candle(
+            time=bucket,
+            open=float(source["open"]),
+            high=float(source["high"]),
+            low=float(source["low"]),
+            close=float(source["close"]),
+        )
+        return self.current
+
     def update(self, epoch: int, price: float) -> Candle:
         bucket = int(epoch) - (int(epoch) % self.timeframe_seconds)
         numeric_price = float(price)

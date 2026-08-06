@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from api.app import create_app
 from api.live_store import LiveStore
@@ -11,6 +12,42 @@ from database.repository import DatabaseRepository
 
 
 class LiveStoreMarketContextTests(unittest.TestCase):
+    def test_runtime_restart_does_not_erase_closed_trade_history(self):
+        store = LiveStore()
+        store.apply({
+            "event_id": "closed-1", "type": "trade.closed", "bot_id": "bot-a",
+            "epoch": 100, "trade": {"contract_id": 42, "status": "closed", "profit": 0.8},
+        })
+
+        store.apply({
+            "event_id": "starting-1", "type": "runtime.status", "bot_id": "bot-a",
+            "epoch": 101, "status": "STARTING",
+        })
+
+        self.assertEqual(
+            store.snapshot("bot-a")["recent_trades"],
+            [{"contract_id": 42, "status": "closed", "profit": 0.8}],
+        )
+
+    def test_first_tick_rebuilds_market_context_after_api_restart(self):
+        store = LiveStore()
+
+        accepted = store.apply({
+            "event_id": "tick-after-restart", "type": "market.tick", "bot_id": "bot-a",
+            "epoch": 181, "symbol": "R_75", "timeframe_seconds": 60, "price": 12.5,
+            "candle": {"time": 180, "open": 11, "high": 13, "low": 10, "close": 12.5},
+            "bollinger": {"upper": 15, "middle": 12, "lower": 9},
+            "zigzag": [{"time": 120, "value": 13}, {"time": 180, "value": 10}],
+        })
+
+        market = store.snapshot("bot-a")["market"]
+        self.assertTrue(accepted)
+        self.assertEqual(market["symbol"], "R_75")
+        self.assertEqual(market["timeframe_seconds"], 60)
+        self.assertEqual(market["points"], [{"time": 180, "open": 11, "high": 13, "low": 10, "close": 12.5}])
+        self.assertEqual(market["donchian"]["upper"], [{"time": 180, "value": 15}])
+        self.assertEqual(market["zigzag"], [{"time": 120, "value": 13}, {"time": 180, "value": 10}])
+
     def test_tick_from_previous_symbol_is_ignored_after_new_history(self):
         store = LiveStore()
         store.apply({
@@ -158,6 +195,18 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.json()["duplicate"], True)
         self.assertEqual(len(self.live_store.snapshot("bot-a")["recent_trades"]), 1)
+
+    def test_websocket_uses_one_time_ticket_instead_of_dashboard_key_in_url(self):
+        issued = self.client.post("/api/v1/ws-tickets/bot-a")
+        ticket = issued.json()["data"]["ticket"]
+
+        with self.client.websocket_connect(f"/api/v1/ws/bots/bot-a?ticket={ticket}") as websocket:
+            snapshot = websocket.receive_json()
+
+        self.assertEqual(snapshot["type"], "snapshot")
+        with self.assertRaises(WebSocketDisconnect):
+            with self.client.websocket_connect(f"/api/v1/ws/bots/bot-a?ticket={ticket}"):
+                pass
 
 
 if __name__ == "__main__":

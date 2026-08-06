@@ -4,6 +4,7 @@ import uuid
 
 CRITICAL_EVENT_TYPES = {
     "runtime.status",
+    "market.history",
     "trade.opened",
     "trade.closed",
     "risk.blocked",

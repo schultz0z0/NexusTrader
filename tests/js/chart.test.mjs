@@ -14,6 +14,8 @@ class FakeSeries {
   setMarkers(values) { this.markerData = [...values]; }
 }
 
+const removedSeries = [];
+
 globalThis.ResizeObserver = class { observe() {} };
 globalThis.LightweightCharts = {
   LineSeries: "line",
@@ -21,7 +23,7 @@ globalThis.LightweightCharts = {
   createChart() {
     return {
       addSeries() { return new FakeSeries(); },
-      removeSeries() {},
+      removeSeries(series) { removedSeries.push(series); },
       timeScale() { return { fitContent() {} }; },
       resize() {},
     };
@@ -60,4 +62,33 @@ test("contract updates keep one entry marker and one settlement marker", () => {
 
   assert.equal(chart.markers.length, 2);
   assert.deepEqual(chart.markers.map((marker) => marker.text), ["PUT", "LOSS"]);
+});
+
+test("same-timestamp zigzag pivots are collapsed before Lightweight Charts", () => {
+  const chart = newChart();
+  chart.setHistory({
+    bot_id: "bot-a",
+    symbol: "R_75",
+    timeframe_seconds: 60,
+    mode: "candles",
+    points: [{ time: 60, open: 10, high: 12, low: 9, close: 11 }],
+    zigzag: [
+      { time: 60, value: 12, type: "high" },
+      { time: 60, value: 9, type: "low" },
+      { time: 120, value: 13, type: "high" },
+    ],
+  });
+
+  assert.deepEqual(chart.zigzag.data.map((point) => point.time), [60, 120]);
+});
+
+test("mode rebuild removes the previous zigzag series", () => {
+  removedSeries.length = 0;
+  const chart = newChart();
+  chart.setHistory({ bot_id: "bot-a", symbol: "R_75", timeframe_seconds: 60, mode: "candles", points: [] });
+  const previousZigzag = chart.zigzag;
+
+  chart.setHistory({ bot_id: "bot-b", symbol: "R_75", timeframe_seconds: 60, mode: "candles", points: [] });
+
+  assert.ok(removedSeries.includes(previousZigzag));
 });

@@ -31,6 +31,7 @@ New-Item -ItemType Directory -Force -Path $storageDir, $logsDir | Out-Null
 # Overrides locais são deliberadamente aplicados somente a estes processos.
 $env:ALLOW_REAL_TRADING = "false"
 $env:DERIV_ACCOUNT_TYPE = "demo"
+$env:DEV_MODE = "true"
 $env:DOMAIN = "localhost"
 $env:DB_PATH = $databasePath
 $env:API_BASE_URL = "http://${BindAddress}:${Port}"
@@ -50,7 +51,7 @@ function Stop-OwnedProcess {
 
 try {
     $apiProcess = Start-Process -FilePath $python `
-        -ArgumentList @("-m", "uvicorn", "api.app:app", "--host", $BindAddress, "--port", $Port) `
+        -ArgumentList @("-m", "uvicorn", "api.app:app", "--host", $BindAddress, "--port", $Port, "--no-access-log") `
         -WorkingDirectory $projectRoot `
         -RedirectStandardOutput $apiStdout `
         -RedirectStandardError $apiStderr `

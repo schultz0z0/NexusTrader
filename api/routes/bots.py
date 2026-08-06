@@ -25,6 +25,10 @@ class BotPayload(BaseModel):
     def demo_only(self):
         if self.strategy_id != "donchian":
             raise ValueError("Somente a estrategia Donchian + ZigZag esta habilitada")
+        if self.timeframe_seconds != 60:
+            raise ValueError("Donchian + ZigZag opera somente em candles de 1 minuto")
+        if self.duration != 2 or self.duration_unit != "m":
+            raise ValueError("Donchian + ZigZag usa expiracao fixa de 2 minutos")
         if self.account_type.lower() != "demo" and not settings.ALLOW_REAL_TRADING:
             raise ValueError("Somente contas demo estao habilitadas")
         if self.money_management not in {"fixed", "martingale", "soros"}:

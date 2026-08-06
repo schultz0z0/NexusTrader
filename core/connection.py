@@ -78,17 +78,33 @@ class NexusConnection:
 
         logger.info(f"Conectando ao WebSocket da conta {self.account_id}...")
         self.websocket_url = websocket_url
-        self.ws = await self._connector(websocket_url, ping_interval=30, ping_timeout=10)
+        opened_socket = await self._connector(websocket_url, ping_interval=30, ping_timeout=10)
+        self.ws = opened_socket
         self._is_connected = True
-        self._listener_task = asyncio.create_task(self._message_listener())
+        opened_listener = asyncio.create_task(self._message_listener())
+        self._listener_task = opened_listener
 
-        if self._heartbeat_task is None or self._heartbeat_task.done():
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        try:
+            if self._heartbeat_task is None or self._heartbeat_task.done():
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
-        if replay_subscriptions:
-            for record in list(self._subscriptions.values()):
-                record.remote_id = None
-                await self._activate_subscription(record)
+            if replay_subscriptions:
+                for record in list(self._subscriptions.values()):
+                    record.remote_id = None
+                    await self._activate_subscription(record)
+        except BaseException:
+            self._is_connected = False
+            self._connected_event.clear()
+            if not opened_listener.done():
+                opened_listener.cancel()
+            await asyncio.gather(opened_listener, return_exceptions=True)
+            try:
+                await opened_socket.close()
+            except Exception:
+                pass
+            if self.ws is opened_socket:
+                self.ws = None
+            raise
 
         self._generation += 1
         self._connected_event.set()

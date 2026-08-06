@@ -43,15 +43,20 @@ class LiveStore:
                 return False
             if market.get("symbol") and event_timeframe != int(market["timeframe_seconds"]):
                 return False
+            if not market.get("symbol"):
+                market["bot_id"] = event["bot_id"]
+                market["symbol"] = event_symbol
+                market["timeframe_seconds"] = event_timeframe
+                market["mode"] = "candles" if event.get("candle") else "line"
         state["last_event_epoch"] = event.get("epoch")
         if event_type == "runtime.status":
             status = event.get("status")
             state["runtime"] = {"status": status, "error": event.get("error")}
             if status == "STARTING":
                 state["active_trade"] = None
-                state["recent_trades"] = []
         elif event_type == "market.history":
             state["market"] = {
+                "bot_id": event["bot_id"],
                 "mode": event.get("mode", "candles"),
                 "symbol": event.get("symbol"),
                 "timeframe_seconds": event.get("timeframe_seconds", 60),
@@ -75,6 +80,23 @@ class LiveStore:
                 else:
                     points.append(deepcopy(point))
                     del points[:-self.history_limit]
+            band = event.get("bollinger") or {}
+            if band:
+                donchian = state["market"].setdefault("donchian", {"upper": [], "middle": [], "lower": []})
+                band_time = point.get("time") if point else event.get("epoch")
+                for name in ("upper", "middle", "lower"):
+                    value = band.get(name)
+                    if value is None:
+                        continue
+                    series = donchian.setdefault(name, [])
+                    band_point = {"time": band_time, "value": value}
+                    if series and series[-1].get("time") == band_time:
+                        series[-1] = band_point
+                    else:
+                        series.append(band_point)
+                        del series[:-self.history_limit]
+            if "zigzag" in event:
+                state["market"]["zigzag"] = deepcopy(event["zigzag"])
         elif event_type in {"trade.opened", "trade.updated"}:
             state["active_trade"] = deepcopy(event.get("trade"))
         elif event_type == "trade.closed":

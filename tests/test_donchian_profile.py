@@ -38,6 +38,15 @@ class DonchianProfileTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             BotPayload(name="Legado", strategy_id="bollinger")
 
+    async def test_fixed_timeframe_and_expiration_cannot_drift_at_api_boundary(self):
+        for override in (
+            {"timeframe_seconds": 300},
+            {"duration": 3},
+            {"duration_unit": "t"},
+        ):
+            with self.subTest(override=override), self.assertRaises(ValidationError):
+                BotPayload(name="Perfil divergente", **override)
+
     async def test_strategy_runtime_parameters_remain_unchanged(self):
         strategy = DonchianZigZagStrategy()
 

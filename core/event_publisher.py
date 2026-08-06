@@ -16,6 +16,7 @@ class HttpEventPublisher:
         internal_token=None,
         client=None,
         queue_max=None,
+        retry_delays=(0.25, 1.0, 2.0),
     ):
         self.base_url = (base_url or settings.API_BASE_URL).rstrip("/")
         self.internal_token = internal_token if internal_token is not None else settings.INTERNAL_API_TOKEN
@@ -25,6 +26,7 @@ class HttpEventPublisher:
         self._closing = False
         self.dropped_market_events = 0
         self.failed_events = 0
+        self.retry_delays = tuple(float(delay) for delay in retry_delays)
 
     @property
     def queue_size(self):
@@ -52,12 +54,26 @@ class HttpEventPublisher:
         while not self._closing:
             event = await self._queue.get()
             try:
-                response = await self._client.post(
-                    f"{self.base_url}/api/v1/internal/events",
-                    json=event,
-                    headers={"X-Internal-Token": self.internal_token},
-                )
-                response.raise_for_status()
+                delays = self.retry_delays if is_critical_event(event) else ()
+                for attempt in range(len(delays) + 1):
+                    try:
+                        response = await self._client.post(
+                            f"{self.base_url}/api/v1/internal/events",
+                            json=event,
+                            headers={"X-Internal-Token": self.internal_token},
+                        )
+                        response.raise_for_status()
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if attempt >= len(delays):
+                            raise
+                        logger.warning(
+                            f"Falha transitória ao publicar {event.get('type')}; "
+                            f"nova tentativa {attempt + 2}: {exc}"
+                        )
+                        await asyncio.sleep(delays[attempt])
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

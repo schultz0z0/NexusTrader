@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.auth import require_dashboard_key, validate_websocket_key
+from api.auth import require_dashboard_key
 from api.live_store import LiveStore
 from api.routes.bots import router as bots_router
 from api.routes.bot_control import router as legacy_bot_router
@@ -14,6 +14,7 @@ from api.routes.config import router as legacy_config_router
 from api.routes.internal import router as internal_router
 from api.routes.trades import router as legacy_trades_router
 from api.websocket_manager import ws_manager
+from api.ws_tickets import WebSocketTicketStore
 from core.accounts import normalize_account
 from core.auth import AuthManager
 from database.repository import DatabaseRepository
@@ -35,6 +36,7 @@ def create_app(repository=None, live_store=None, account_provider=None):
     repository = repository or DatabaseRepository()
     live_store = live_store or LiveStore()
     account_provider = account_provider or _deriv_account_provider
+    ticket_store = WebSocketTicketStore()
 
     @asynccontextmanager
     async def lifespan(application):
@@ -56,6 +58,14 @@ def create_app(repository=None, live_store=None, account_provider=None):
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type", "X-API-Key"],
     )
+
+    @application.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
     application.include_router(bots_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_bot_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_config_router, dependencies=[Depends(require_dashboard_key)])
@@ -82,9 +92,13 @@ def create_app(repository=None, live_store=None, account_provider=None):
             "data": [normalize_account(account) for account in await account_provider()],
         }
 
+    @application.post("/api/v1/ws-tickets/{bot_id}", dependencies=[Depends(require_dashboard_key)])
+    async def websocket_ticket(bot_id: str):
+        return {"status": "success", "data": {"ticket": ticket_store.issue(bot_id)}}
+
     @application.websocket("/api/v1/ws/bots/{bot_id}")
-    async def live_bot(websocket: WebSocket, bot_id: str, key: str = ""):
-        if not validate_websocket_key(key):
+    async def live_bot(websocket: WebSocket, bot_id: str, ticket: str = ""):
+        if not ticket_store.consume(ticket, bot_id):
             await websocket.close(code=4401)
             return
         await ws_manager.connect(bot_id, websocket, live_store.snapshot(bot_id))

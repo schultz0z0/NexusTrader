@@ -74,6 +74,13 @@ class MarketDataHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tick_event["bot_id"], "bot-a")
         self.assertEqual(tick_event["price"], 12.5)
         self.assertEqual(tick_event["candle"]["time"], 180)
+        self.assertEqual(tick_event["candle"], {
+            "time": 180,
+            "open": 11.0,
+            "high": 13.0,
+            "low": 10.0,
+            "close": 12.5,
+        })
 
 
 if __name__ == "__main__":

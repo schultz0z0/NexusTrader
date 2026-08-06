@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     DB_URL: str = "sqlite+aiosqlite:///nexus_trader.db"
     DB_PATH: str = "nexus_trader.db"
     DOMAIN: str = ""
+    DEV_MODE: bool = False
 
     # Runtime e seguranca entre os containers
     INTERNAL_API_TOKEN: str = ""
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     EVENT_QUEUE_MAX: int = 2000
     RUNTIME_HEARTBEAT_SECONDS: int = 5
     MARKET_STALE_AFTER_SECONDS: int = 15
+    SETTLEMENT_WAIT_TIMEOUT_SECONDS: int = 600
     
     # Notificacoes
     TELEGRAM_BOT_TOKEN: str = ""
@@ -40,12 +42,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self):
-        if self.DOMAIN and not self.INTERNAL_API_TOKEN.strip():
-            raise ValueError("INTERNAL_API_TOKEN e obrigatorio quando DOMAIN esta configurado")
-        if self.DOMAIN and not self.DASHBOARD_API_KEY.strip():
-            raise ValueError("DASHBOARD_API_KEY e obrigatorio quando DOMAIN esta configurado")
+        if not self.DEV_MODE and not self.INTERNAL_API_TOKEN.strip():
+            raise ValueError("INTERNAL_API_TOKEN e obrigatorio fora do DEV_MODE")
+        if not self.DEV_MODE and not self.DASHBOARD_API_KEY.strip():
+            raise ValueError("DASHBOARD_API_KEY e obrigatorio fora do DEV_MODE")
         if self.EVENT_QUEUE_MAX < 100:
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
+        if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:
+            raise ValueError("SETTLEMENT_WAIT_TIMEOUT_SECONDS deve ser positivo")
         return self
 
 settings = Settings()

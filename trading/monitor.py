@@ -7,6 +7,7 @@ class ContractMonitor:
     def __init__(self, connection):
         self.connection = connection
         self._settled_contracts = set()
+        self._settlement_locks = {}
 
     async def monitor_contract(
         self,
@@ -30,15 +31,20 @@ class ContractMonitor:
                 is_sold = poc.get('is_sold')
                 
                 if is_sold == 1:
-                    if contract_id in self._settled_contracts:
-                        return
-                    self._settled_contracts.add(contract_id)
-                    status = poc.get('status', 'unknown')
-                    profit = poc.get('profit', 0)
-                    logger.info(f"CONTRATO ENCERRADO! ID: {contract_id} | Resultado: {status} | Lucro: {profit}")
-                    if on_settled_callback:
-                        await on_settled_callback(poc)
-                    await self.connection.unsubscribe(subscription_key)
+                    lock = self._settlement_locks.setdefault(contract_id, asyncio.Lock())
+                    async with lock:
+                        if contract_id in self._settled_contracts:
+                            return
+                        status = poc.get('status', 'unknown')
+                        profit = poc.get('profit', 0)
+                        logger.info(f"CONTRATO ENCERRADO! ID: {contract_id} | Resultado: {status} | Lucro: {profit}")
+                        if on_settled_callback:
+                            await on_settled_callback(poc)
+                        # Só torna o settlement idempotente depois que a persistência
+                        # do chamador concluiu. Uma falha transitória poderá ser tentada
+                        # novamente no próximo update vendido da Deriv.
+                        self._settled_contracts.add(contract_id)
+                        await self.connection.unsubscribe(subscription_key)
                 else:
                     pnl = poc.get('profit', 0)
                     logger.debug(f"Contrato {contract_id} ABERTO. PnL Atual: {pnl}")

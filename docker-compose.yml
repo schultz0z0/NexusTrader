@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: nexustrader-api
     restart: unless-stopped
-    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers
+    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers --no-access-log
     env_file:
       - "${ENV_FILE:-.env}"
     environment:
@@ -14,6 +14,7 @@ services:
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
+      DEV_MODE: "false"
       API_BASE_URL: http://nexus-api:8000
     volumes:
       - nexus-data:/app/storage
@@ -54,6 +55,7 @@ services:
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
+      DEV_MODE: "false"
     volumes:
       - nexus-data:/app/storage
     security_opt:

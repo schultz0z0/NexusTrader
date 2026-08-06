@@ -60,6 +60,15 @@ class FakeWebSocket:
         await self.incoming.put(_CLOSED)
 
 
+class ReplayFailureWebSocket(FakeWebSocket):
+    async def send(self, raw_message):
+        request = json.loads(raw_message)
+        self.sent.append(request)
+        if "ticks" in request:
+            raise ConnectionError("subscription replay failed")
+        await super().send(raw_message)
+
+
 class ConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.auth = FakeAuth()
@@ -117,6 +126,33 @@ class ConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(handler_finished.wait(), timeout=0.2)
 
         self.assertEqual(self.connection._pending_requests, {})
+
+    async def test_failed_replay_closes_failed_socket_before_next_attempt(self):
+        await self.connection.disconnect()
+        sockets = []
+
+        async def connector(url, **kwargs):
+            socket = ReplayFailureWebSocket("failed") if len(sockets) == 1 else FakeWebSocket(str(len(sockets) + 1))
+            sockets.append(socket)
+            return socket
+
+        self.connection = NexusConnection(
+            self.auth,
+            connector=connector,
+            reconnect_delays=(0, 0.01),
+            heartbeat_interval=3600,
+        )
+
+        async def handler(message):
+            return None
+
+        await self.connection.connect("DOT-DEMO")
+        await self.connection.subscribe("ticks:R_75", {"ticks": "R_75"}, handler)
+        await sockets[0].force_disconnect()
+        await self.connection.wait_until_connected(timeout=1, minimum_generation=2)
+
+        self.assertEqual(len(sockets), 3)
+        self.assertTrue(sockets[1].closed)
 
 
 if __name__ == "__main__":

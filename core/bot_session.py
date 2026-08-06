@@ -123,9 +123,7 @@ class BotSession:
 
             if self._active_contracts:
                 await self._set_status("STOPPING")
-                while self._active_contracts:
-                    await self.repository.touch_bot_heartbeat(self.bot_id)
-                    await asyncio.sleep(0.25)
+                await self._wait_for_active_contracts()
             await self._set_status("STOPPED")
         except asyncio.CancelledError:
             raise
@@ -141,11 +139,30 @@ class BotSession:
                 await auth.close()
             if self._owns_publisher:
                 await self.publisher.close()
+            try:
+                await self.repository.close_session(self._session_id, status="closed")
+            except Exception:
+                logger.exception(f"Falha ao encerrar journal da sessao {self._session_id}")
+
+    async def _wait_for_active_contracts(self, timeout_seconds=None):
+        timeout = float(
+            settings.SETTLEMENT_WAIT_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        deadline = asyncio.get_running_loop().time() + timeout
+        while self._active_contracts:
+            await self.repository.touch_bot_heartbeat(self.bot_id)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                unresolved = sorted(self._active_contracts)
+                raise TimeoutError(
+                    f"Settlement nao confirmado no prazo para contratos: {unresolved}"
+                )
+            await asyncio.sleep(min(0.25, remaining))
 
     async def _daily_totals(self):
-        trades = await self.repository.list_trades(self.bot_id, limit=1000)
-        closed = [item for item in trades if item.get("status") == "closed"]
-        return sum(float(item.get("profit") or 0) for item in closed), len(closed)
+        return await self.repository.get_bot_daily_stats(self.bot_id)
 
     async def _trade_loop(self, strategy, risk, circuit_breaker, proposal_manager, executor, monitor):
         symbol = self.bot.get("symbol", "R_100")
@@ -200,7 +217,15 @@ class BotSession:
             if buy:
                 await self._register_contract(buy, signal.action, strategy, monitor, circuit_breaker)
 
-    async def _register_contract(self, contract, contract_type, strategy, monitor, circuit_breaker):
+    async def _register_contract(
+        self,
+        contract,
+        contract_type,
+        strategy,
+        monitor,
+        circuit_breaker,
+        persist_open=True,
+    ):
         contract_id = int(contract["contract_id"])
         self._active_contracts.add(contract_id)
         open_trade = {
@@ -219,8 +244,9 @@ class BotSession:
             "purchase_time": contract.get("purchase_time"),
             "expiry_time": contract.get("date_expiry"),
         }
-        await self.repository.upsert_trade(open_trade)
-        await self._publish("trade.opened", trade=open_trade)
+        if persist_open:
+            await self.repository.upsert_trade(open_trade)
+            await self._publish("trade.opened", trade=open_trade)
 
         async def on_update(poc):
             await self._publish("trade.updated", trade=self._trade_payload(poc, strategy, "open"))
@@ -256,19 +282,25 @@ class BotSession:
 
     async def _recover_owned_contracts(self, monitor, strategy, circuit_breaker):
         owned = {
-            int(item["contract_id"])
+            int(item["contract_id"]): item
             for item in await self.repository.list_trades(self.bot_id, limit=1000)
             if item.get("status") == "open" and item.get("contract_id") is not None
         }
         if not owned:
             return
         portfolio = await CrashRecoveryHandler(self._connection).check_open_contracts()
-        for contract in portfolio:
-            if int(contract.get("contract_id", -1)) in owned:
-                await self._register_contract(
-                    contract,
-                    contract.get("contract_type"),
-                    strategy,
-                    monitor,
-                    circuit_breaker,
-                )
+        portfolio_by_id = {
+            int(contract["contract_id"]): contract
+            for contract in portfolio
+            if contract.get("contract_id") is not None
+        }
+        for contract_id, stored_trade in owned.items():
+            contract = portfolio_by_id.get(contract_id, stored_trade)
+            await self._register_contract(
+                contract,
+                contract.get("contract_type"),
+                strategy,
+                monitor,
+                circuit_breaker,
+                persist_open=False,
+            )

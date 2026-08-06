@@ -39,6 +39,7 @@ nexustrader.db
 
 # Logs
 *.log
+*.pid
 logs/
 
 # IDE & OS files

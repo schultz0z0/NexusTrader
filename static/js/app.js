@@ -71,6 +71,7 @@ function renderSnapshot() {
     if (snapshot.last_tick) updateMarket(snapshot.last_tick);
   } else if (bot) {
     chart.setHistory({
+      bot_id: bot.id,
       symbol: bot.symbol,
       timeframe_seconds: bot.timeframe_seconds,
       mode: Number(bot.timeframe_seconds) <= 1 ? "line" : "candles",
@@ -141,21 +142,43 @@ async function refreshAccounts() {
 }
 
 async function selectBot(id) {
-  socketToken += 1; if (socket) socket.close(); clearTimeout(reconnectTimer);
+  const token = ++socketToken; if (socket) socket.close(); clearTimeout(reconnectTimer);
   store.set({ selectedId: id, connected: false }); renderBots(); renderHeader(); setConnection(false, "Conectando");
+  connectLive(id, token);
   try {
-    const [snapshot, trades] = await Promise.all([api.snapshot(id), api.trades(id)]); store.set({ snapshot, trades }); renderSnapshot(); connectLive(id, socketToken);
+    const [fetchedSnapshot, fetchedTrades] = await Promise.all([api.snapshot(id), api.trades(id)]);
+    if (token !== socketToken) return;
+    const currentSnapshot = store.get().snapshot;
+    const snapshot = Number(currentSnapshot?.last_event_epoch || 0) > Number(fetchedSnapshot?.last_event_epoch || 0)
+      ? currentSnapshot : fetchedSnapshot;
+    const liveTrades = store.get().trades || [];
+    const recentTrades = snapshot?.recent_trades || [];
+    const trades = [...liveTrades, ...recentTrades, ...fetchedTrades].filter(
+      (trade, index, all) => all.findIndex((candidate) => candidate.contract_id === trade.contract_id) === index
+    );
+    store.set({ snapshot, trades }); renderSnapshot();
   } catch (error) { handleError(error); }
 }
 
-function connectLive(botId, token) {
-  socket = new WebSocket(websocketUrl(botId));
-  socket.onopen = () => { if (token === socketToken) { setConnection(true, "Tempo real"); socket.send("ready"); } };
-  socket.onmessage = ({ data }) => { if (token !== socketToken) return; const message = JSON.parse(data); if (message.type === "snapshot") { store.set({ snapshot: message.data }); renderSnapshot(); } else applyEvent(message); };
-  socket.onclose = () => { if (token === socketToken) { setConnection(false, "Reconectando"); reconnectTimer = setTimeout(() => connectLive(botId, token), 1800); } };
+async function connectLive(botId, token) {
+  try {
+    const { ticket } = await api.wsTicket(botId);
+    if (token !== socketToken) return;
+    const activeSocket = new WebSocket(websocketUrl(botId, ticket));
+    socket = activeSocket;
+    activeSocket.onopen = () => { if (token === socketToken) { setConnection(true, "Tempo real"); activeSocket.send("ready"); } };
+    activeSocket.onmessage = ({ data }) => { if (token !== socketToken) return; const message = JSON.parse(data); if (message.type === "snapshot") { store.set({ snapshot: message.data }); renderSnapshot(); } else applyEvent(message); };
+    activeSocket.onclose = () => { if (token === socketToken) { setConnection(false, "Reconectando"); reconnectTimer = setTimeout(() => connectLive(botId, token), 1800); } };
+  } catch (error) {
+    if (token === socketToken) {
+      setConnection(false, "Reconectando");
+      reconnectTimer = setTimeout(() => connectLive(botId, token), 1800);
+    }
+  }
 }
 
 function applyEvent(event) {
+  if (event.bot_id !== store.get().selectedId) return;
   const snapshot = store.get().snapshot || {};
   if (event.type === "market.history" && marketMatchesBot(event, selectedBot())) { snapshot.market = event; snapshot.last_tick = null; chart.setHistory(event); $("#chart-state").hidden = !(event.points || []).length; }
   if (event.type === "market.tick" && marketMatchesBot(event, selectedBot())) { snapshot.last_tick = event; updateMarket(event); }
@@ -173,6 +196,12 @@ function applyEvent(event) {
   }
   if (event.type === "runtime.status") { 
     const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); 
+    if (event.status === "STARTING") {
+      api.trades(event.bot_id).then((trades) => {
+        if (event.bot_id !== store.get().selectedId) return;
+        store.set({ trades }); renderTrades(trades);
+      }).catch(() => {});
+    }
   }
   store.set({ snapshot });
 }

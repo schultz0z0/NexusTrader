@@ -15,6 +15,8 @@ class TestFastAPIApp(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("NexusTrader", response.text)
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
 
     def test_get_bot_status(self):
         response = self.client.get("/api/v1/bot/status")

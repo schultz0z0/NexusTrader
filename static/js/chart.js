@@ -1,5 +1,14 @@
 const COLORS = { grid: "#19222f", text: "#69768a", up: "#36d399", down: "#ff5364", line: "#20d4d0", band: "#8b5cf6", middle: "#4b87ff" };
 
+function uniqueOrderedPoints(values) {
+  const byTime = new Map();
+  for (const point of values || []) {
+    const time = Number(point?.time);
+    if (Number.isFinite(time)) byTime.set(time, { ...point, time });
+  }
+  return [...byTime.values()].sort((left, right) => left.time - right.time);
+}
+
 export class TradingChart {
   constructor(container) {
     this.container = container;
@@ -30,7 +39,7 @@ export class TradingChart {
 
   ensureMode(mode, force = false) {
     if (this.mode === mode && !force) return;
-    [this.primary, this.upper, this.middle, this.lower].filter(Boolean).forEach((series) => this.chart.removeSeries(series));
+    [this.primary, this.upper, this.middle, this.lower, this.zigzag].filter(Boolean).forEach((series) => this.chart.removeSeries(series));
     this.mode = mode; this.markers = []; this.markerMap.clear(); this.markerPrimitive = null; this.priceLine = null;
     this.primary = mode === "line"
       ? this.addSeries(LightweightCharts.LineSeries, { color: COLORS.line, lineWidth: 2, crosshairMarkerRadius: 3, priceLineVisible: true })
@@ -44,7 +53,7 @@ export class TradingChart {
 
   setHistory(market) {
     const mode = market?.mode || "candles";
-    const contextKey = `${market?.symbol || ""}:${Number(market?.timeframe_seconds || 60)}:${mode}`;
+    const contextKey = `${market?.bot_id || ""}:${market?.symbol || ""}:${Number(market?.timeframe_seconds || 60)}:${mode}`;
     const contextChanged = contextKey !== this.contextKey;
     this.ensureMode(mode, contextChanged);
     this.contextKey = contextKey;
@@ -53,7 +62,7 @@ export class TradingChart {
     this.upper.setData(market?.donchian?.upper || []);
     this.middle.setData(market?.donchian?.middle || []);
     this.lower.setData(market?.donchian?.lower || []);
-    this.zigzag.setData(market?.zigzag || []);
+    this.zigzag.setData(uniqueOrderedPoints(market?.zigzag));
     this.chart.timeScale().fitContent();
   }
 
@@ -65,7 +74,7 @@ export class TradingChart {
     if (bb.upper != null) this.upper.update({ time: bandTime, value: bb.upper });
     if (bb.middle != null) this.middle.update({ time: bandTime, value: bb.middle });
     if (bb.lower != null) this.lower.update({ time: bandTime, value: bb.lower });
-    if (event.zigzag) this.zigzag.setData(event.zigzag);
+    if (event.zigzag) this.zigzag.setData(uniqueOrderedPoints(event.zigzag));
   }
 
   showTrade(trade) {

@@ -53,6 +53,10 @@ class FrontendContractTests(unittest.TestCase):
             app_source = stream.read()
 
         self.assertIn('/api/v1/accounts', api_source)
+        self.assertIn('/api/v1/ws-tickets/', api_source)
+        websocket_source = api_source[api_source.index('export function websocketUrl'):]
+        self.assertNotIn('getApiKey()', websocket_source)
+        self.assertNotIn('?key=', websocket_source)
         self.assertNotIn('account_type: "demo"', app_source)
         self.assertIn('account_type: account.account_type', app_source)
         self.assertLess(html_source.index('id="account-select"'), html_source.index('id="bot-config"'))

@@ -24,7 +24,33 @@ class FakeHttpClient:
         self.closed = True
 
 
+class FailOnceHttpClient(FakeHttpClient):
+    async def post(self, url, json, headers):
+        self.posts.append((url, json, headers))
+        if len(self.posts) == 1:
+            raise ConnectionError("temporary API outage")
+        return FakeResponse()
+
+
 class EventPublisherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_critical_trade_event_is_retried_after_transient_failure(self):
+        client = FailOnceHttpClient()
+        publisher = HttpEventPublisher(
+            base_url="http://api.test",
+            internal_token="internal",
+            client=client,
+            queue_max=10,
+            retry_delays=(0,),
+        )
+        await publisher.start()
+        await publisher.publish({"type": "trade.closed", "event_id": "closed-42"})
+        await publisher.flush()
+        await publisher.close()
+
+        self.assertEqual(len(client.posts), 2)
+        self.assertEqual(client.posts[0][1], client.posts[1][1])
+        self.assertEqual(publisher.failed_events, 0)
+
     async def test_worker_reuses_one_client_for_multiple_events(self):
         client = FakeHttpClient()
         publisher = HttpEventPublisher(

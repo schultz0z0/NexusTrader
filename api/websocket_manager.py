@@ -1,4 +1,5 @@
 import json
+import asyncio
 from collections import defaultdict
 
 from utils.logger import setup_logger
@@ -7,8 +8,9 @@ logger = setup_logger("WebSocketManager")
 
 
 class LiveWebSocketManager:
-    def __init__(self):
+    def __init__(self, send_timeout=2.0):
         self._connections = defaultdict(set)
+        self.send_timeout = float(send_timeout)
 
     async def connect(self, bot_id, websocket, snapshot):
         await websocket.accept()
@@ -21,13 +23,21 @@ class LiveWebSocketManager:
             self._connections.pop(bot_id, None)
 
     async def broadcast(self, bot_id, event):
-        stale = []
-        for websocket in tuple(self._connections.get(bot_id, ())):
+        async def send(websocket):
             try:
-                await websocket.send_text(json.dumps(event))
+                await asyncio.wait_for(
+                    websocket.send_text(json.dumps(event)),
+                    timeout=self.send_timeout,
+                )
+                return None
             except Exception:
-                stale.append(websocket)
-        for websocket in stale:
+                return websocket
+
+        connections = tuple(self._connections.get(bot_id, ()))
+        if not connections:
+            return
+        stale = await asyncio.gather(*(send(websocket) for websocket in connections))
+        for websocket in filter(None, stale):
             self.disconnect(bot_id, websocket)
 
 

@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
+from core.bot_session import BotSession
 from trading.executor import OrderExecutor
 from trading.monitor import ContractMonitor
 from trading.safety import RealTradingDisabled, ensure_demo_account
@@ -51,6 +53,27 @@ class DemoExecutionGuardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_settlement_callback_is_retried_on_next_sold_update(self):
+        connection = FakeConnection()
+        monitor = ContractMonitor(connection)
+        attempts = []
+
+        async def on_settled(contract):
+            attempts.append(contract["contract_id"])
+            if len(attempts) == 1:
+                raise RuntimeError("database temporarily unavailable")
+
+        await monitor.monitor_contract(42, on_settled)
+        callback = connection.subscriptions["contract:42"]
+        sold = {"proposal_open_contract": {"contract_id": 42, "is_sold": 1, "status": "won", "profit": "0.95"}}
+
+        with self.assertRaises(RuntimeError):
+            await callback(sold)
+        await callback(sold)
+
+        self.assertEqual(attempts, [42, 42])
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
+
     async def test_duplicate_sold_update_settles_contract_once(self):
         connection = FakeConnection()
         monitor = ContractMonitor(connection)
@@ -103,6 +126,67 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertEqual(updates, ["100.25"])
+
+
+class CrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_wait_has_a_bounded_failure_state(self):
+        class Repository:
+            async def touch_bot_heartbeat(self, bot_id):
+                return None
+
+        class Publisher:
+            async def publish(self, event):
+                return True
+
+        session = BotSession(Repository(), {"id": "bot-a"}, publisher=Publisher())
+        session._active_contracts.add(42)
+
+        with self.assertRaises(TimeoutError):
+            await session._wait_for_active_contracts(timeout_seconds=0.01)
+
+    async def test_db_owned_contract_is_resubscribed_even_when_portfolio_is_empty(self):
+        class Repository:
+            def __init__(self):
+                self.upserts = []
+
+            async def list_trades(self, bot_id, limit=1000):
+                return [{
+                    "bot_id": bot_id, "contract_id": 42, "contract_type": "CALL",
+                    "symbol": "R_75", "stake": 1.0, "status": "open",
+                }]
+
+            async def upsert_trade(self, trade):
+                self.upserts.append(trade)
+
+        class Publisher:
+            async def publish(self, event):
+                return True
+
+        class Monitor:
+            def __init__(self):
+                self.contracts = []
+
+            async def monitor_contract(self, contract_id, on_settled, on_update_callback=None):
+                self.contracts.append(contract_id)
+
+        class Strategy:
+            def name(self):
+                return "Donchian+ZigZag"
+
+        repository = Repository()
+        session = BotSession(repository, {
+            "id": "bot-a", "symbol": "R_75", "initial_stake": 1.0,
+        }, publisher=Publisher())
+        session._connection = object()
+        monitor = Monitor()
+
+        with patch("core.bot_session.CrashRecoveryHandler") as recovery_type:
+            recovery_type.return_value.check_open_contracts = AsyncMock(return_value=[])
+            await session._recover_owned_contracts(monitor, Strategy(), object())
+
+        self.assertEqual(monitor.contracts, [42])
+        self.assertEqual(session._active_contracts, {42})
+        self.assertEqual(repository.upserts, [])
 
 
 if __name__ == "__main__":

@@ -29,10 +29,10 @@ export const api = {
   stopBot: (id) => request(`/api/v1/bots/${id}/stop`, { method: "POST" }),
   trades: (id) => request(`/api/v1/bots/${id}/trades?limit=100`),
   snapshot: (id) => request(`/api/v1/bots/${id}/snapshot`),
+  wsTicket: (id) => request(`/api/v1/ws-tickets/${id}`, { method: "POST" }),
 };
 
-export function websocketUrl(botId) {
+export function websocketUrl(botId, ticket) {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const key = encodeURIComponent(getApiKey());
-  return `${protocol}//${location.host}/api/v1/ws/bots/${encodeURIComponent(botId)}?key=${key}`;
+  return `${protocol}//${location.host}/api/v1/ws/bots/${encodeURIComponent(botId)}?ticket=${encodeURIComponent(ticket)}`;
 }

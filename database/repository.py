@@ -2,7 +2,7 @@ import aiosqlite
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from config.settings import settings
 from database.models import DatabaseModels
@@ -183,6 +183,14 @@ class DatabaseRepository:
             )
             await db.commit()
 
+    async def close_session(self, session_id: str, status: str = "closed"):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute(
+                "UPDATE sessions SET end_time = CURRENT_TIMESTAMP, status = ? WHERE id = ?",
+                (status, session_id),
+            )
+            await db.commit()
+
     async def save_trade(self, trade_data: dict):
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute("PRAGMA journal_mode=WAL;")
@@ -353,6 +361,26 @@ class DatabaseRepository:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_bot_daily_stats(self, bot_id: str):
+        business_zone = ZoneInfo(settings.BUSINESS_TIMEZONE)
+        local_today = datetime.now(business_zone).date()
+        start_local = datetime.combine(local_today, time.min, tzinfo=business_zone)
+        end_local = start_local + timedelta(days=1)
+        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute(
+                """
+                SELECT COALESCE(SUM(profit), 0.0), COUNT(*)
+                FROM trades
+                WHERE bot_id = ? AND status = 'closed'
+                  AND created_at >= ? AND created_at < ?
+                """,
+                (bot_id, start_utc, end_utc),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return float(row[0]), int(row[1])
 
     async def get_daily_stats(self) -> dict:
         """Calcula PnL e quantidade de trades do dia atual."""

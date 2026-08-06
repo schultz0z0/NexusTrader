@@ -118,6 +118,8 @@ class MarketDataHandler:
                     "symbol": self.symbol,
                 })
                 self._candles.append(point)
+            if points:
+                self._aggregator.seed(points[-1])
 
         donchian, zigzag = self._calculate_history_indicators(points)
 
