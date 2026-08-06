@@ -65,7 +65,7 @@ class MarketDataHandler:
         donchian = {"upper": upper_hist, "middle": middle_hist, "lower": lower_hist}
         
         from utils.indicators import calculate_zigzag
-        zigzag = calculate_zigzag(points, depth=15, deviation=1.0, backstep=3)
+        zigzag = calculate_zigzag(points, depth=15, deviation=0.0, backstep=3)
 
         return donchian, zigzag
 

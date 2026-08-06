@@ -15,7 +15,7 @@ class DonchianZigZagStrategy(BaseStrategy):
     def __init__(self, money_manager: Optional[MoneyManager] = None):
         super().__init__(money_manager or MoneyManager())
         self.period = 21
-        self.zigzag_dev = 1.0 # 1%
+        self.zigzag_dev = 0.0 # Pivot Puro, sem filtro de % adicional
         self.duration = 2
         self.duration_unit = 'm'
         self._last_signal_time = 0
