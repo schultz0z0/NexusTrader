@@ -14,6 +14,7 @@ from risk.circuit_breaker import CircuitBreaker
 from risk.risk_manager import RiskManager
 from strategies.base import MoneyManager
 from strategies.bollinger import BollingerBandsStrategy
+from strategies.donchian_zigzag import DonchianZigZagStrategy
 from trading.executor import OrderExecutor
 from trading.monitor import ContractMonitor
 from trading.proposal import ProposalManager
@@ -52,8 +53,9 @@ class BotSession:
 
     def _build_strategy(self):
         strategy_id = self.bot.get("strategy_id", "bollinger")
-        if strategy_id != "bollinger":
+        if strategy_id not in ("bollinger", "donchian"):
             raise ValueError(f"Estrategia nao suportada: {strategy_id}")
+            
         strategy_config = self.bot.get("strategy_config") or {}
         money_config = self.bot.get("money_config") or {}
         money = MoneyManager(
@@ -64,13 +66,19 @@ class BotSession:
             soros_levels=int(money_config.get("levels", 2)),
             soros_percent=float(money_config.get("percent", 0.5)),
         )
-        return BollingerBandsStrategy(
-            period=int(strategy_config.get("period", 20)),
-            std_dev=float(strategy_config.get("std_dev", 2.0)),
-            money_manager=money,
-            duration=int(self.bot.get("duration", 5)),
-            duration_unit=self.bot.get("duration_unit", "t"),
-        )
+        
+        if strategy_id == "bollinger":
+            return BollingerBandsStrategy(
+                period=int(strategy_config.get("period", 20)),
+                std_dev=float(strategy_config.get("std_dev", 2.0)),
+                money_manager=money,
+                duration=int(self.bot.get("duration", 5)),
+                duration_unit=self.bot.get("duration_unit", "t"),
+            )
+        elif strategy_id == "donchian":
+            return DonchianZigZagStrategy(
+                money_manager=money,
+            )
 
     async def run(self):
         ensure_account_allowed(self.bot)
@@ -110,8 +118,8 @@ class BotSession:
                 self._connection,
                 bot_id=self.bot_id,
                 publisher=self.publisher,
-                bollinger_period=strategy.period,
-                bollinger_std_dev=strategy.std_dev,
+                bollinger_period=getattr(strategy, "period", 21),
+                bollinger_std_dev=getattr(strategy, "std_dev", None),
             )
             await self._market_data.start(
                 self.bot.get("symbol", "R_100"),

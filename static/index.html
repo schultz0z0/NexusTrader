@@ -53,7 +53,7 @@
           <div id="chart-state" class="chart-state">
             <span class="loader"></span><strong>Aguardando stream de mercado</strong><small>O histórico aparece assim que o robô conecta à Deriv.</small>
           </div>
-          <div class="chart-legend"><span class="legend-price">Preço</span><span class="legend-upper">BB superior</span><span class="legend-mid">Média</span><span class="legend-lower">BB inferior</span></div>
+          <div class="chart-legend"><span class="legend-price">Preço</span><span class="legend-upper" id="legend-upper">BB superior</span><span class="legend-mid" id="legend-mid">Média</span><span class="legend-lower" id="legend-lower">BB inferior</span></div>
           <a class="tv-attribution" href="https://www.tradingview.com/" target="_blank" rel="noopener">Charts by TradingView</a>
         </div>
       </section>
@@ -110,9 +110,9 @@
         <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>
-        <label>Modelo<select name="strategy_id"><option value="bollinger">Bollinger Mean Reversion</option></select></label>
-        <div class="form-row"><label>Período<input name="period" type="number" min="5" value="20"></label><label>Desvio padrão<input name="std_dev" type="number" min="0.5" step="0.1" value="2"></label></div>
-        <div class="form-row"><label>Expiração<input name="duration" type="number" min="1" value="5"></label><label>Unidade<select name="duration_unit"><option value="t">Ticks</option><option value="m">Minutos</option></select></label></div>
+        <label>Modelo<select name="strategy_id" id="strategy-select"><option value="bollinger">Bollinger Mean Reversion</option><option value="donchian">Donchian + ZigZag</option></select></label>
+        <div class="form-row" id="bollinger-config-row"><label>Período<input name="period" type="number" min="5" value="20"></label><label>Desvio padrão<input name="std_dev" type="number" min="0.5" step="0.1" value="2"></label></div>
+        <div class="form-row" id="duration-config-row"><label>Expiração<input name="duration" type="number" min="1" value="5"></label><label>Unidade<select name="duration_unit"><option value="t">Ticks</option><option value="m">Minutos</option></select></label></div>
       </fieldset>
       <fieldset><legend>Gestão de stake</legend>
         <div class="form-row"><label>Stake inicial (USD)<input name="initial_stake" type="number" min="0.35" step="0.01" value="1"></label><label>Modelo<select name="money_management"><option value="fixed">Mão fixa</option><option value="martingale">Martingale</option><option value="soros">Soros</option></select></label></div>

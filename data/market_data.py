@@ -131,14 +131,28 @@ class MarketDataHandler:
         if len(quotes) < self.bollinger_period:
             return {"upper": None, "middle": None, "lower": None}
         window = quotes[-self.bollinger_period:]
-        middle = mean(window)
-        deviation = stdev(window) if len(window) > 1 else 0.0
-        distance = deviation * self.bollinger_std_dev
-        return {
-            "upper": middle + distance,
-            "middle": middle,
-            "lower": middle - distance,
-        }
+        
+        # Se bollinger_std_dev for nulo ou nao existir, assume que eh Donchian
+        is_donchian = not hasattr(self, "bollinger_std_dev") or self.bollinger_std_dev is None
+        
+        if is_donchian:
+            upper = max(window)
+            lower = min(window)
+            middle = (upper + lower) / 2
+            return {
+                "upper": upper,
+                "middle": middle,
+                "lower": lower,
+            }
+        else:
+            middle = mean(window)
+            deviation = stdev(window) if len(window) > 1 else 0.0
+            distance = deviation * self.bollinger_std_dev
+            return {
+                "upper": middle + distance,
+                "middle": middle,
+                "lower": middle - distance,
+            }
 
     async def subscribe_ticks(self, symbol: str):
         await self.start(symbol, timeframe_seconds=self.timeframe_seconds)

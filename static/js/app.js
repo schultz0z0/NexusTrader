@@ -34,7 +34,11 @@ function renderHeader() {
   $("#market-name").textContent = bot ? "Deriv Synthetic Index" : "Selecione um robô";
   $("#timeframe-label").textContent = bot ? timeframe(bot.timeframe_seconds) : "—";
   $("#selected-bot-name").textContent = bot?.name || "Nenhum robô";
-  $("#selected-bot-strategy").textContent = bot ? "Bollinger Mean Reversion" : "—";
+  const isDonchian = bot?.strategy_id === "donchian";
+  $("#selected-bot-strategy").textContent = bot ? (isDonchian ? "Donchian + ZigZag" : "Bollinger Mean Reversion") : "—";
+  $("#legend-upper").textContent = isDonchian ? "Donchian Upper" : "BB superior";
+  $("#legend-mid").textContent = isDonchian ? "Donchian Middle" : "Média";
+  $("#legend-lower").textContent = isDonchian ? "Donchian Lower" : "BB inferior";
   const running = bot?.desired_state === "RUNNING";
   const button = $("#toggle-bot"); button.disabled = !bot; button.textContent = running ? "PARAR ROBÔ" : "INICIAR ROBÔ"; button.classList.toggle("stop", running);
   const risk = bot?.risk_config || {};
@@ -172,7 +176,9 @@ function showChartState(title, detail) {
 
 function openDrawer(isNew = false) {
   const form = $("#config-form"); form.reset(); const bot = isNew ? null : selectedBot(); $("#config-id").value = bot?.id || ""; $("#config-title").textContent = bot ? `Editar ${bot.name}` : "Novo robô";
-  if (bot) fillForm(form, bot); $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
+  if (bot) fillForm(form, bot); 
+  $("#strategy-select")?.dispatchEvent(new Event("change"));
+  $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
 }
 function closeDrawer() { $("#bot-config").classList.remove("open"); $("#bot-config").setAttribute("aria-hidden", "true"); $("#drawer-backdrop").hidden = true; $("#form-error").hidden = true; }
 function fillForm(form, bot) { const values = { ...bot, ...(bot.strategy_config || {}), ...(bot.money_config || {}), ...(bot.risk_config || {}) }; Object.entries(values).forEach(([key, value]) => { if (form.elements[key] && typeof value !== "object") form.elements[key].value = value; }); }
@@ -248,6 +254,22 @@ $("#bot-list").addEventListener("click", (event) => { const button = event.targe
 $("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $("#account-select").addEventListener("change", changeGlobalAccount);
 $("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(false));
+
+$("#strategy-select").addEventListener("change", (e) => {
+  const isDonchian = e.target.value === "donchian";
+  const bollingerRow = $("#bollinger-config-row");
+  const durationRow = $("#duration-config-row");
+  const timeframeSelect = document.querySelector('select[name="timeframe_seconds"]');
+  if (bollingerRow) bollingerRow.hidden = isDonchian;
+  if (durationRow) durationRow.hidden = isDonchian;
+  if (timeframeSelect) timeframeSelect.parentElement.hidden = isDonchian;
+  if (isDonchian) {
+    const form = $("#config-form");
+    if (form.elements["duration"]) form.elements["duration"].value = "2";
+    if (form.elements["duration_unit"]) form.elements["duration_unit"].value = "m";
+    if (timeframeSelect) timeframeSelect.value = "60";
+  }
+});
 $("#confirm-real-start").addEventListener("click", () => closeRealConfirmation(true));
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
 $("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } if (starting && account.account_type === "real" && !(await confirmRealStart(bot, account))) return; try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; snapshot.recent_trades = []; store.set({ trades: [], snapshot }); chart.clearMarkers(); renderActiveTrade(null); renderTrades([]); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } const updated = starting ? await api.startBot(bot.id) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
