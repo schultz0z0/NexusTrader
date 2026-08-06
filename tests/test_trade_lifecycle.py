@@ -72,6 +72,32 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settlements, [42])
         self.assertEqual(connection.unsubscribed, ["contract:42"])
 
+    async def test_open_contract_update_is_forwarded_for_live_chart(self):
+        connection = FakeConnection()
+        monitor = ContractMonitor(connection)
+        updates = []
+
+        async def on_settled(contract):
+            return None
+
+        async def on_update(contract):
+            updates.append(contract["current_spot"])
+
+        await monitor.monitor_contract(42, on_settled, on_update_callback=on_update)
+        callback = connection.subscriptions["contract:42"]
+        await callback({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "current_spot": "100.25",
+                "profit": "0.10",
+            }
+        })
+
+        self.assertEqual(updates, ["100.25"])
+
 
 if __name__ == "__main__":
     unittest.main()

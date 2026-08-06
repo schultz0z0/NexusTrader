@@ -8,7 +8,12 @@ class ContractMonitor:
         self.connection = connection
         self._settled_contracts = set()
 
-    async def monitor_contract(self, contract_id: int, on_settled_callback) -> None:
+    async def monitor_contract(
+        self,
+        contract_id: int,
+        on_settled_callback,
+        on_update_callback=None,
+    ) -> None:
         logger.info(f"Iniciando monitoramento do contrato {contract_id}...")
         subscription_key = f"contract:{contract_id}"
         
@@ -20,6 +25,8 @@ class ContractMonitor:
         async def on_update(data):
             if 'proposal_open_contract' in data:
                 poc = data['proposal_open_contract']
+                if on_update_callback:
+                    await on_update_callback(poc)
                 is_sold = poc.get('is_sold')
                 
                 if is_sold == 1:
