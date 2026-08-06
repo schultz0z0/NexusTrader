@@ -10,6 +10,43 @@ from config.settings import settings
 from database.repository import DatabaseRepository
 
 
+class LiveStoreMarketContextTests(unittest.TestCase):
+    def test_tick_from_previous_symbol_is_ignored_after_new_history(self):
+        store = LiveStore()
+        store.apply({
+            "event_id": "history-r75", "type": "market.history", "bot_id": "bot-a",
+            "epoch": 100, "symbol": "R_75", "timeframe_seconds": 1,
+            "mode": "line", "points": [{"time": 100, "value": 51000}],
+        })
+
+        accepted = store.apply({
+            "event_id": "stale-r50", "type": "market.tick", "bot_id": "bot-a",
+            "epoch": 101, "symbol": "R_50", "timeframe_seconds": 1, "price": 200,
+        })
+
+        snapshot = store.snapshot("bot-a")
+        self.assertFalse(accepted)
+        self.assertIsNone(snapshot["last_tick"])
+        self.assertEqual(snapshot["market"]["points"], [{"time": 100, "value": 51000}])
+
+    def test_tick_from_previous_timeframe_is_ignored(self):
+        store = LiveStore()
+        store.apply({
+            "event_id": "history-1m", "type": "market.history", "bot_id": "bot-a",
+            "epoch": 100, "symbol": "R_75", "timeframe_seconds": 60,
+            "mode": "candles", "points": [],
+        })
+
+        accepted = store.apply({
+            "event_id": "stale-5m", "type": "market.tick", "bot_id": "bot-a",
+            "epoch": 101, "symbol": "R_75", "timeframe_seconds": 300, "price": 51000,
+            "candle": {"time": 0, "open": 51000, "high": 51000, "low": 51000, "close": 51000},
+        })
+
+        self.assertFalse(accepted)
+        self.assertIsNone(store.snapshot("bot-a")["last_tick"])
+
+
 class ControlPlaneTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()

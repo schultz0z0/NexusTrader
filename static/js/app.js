@@ -1,5 +1,5 @@
 import { api, ApiError, setApiKey, websocketUrl } from "./api.js";
-import { Store } from "./store.js";
+import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -41,14 +41,26 @@ function renderHeader() {
 function renderSnapshot() {
   const { snapshot } = store.get();
   if (!snapshot) return;
-  chart.setHistory(snapshot.market);
-  $("#chart-state").hidden = Boolean(snapshot.market?.points?.length);
-  if (snapshot.last_tick) updateMarket(snapshot.last_tick);
+  const bot = selectedBot();
+  if (marketMatchesBot(snapshot.market, bot)) {
+    chart.setHistory(snapshot.market);
+    $("#chart-state").hidden = Boolean(snapshot.market?.points?.length);
+    if (snapshot.last_tick) updateMarket(snapshot.last_tick);
+  } else if (bot) {
+    chart.setHistory({
+      symbol: bot.symbol,
+      timeframe_seconds: bot.timeframe_seconds,
+      mode: Number(bot.timeframe_seconds) <= 1 ? "line" : "candles",
+      points: [],
+    });
+    showChartState("Trocando mercado", `Aguardando o histórico de ${bot.symbol} · ${timeframe(bot.timeframe_seconds)}.`);
+  }
   renderActiveTrade(snapshot.active_trade);
   renderTrades(snapshot.recent_trades?.length ? snapshot.recent_trades : store.get().trades);
 }
 
 function updateMarket(event) {
+  if (!marketMatchesBot(event, selectedBot())) return;
   chart.updateTick(event);
   $("#live-price").textContent = price(event.price);
   $("#price-change").textContent = `Tick ${new Date(event.epoch * 1000).toLocaleTimeString("pt-BR")}`;
@@ -81,9 +93,9 @@ function renderTrades(trades = []) {
   $("#trade-history").innerHTML = rows.length ? rows.map((item) => `<tr><td>${formatTime(item.expiry_time || item.created_at)}</td><td>${escapeHtml(item.symbol || "—")}</td><td><span class="direction ${String(item.contract_type).toLowerCase()}">${escapeHtml(item.contract_type || "—")}</span></td><td>${price(item.entry_spot)}</td><td>${price(item.exit_spot)}</td><td>${money.format(Number(item.stake || 0))}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${Number(item.profit) >= 0 ? "WIN" : "LOSS"}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${money.format(Number(item.profit || 0))}</td></tr>`).join("") : `<tr class="empty-row"><td colspan="8">As operações encerradas aparecerão aqui em tempo real.</td></tr>`;
 }
 
-async function load() {
+async function load(preferredId = null) {
   try {
-    const bots = await api.bots(); const current = store.get().selectedId; store.set({ bots, selectedId: bots.some((b) => b.id === current) ? current : bots[0]?.id || null });
+    const bots = await api.bots(); const current = preferredId || store.get().selectedId; store.set({ bots, selectedId: bots.some((b) => b.id === current) ? current : bots[0]?.id || null });
     renderBots(); renderHeader(); if (store.get().selectedId) await selectBot(store.get().selectedId);
   } catch (error) { handleError(error); }
 }
@@ -105,8 +117,8 @@ function connectLive(botId, token) {
 
 function applyEvent(event) {
   const snapshot = store.get().snapshot || {};
-  if (event.type === "market.history") { snapshot.market = event; chart.setHistory(event); $("#chart-state").hidden = !(event.points || []).length; }
-  if (event.type === "market.tick") { snapshot.last_tick = event; updateMarket(event); }
+  if (event.type === "market.history" && marketMatchesBot(event, selectedBot())) { snapshot.market = event; snapshot.last_tick = null; chart.setHistory(event); $("#chart-state").hidden = !(event.points || []).length; }
+  if (event.type === "market.tick" && marketMatchesBot(event, selectedBot())) { snapshot.last_tick = event; updateMarket(event); }
   if (["trade.opened", "trade.updated"].includes(event.type)) { snapshot.active_trade = event.trade; renderActiveTrade(event.trade); }
   if (event.type === "trade.closed") { snapshot.active_trade = null; snapshot.recent_trades = [event.trade, ...(snapshot.recent_trades || []).filter((t) => t.contract_id !== event.trade.contract_id)]; chart.closeTrade(event.trade); renderActiveTrade(null); renderTrades(snapshot.recent_trades); toast(`Contrato #${event.trade.contract_id}: ${money.format(Number(event.trade.profit || 0))}`); }
   if (event.type === "runtime.status") { const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); }
@@ -114,6 +126,13 @@ function applyEvent(event) {
 }
 
 function setConnection(online, label) { const node = $("#connection-status"); node.classList.toggle("is-online", online); node.classList.toggle("is-offline", !online); node.querySelector("span").textContent = label; }
+
+function showChartState(title, detail) {
+  const state = $("#chart-state");
+  state.querySelector("strong").textContent = title;
+  state.querySelector("small").textContent = detail;
+  state.hidden = false;
+}
 
 function openDrawer(isNew = false) {
   const form = $("#config-form"); form.reset(); const bot = isNew ? null : selectedBot(); $("#config-id").value = bot?.id || ""; $("#config-title").textContent = bot ? `Editar ${bot.name}` : "Novo robô";
@@ -125,7 +144,7 @@ function formPayload(form) { const data = Object.fromEntries(new FormData(form))
 
 $("#bot-list").addEventListener("click", (event) => { const button = event.target.closest("[data-bot-id]"); if (button) selectBot(button.dataset.botId); });
 $("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
-$("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); await load(); await selectBot(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
+$("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
 $("#toggle-bot").addEventListener("click", async () => { const bot = selectedBot(); if (!bot) return; try { const updated = bot.desired_state === "RUNNING" ? await api.stopBot(bot.id) : await api.startBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? "Comando de início enviado." : "Parada segura solicitada."); } catch (error) { handleError(error); } });
 $("#stop-all").addEventListener("click", async () => { const running = store.get().bots.filter((bot) => bot.desired_state === "RUNNING"); await Promise.allSettled(running.map((bot) => api.stopBot(bot.id))); await load(); toast(`${running.length} robô(s) receberam parada segura.`); });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });

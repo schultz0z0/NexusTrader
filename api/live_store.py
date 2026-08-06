@@ -35,6 +35,14 @@ class LiveStore:
 
         state = self._state(event["bot_id"])
         event_type = event.get("type")
+        if event_type == "market.tick":
+            market = state["market"]
+            event_symbol = event.get("symbol")
+            event_timeframe = int(event.get("timeframe_seconds", market["timeframe_seconds"]))
+            if market.get("symbol") and event_symbol != market["symbol"]:
+                return False
+            if market.get("symbol") and event_timeframe != int(market["timeframe_seconds"]):
+                return False
         state["last_event_epoch"] = event.get("epoch")
         if event_type == "runtime.status":
             state["runtime"] = {"status": event.get("status"), "error": event.get("error")}
@@ -76,4 +84,3 @@ class LiveStore:
 
     def snapshot(self, bot_id):
         return deepcopy(self._state(bot_id))
-
