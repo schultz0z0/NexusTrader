@@ -3,6 +3,7 @@ import time
 import uuid
 
 from core.auth import AuthManager
+from core.accounts import validate_selected_account
 from core.connection import NexusConnection
 from core.event_publisher import HttpEventPublisher
 from core.events import runtime_event
@@ -16,7 +17,7 @@ from strategies.bollinger import BollingerBandsStrategy
 from trading.executor import OrderExecutor
 from trading.monitor import ContractMonitor
 from trading.proposal import ProposalManager
-from trading.safety import ensure_demo_account
+from trading.safety import ensure_account_allowed
 from utils.logger import setup_logger
 
 logger = setup_logger("BotSession")
@@ -72,9 +73,9 @@ class BotSession:
         )
 
     async def run(self):
-        ensure_demo_account(self.bot)
+        ensure_account_allowed(self.bot)
         if not self.bot.get("account_id"):
-            raise ValueError("Configure uma conta demo antes de iniciar o robo")
+            raise ValueError("Configure uma conta Deriv antes de iniciar o robo")
 
         await self.publisher.start()
         await self.repository.create_session(self._session_id)
@@ -94,8 +95,7 @@ class BotSession:
             )
             if account is None:
                 raise ValueError("Conta demo configurada nao foi encontrada no token Deriv")
-            # The persisted guard is deliberate and is checked again by OrderExecutor.
-            ensure_demo_account(self.bot.get("account_type", "demo"))
+            selected_account = validate_selected_account(self.bot, account)
             if not await self._connection.connect(self.bot["account_id"]):
                 raise ConnectionError("Nao foi possivel abrir o WebSocket autenticado da Deriv")
 
@@ -104,7 +104,7 @@ class BotSession:
             risk = RiskManager(risk_config)
             circuit_breaker = CircuitBreaker(risk_config)
             proposal_manager = ProposalManager(self._connection)
-            executor = OrderExecutor(self._connection, account_type="demo")
+            executor = OrderExecutor(self._connection, account_type=selected_account["account_type"])
             monitor = ContractMonitor(self._connection)
             self._market_data = MarketDataHandler(
                 self._connection,

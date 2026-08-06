@@ -3,12 +3,13 @@ import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 
 const $ = (selector) => document.querySelector(selector);
-const store = new Store({ bots: [], selectedId: null, snapshot: null, trades: [], connected: false });
+const store = new Store({ bots: [], accounts: [], selectedId: null, snapshot: null, trades: [], connected: false });
 const chart = new TradingChart($("#chart"));
 let socket = null;
 let socketToken = 0;
 let reconnectTimer = null;
 let countdownTimer = null;
+let realConfirmationResolver = null;
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD" });
 const price = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(Number(value) >= 100 ? 2 : 4) : "—";
 
@@ -36,6 +37,20 @@ function renderHeader() {
   const risk = bot?.risk_config || {};
   $("#metric-target").textContent = money.format(Number(risk.take_profit_daily || 0));
   $("#metric-stop").textContent = money.format(-Math.abs(Number(risk.stop_loss_daily || 0)));
+  renderAccountMode(bot);
+}
+
+function renderAccountMode(bot) {
+  const real = bot?.account_type === "real";
+  const badge = $("#environment-badge");
+  badge.classList.toggle("real", real);
+  badge.querySelector("span:last-child").textContent = real ? "CONTA REAL" : "AMBIENTE DEMO";
+  $("#account-mode-card").classList.toggle("real", real);
+  $("#account-shield").textContent = real ? "R" : "D";
+  $("#account-mode-title").textContent = real ? "Conta real" : "Conta demo";
+  $("#account-mode-detail").textContent = bot?.account_id
+    ? `${bot.account_id} · ${real ? "capital real" : "saldo virtual"}`
+    : "Selecione um robô";
 }
 
 function renderSnapshot() {
@@ -95,7 +110,10 @@ function renderTrades(trades = []) {
 
 async function load(preferredId = null) {
   try {
-    const bots = await api.bots(); const current = preferredId || store.get().selectedId; store.set({ bots, selectedId: bots.some((b) => b.id === current) ? current : bots[0]?.id || null });
+    const bots = await api.bots();
+    let accounts = store.get().accounts;
+    try { accounts = await api.accounts(); } catch (error) { if (error instanceof ApiError && error.status === 401) throw error; toast(`Contas Deriv indisponíveis: ${error.message}`, "error"); }
+    const current = preferredId || store.get().selectedId; store.set({ bots, accounts, selectedId: bots.some((b) => b.id === current) ? current : bots[0]?.id || null });
     renderBots(); renderHeader(); if (store.get().selectedId) await selectBot(store.get().selectedId);
   } catch (error) { handleError(error); }
 }
@@ -136,16 +154,49 @@ function showChartState(title, detail) {
 
 function openDrawer(isNew = false) {
   const form = $("#config-form"); form.reset(); const bot = isNew ? null : selectedBot(); $("#config-id").value = bot?.id || ""; $("#config-title").textContent = bot ? `Editar ${bot.name}` : "Novo robô";
-  if (bot) fillForm(form, bot); $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
+  populateAccountSelect(bot?.account_id); if (bot) fillForm(form, bot); syncAccountSelection(); $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
 }
 function closeDrawer() { $("#bot-config").classList.remove("open"); $("#bot-config").setAttribute("aria-hidden", "true"); $("#drawer-backdrop").hidden = true; $("#form-error").hidden = true; }
 function fillForm(form, bot) { const values = { ...bot, ...(bot.strategy_config || {}), ...(bot.money_config || {}), ...(bot.risk_config || {}) }; Object.entries(values).forEach(([key, value]) => { if (form.elements[key] && typeof value !== "object") form.elements[key].value = value; }); }
-function formPayload(form) { const data = Object.fromEntries(new FormData(form)); return { name: data.name, account_id: data.account_id, account_type: "demo", symbol: data.symbol, timeframe_seconds: Number(data.timeframe_seconds), strategy_id: data.strategy_id, strategy_config: { period: Number(data.period), std_dev: Number(data.std_dev) }, duration: Number(data.duration), duration_unit: data.duration_unit, initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
+function populateAccountSelect(preferredId = "") {
+  const select = $("#account-select");
+  const accounts = store.get().accounts || [];
+  select.innerHTML = accounts.length
+    ? accounts.map((account) => `<option value="${escapeHtml(account.account_id)}" data-account-type="${escapeHtml(account.account_type)}" data-balance="${Number(account.balance || 0)}" data-currency="${escapeHtml(account.currency || "USD")}">${account.account_type === "real" ? "REAL" : "DEMO"} · ${escapeHtml(account.account_id)} · ${money.format(Number(account.balance || 0))}</option>`).join("")
+    : `<option value="">Nenhuma conta disponível</option>`;
+  if (preferredId && accounts.some((account) => account.account_id === preferredId)) select.value = preferredId;
+}
+function syncAccountSelection() {
+  const option = $("#account-select").selectedOptions[0];
+  const type = option?.dataset.accountType || "demo";
+  $("#account-type").value = type;
+  const summary = $("#account-summary");
+  summary.classList.toggle("real", type === "real");
+  summary.textContent = option?.value
+    ? type === "real" ? "ATENÇÃO: operações nesta configuração usarão dinheiro real." : "Ambiente virtual: indicado para validação e testes."
+    : "Não foi possível consultar as contas autorizadas pelo token Deriv.";
+}
+function formPayload(form) { const data = Object.fromEntries(new FormData(form)); return { name: data.name, account_id: data.account_id, account_type: data.account_type, symbol: data.symbol, timeframe_seconds: Number(data.timeframe_seconds), strategy_id: data.strategy_id, strategy_config: { period: Number(data.period), std_dev: Number(data.std_dev) }, duration: Number(data.duration), duration_unit: data.duration_unit, initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
+
+function confirmRealStart(bot) {
+  $("#real-confirm-account").textContent = bot.account_id;
+  $("#real-confirm-bot").textContent = bot.name;
+  $("#real-account-dialog").hidden = false;
+  return new Promise((resolve) => { realConfirmationResolver = resolve; });
+}
+function closeRealConfirmation(confirmed) {
+  $("#real-account-dialog").hidden = true;
+  const resolve = realConfirmationResolver; realConfirmationResolver = null;
+  if (resolve) resolve(confirmed);
+}
 
 $("#bot-list").addEventListener("click", (event) => { const button = event.target.closest("[data-bot-id]"); if (button) selectBot(button.dataset.botId); });
 $("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#account-select").addEventListener("change", syncAccountSelection);
+$("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(false));
+$("#confirm-real-start").addEventListener("click", () => closeRealConfirmation(true));
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
-$("#toggle-bot").addEventListener("click", async () => { const bot = selectedBot(); if (!bot) return; try { const updated = bot.desired_state === "RUNNING" ? await api.stopBot(bot.id) : await api.startBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? "Comando de início enviado." : "Parada segura solicitada."); } catch (error) { handleError(error); } });
+$("#toggle-bot").addEventListener("click", async () => { const bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; if (starting && bot.account_type === "real" && !(await confirmRealStart(bot))) return; try { const updated = starting ? await api.startBot(bot.id) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${bot.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
 $("#stop-all").addEventListener("click", async () => { const running = store.get().bots.filter((bot) => bot.desired_state === "RUNNING"); await Promise.allSettled(running.map((bot) => api.stopBot(bot.id))); await load(); toast(`${running.length} robô(s) receberam parada segura.`); });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });
 

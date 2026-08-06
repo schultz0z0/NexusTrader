@@ -81,6 +81,20 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok", "database": "ok"})
 
+    def test_account_catalog_returns_normalized_real_and_demo_accounts(self):
+        async def account_provider():
+            return [
+                {"account_id": "ROT100", "account_type": "real", "balance": "0.00", "currency": "USD", "status": "active"},
+                {"account_id": "DOT200", "account_type": "demo", "balance": "1000.00", "currency": "USD", "status": "active"},
+            ]
+
+        with TestClient(create_app(self.repository, self.live_store, account_provider=account_provider)) as client:
+            response = client.get("/api/v1/accounts")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"][0]["account_type"], "real")
+        self.assertEqual(response.json()["data"][1]["balance"], 1000.0)
+
     def test_real_account_configuration_is_rejected(self):
         response = self.client.post("/api/v1/bots", json={
             "name": "Conta real",

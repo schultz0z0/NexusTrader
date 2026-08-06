@@ -1,5 +1,5 @@
 from utils.logger import setup_logger
-from trading.safety import ensure_demo_account
+from trading.safety import ensure_account_allowed
 
 logger = setup_logger("OrderExecutor")
 
@@ -9,7 +9,7 @@ class OrderExecutor:
         self.account_type = account_type
 
     async def buy(self, proposal_id: str, price: float) -> dict:
-        ensure_demo_account(self.account_type)
+        ensure_account_allowed(self.account_type)
         request = {
             "buy": proposal_id,
             "price": price

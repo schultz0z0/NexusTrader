@@ -17,7 +17,7 @@
         <span class="brand-mark"><span></span></span>
         <span><strong>NEXUS</strong><small>TRADER</small></span>
       </a>
-      <div class="environment"><span class="pulse"></span> AMBIENTE DEMO</div>
+      <div id="environment-badge" class="environment"><span class="pulse"></span><span>AMBIENTE DEMO</span></div>
       <div class="command-spacer"></div>
       <div id="connection-status" class="connection is-offline"><i></i><span>Desconectado</span></div>
       <button id="open-config" class="icon-button" type="button" title="Configurar robô" aria-label="Configurar robô">
@@ -29,7 +29,7 @@
     <aside class="bot-rail">
       <div class="rail-title"><span>ROBÔS</span><button id="new-bot" aria-label="Novo robô" title="Novo robô">+</button></div>
       <nav id="bot-list" class="bot-list" aria-label="Lista de robôs"></nav>
-      <div class="rail-foot"><span class="shield">D</span><p><strong>Demo lock</strong><small>Ordens reais bloqueadas</small></p></div>
+      <div id="account-mode-card" class="rail-foot"><span id="account-shield" class="shield">D</span><p><strong id="account-mode-title">Conta demo</strong><small id="account-mode-detail">Operações em ambiente virtual</small></p></div>
     </aside>
 
     <main class="workspace">
@@ -101,7 +101,13 @@
       <input id="config-id" type="hidden">
       <fieldset><legend>Identidade e mercado</legend>
         <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: BB Vol 100 — 1m"></label>
-        <label>Conta demo Deriv<input name="account_id" required placeholder="Ex.: VRTC123456"></label>
+        <label>Conta Deriv
+          <select id="account-select" name="account_id" required aria-describedby="account-summary">
+            <option value="">Carregando contas...</option>
+          </select>
+          <input id="account-type" name="account_type" type="hidden" value="demo">
+          <small id="account-summary" class="account-summary">A conta e o saldo serão consultados diretamente na Deriv.</small>
+        </label>
         <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>
@@ -122,6 +128,17 @@
       <div class="drawer-actions"><button id="cancel-config" type="button" class="secondary-button">Cancelar</button><button type="submit" class="primary-button">SALVAR CONFIGURAÇÃO</button></div>
     </form>
   </aside>
+
+  <div id="real-account-dialog" class="confirmation-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="real-account-title">
+    <section class="confirmation-card real-warning">
+      <span class="warning-icon">!</span>
+      <div class="eyebrow">CONFIRMAÇÃO DE SEGURANÇA</div>
+      <h2 id="real-account-title">Iniciar robô em conta REAL?</h2>
+      <p id="real-account-message">Esta ação pode enviar ordens com dinheiro real. Revise conta, ativo, stake, meta e stop antes de continuar.</p>
+      <div class="confirmation-details"><span>Conta</span><strong id="real-confirm-account">—</strong><span>Robô</span><strong id="real-confirm-bot">—</strong></div>
+      <div class="confirmation-actions"><button id="cancel-real-start" class="secondary-button" type="button">CANCELAR</button><button id="confirm-real-start" class="real-button" type="button">SIM, INICIAR EM REAL</button></div>
+    </section>
+  </div>
 
   <div id="auth-gate" class="auth-gate" hidden>
     <form id="auth-form" class="auth-card"><span class="brand-mark"><span></span></span><div><div class="eyebrow">ACESSO RESTRITO</div><h2>NexusTrader Desk</h2><p>Informe a chave do dashboard configurada no servidor.</p></div><label>Chave de acesso<input id="api-key" type="password" autocomplete="current-password" required></label><button class="primary-button" type="submit">ENTRAR</button><small id="auth-error"></small></form>

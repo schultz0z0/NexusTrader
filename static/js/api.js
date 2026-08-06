@@ -20,6 +20,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  accounts: () => request("/api/v1/accounts"),
   bots: () => request("/api/v1/bots"),
   bot: (id) => request(`/api/v1/bots/${id}`),
   createBot: (data) => request("/api/v1/bots", { method: "POST", body: JSON.stringify(data) }),
