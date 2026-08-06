@@ -127,6 +127,15 @@ async function load(preferredId = null) {
   } catch (error) { handleError(error); }
 }
 
+async function refreshAccounts() {
+  try {
+    const accounts = await api.accounts();
+    store.set({ accounts });
+    populateAccountSelect(activeAccountId);
+    syncAccountSelection(false);
+  } catch { /* silent — balance will update on next full load */ }
+}
+
 async function selectBot(id) {
   socketToken += 1; if (socket) socket.close(); clearTimeout(reconnectTimer);
   store.set({ selectedId: id, connected: false }); renderBots(); renderHeader(); setConnection(false, "Conectando");
@@ -147,7 +156,7 @@ function applyEvent(event) {
   if (event.type === "market.history" && marketMatchesBot(event, selectedBot())) { snapshot.market = event; snapshot.last_tick = null; chart.setHistory(event); $("#chart-state").hidden = !(event.points || []).length; }
   if (event.type === "market.tick" && marketMatchesBot(event, selectedBot())) { snapshot.last_tick = event; updateMarket(event); }
   if (["trade.opened", "trade.updated"].includes(event.type)) { snapshot.active_trade = event.trade; renderActiveTrade(event.trade); }
-  if (event.type === "trade.closed") { snapshot.active_trade = null; snapshot.recent_trades = [event.trade, ...(snapshot.recent_trades || []).filter((t) => t.contract_id !== event.trade.contract_id)]; chart.closeTrade(event.trade); renderActiveTrade(null); renderTrades(snapshot.recent_trades); toast(`Contrato #${event.trade.contract_id}: ${money.format(Number(event.trade.profit || 0))}`); }
+  if (event.type === "trade.closed") { snapshot.active_trade = null; snapshot.recent_trades = [event.trade, ...(snapshot.recent_trades || []).filter((t) => t.contract_id !== event.trade.contract_id)]; chart.closeTrade(event.trade); renderActiveTrade(null); renderTrades(snapshot.recent_trades); toast(`Contrato #${event.trade.contract_id}: ${money.format(Number(event.trade.profit || 0))}`); refreshAccounts(); }
   if (event.type === "runtime.status") { const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); }
   store.set({ snapshot });
 }
