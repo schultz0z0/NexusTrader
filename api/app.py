@@ -70,9 +70,9 @@ def create_app(repository=None, live_store=None, account_provider=None):
     @application.get("/api/v1/strategies", dependencies=[Depends(require_dashboard_key)])
     async def strategies():
         return {"status": "success", "data": [{
-            "id": "bollinger",
-            "name": "Bollinger Mean Reversion",
-            "description": "Reversao a media nas bandas superior e inferior",
+            "id": "donchian",
+            "name": "Donchian + ZigZag",
+            "description": "Estrategia baseada no Donchian Channel com filtro de ZigZag puro",
         }]}
 
     @application.get("/api/v1/accounts", dependencies=[Depends(require_dashboard_key)])
