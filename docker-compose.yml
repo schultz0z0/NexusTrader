@@ -5,15 +5,23 @@ services:
       dockerfile: Dockerfile
     container_name: nexustrader-api
     restart: unless-stopped
-    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto
+    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers
     env_file:
-      - .env
+      - "${ENV_FILE:-.env}"
     environment:
-      - DB_PATH=/app/data/nexus_trader.db
+      DB_PATH: /app/data/nexus_trader.db
     volumes:
       - nexus-data:/app/data
     ports:
-      - "${HOST_PORT:-8989}:8000"
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-8989}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN}`)"
@@ -28,16 +36,19 @@ services:
     container_name: nexustrader-bot
     restart: unless-stopped
     command: python main.py
+    stop_grace_period: 7m
     depends_on:
-      - nexus-api
+      nexus-api:
+        condition: service_healthy
     env_file:
-      - .env
+      - "${ENV_FILE:-.env}"
     environment:
-      - DB_PATH=/app/data/nexus_trader.db
-      - API_HOST=nexus-api
-      - API_PORT=8000
+      DB_PATH: /app/data/nexus_trader.db
+      API_BASE_URL: http://nexus-api:8000
     volumes:
       - nexus-data:/app/data
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   nexus-data:

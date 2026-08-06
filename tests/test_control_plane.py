@@ -38,6 +38,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started.json()["data"]["desired_state"], "RUNNING")
         self.assertEqual(stopped.json()["data"]["desired_state"], "STOPPED")
 
+    def test_health_endpoint_reports_database_and_control_plane_ready(self):
+        response = self.client.get("/api/v1/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "database": "ok"})
+
     def test_real_account_configuration_is_rejected(self):
         response = self.client.post("/api/v1/bots", json={
             "name": "Conta real",

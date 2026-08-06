@@ -6,6 +6,7 @@ from core.auth import AuthManager
 from core.connection import NexusConnection
 from core.event_publisher import HttpEventPublisher
 from core.events import runtime_event
+from config.settings import settings
 from core.recovery import CrashRecoveryHandler
 from data.market_data import MarketDataHandler
 from risk.circuit_breaker import CircuitBreaker
@@ -154,7 +155,7 @@ class BotSession:
                 await asyncio.sleep(0.2)
                 continue
             latest = self._market_data.get_latest_tick(symbol)
-            if not latest or time.time() - int(latest.get("epoch", 0)) > 15:
+            if not latest or time.time() - int(latest.get("epoch", 0)) > settings.MARKET_STALE_AFTER_SECONDS:
                 await asyncio.sleep(0.5)
                 continue
             is_tripped, remaining = circuit_breaker.is_tripped()

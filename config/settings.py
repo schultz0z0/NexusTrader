@@ -10,8 +10,6 @@ class Settings(BaseSettings):
     
     # Endpoints
     DERIV_REST_BASE_URL: str = "https://api.derivws.com"
-    DERIV_WS_ENDPOINT: str = "wss://ws.derivws.com/websockets/v3"
-    
     # Configuracoes
     DERIV_ACCOUNT_TYPE: str = "demo"
     LOG_LEVEL: str = "INFO"

@@ -109,7 +109,6 @@ class AuthManager:
                 
                 if ws_url:
                     logger.info("URL WebSocket pre-autenticada recebida com sucesso!")
-                    logger.info(f"URL: {ws_url[:60]}... (Valida por 120 segundos)")
                     return ws_url
                 else:
                     logger.error(f"Formato de resposta OTP inesperado: {data}")

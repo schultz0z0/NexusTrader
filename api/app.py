@@ -51,6 +51,11 @@ def create_app(repository=None, live_store=None):
     application.include_router(legacy_trades_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(internal_router)
 
+    @application.get("/api/v1/health", include_in_schema=False)
+    async def health():
+        await repository.list_bots()
+        return {"status": "ok", "database": "ok"}
+
     @application.get("/api/v1/strategies", dependencies=[Depends(require_dashboard_key)])
     async def strategies():
         return {"status": "success", "data": [{
