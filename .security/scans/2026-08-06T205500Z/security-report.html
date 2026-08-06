@@ -67,7 +67,7 @@ expected vazio → nenhuma rejeição.</code></pre></details>
 <div class="pentest-item"><strong>P1: Controle REST sem chave em produção </strong><span class="result-pass">PASS</span><details><summary>Detalhes</summary><p>GET /api/v1/bots retornou 401; health permaneceu público.</p></details></div>
 <div class="pentest-item"><strong>P2: Cabeçalhos anti-framing em produção </strong><span class="result-fail">FAIL → FIXED</span><details><summary>Detalhes</summary><p>Ausentes em produção; middleware local validado.</p></details></div>
 <div class="pentest-item"><strong>P3: Chave na query WebSocket </strong><span class="result-fail">FAIL → FIXED</span><details><summary>Detalhes</summary><p>Vazamento reproduzido no log local; ticket single-use passou em teste e navegador.</p></details></div>
-<div class="pentest-item"><strong>P4: Lifecycle de contrato DEMO 2m </strong><span class="result-fail">EXTERNAL BLOCK</span><details><summary>Detalhes</summary><p>A Deriv retornou is_expired=1, is_settleable=1, is_sold=0 após date_settlement. sell retornou BetExpired e sell_expired não é reconhecido na API nova.</p></details></div>
+<div class="pentest-item"><strong>P4: Lifecycle e crash recovery de contrato DEMO 2m </strong><span class="result-pass">PASS</span><details><summary>Detalhes</summary><p>A Deriv inicialmente manteve is_sold=0 após o vencimento. No restart controlado, o recovery resubscreveu o contrato próprio do SQLite, recebeu won e atualizou o mesmo registro para closed com lucro +0,92.</p></details></div>
 <div class="pentest-item"><strong>P5: Stack e gráfico localhost </strong><span class="result-pass">PASS</span><details><summary>Detalhes</summary><p>500 candles, tick vivo, Donchian, ZigZag, WebSocket e zero erros de console.</p></details></div>
 <h2>Verificado seguro ✅</h2>
 <table><thead><tr><th>Teste</th><th>Resultado</th><th>Evidência</th></tr></thead><tbody>
@@ -80,7 +80,7 @@ expected vazio → nenhuma rejeição.</code></pre></details>
 <h2>Remediação prioritária</h2>
 <table><thead><tr><th>#</th><th>Ação</th><th>Esforço</th><th>Impacto</th></tr></thead><tbody>
 <tr><td>1</td><td>Rotacionar token Telegram no BotFather</td><td>Baixo</td><td>Fecha o único achado aberto</td></tr>
-<tr><td>2</td><td>Abrir chamado Deriv com resposta de settlement sanitizada</td><td>Baixo</td><td>Desbloqueia lifecycle real</td></tr>
+<tr><td>2</td><td>Monitorar latência de settlement e abrir chamado Deriv se voltar a exceder minutos</td><td>Baixo</td><td>Diagnóstico de atraso externo</td></tr>
 <tr><td>3</td><td>Adicionar reconciliação de compra ambígua via transaction stream</td><td>Médio</td><td>Evita contrato órfão</td></tr>
 <tr><td>4</td><td>Persistir estado de risk/money management</td><td>Médio</td><td>Consistência após restart</td></tr>
 <tr><td>5</td><td>Atualizar FastAPI/Starlette/dotenv com suíte completa</td><td>Médio</td><td>Reduz dívida de dependências</td></tr>
