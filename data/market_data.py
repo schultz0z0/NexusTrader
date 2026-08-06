@@ -1,6 +1,7 @@
 from collections import deque
 from statistics import mean, stdev
 
+from config.settings import settings
 from core.event_publisher import HttpEventPublisher
 from core.events import runtime_event
 from data.candles import CandleAggregator
@@ -20,6 +21,7 @@ class MarketDataHandler:
         buffer_size=500,
         bollinger_period=20,
         bollinger_std_dev=2.0,
+        history_resync_seconds=None,
     ):
         self.connection = connection
         self.bot_id = bot_id
@@ -37,6 +39,12 @@ class MarketDataHandler:
         self.symbol = None
         self.timeframe_seconds = 60
         self._aggregator = CandleAggregator(60)
+        self.history_resync_seconds = int(
+            history_resync_seconds
+            if history_resync_seconds is not None
+            else settings.MARKET_HISTORY_RESYNC_SECONDS
+        )
+        self._last_history_publish_epoch = 0
 
     async def start(self, symbol: str, timeframe_seconds: int = 60):
         self.symbol = symbol
@@ -121,8 +129,10 @@ class MarketDataHandler:
             if points:
                 self._aggregator.seed(points[-1])
 
-        donchian, zigzag = self._calculate_history_indicators(points)
+        await self._publish_history(points, line_mode)
 
+    async def _publish_history(self, points, line_mode, epoch=None):
+        donchian, zigzag = self._calculate_history_indicators(points)
         await self.publisher.publish(runtime_event(
             "market.history",
             self.bot_id,
@@ -133,6 +143,10 @@ class MarketDataHandler:
             donchian=donchian,
             zigzag=zigzag,
         ))
+        if epoch is not None:
+            self._last_history_publish_epoch = int(epoch)
+        elif points:
+            self._last_history_publish_epoch = int(points[-1]["time"])
 
     async def _subscribe_live_ticks(self):
         self._subscription_key = f"ticks:{self.bot_id}:{self.symbol}"
@@ -163,6 +177,17 @@ class MarketDataHandler:
                 bollinger=self._bollinger_values(),
                 zigzag=self._calculate_history_indicators(list(self._candles))[1],
             ))
+            if epoch - self._last_history_publish_epoch >= self.history_resync_seconds:
+                if self.timeframe_seconds <= 1:
+                    points = [
+                        {"time": int(item["epoch"]), "value": float(item["quote"])}
+                        for item in self._ticks
+                    ]
+                    line_mode = True
+                else:
+                    points = list(self._candles)
+                    line_mode = False
+                await self._publish_history(points, line_mode, epoch=epoch)
 
         await self.connection.subscribe(
             self._subscription_key,

@@ -82,6 +82,25 @@ class MarketDataHandlerTests(unittest.IsolatedAsyncioTestCase):
             "close": 12.5,
         })
 
+    async def test_running_bot_periodically_republishes_full_history_for_api_restart(self):
+        connection = FakeConnection()
+        publisher = FakePublisher()
+        handler = MarketDataHandler(
+            connection,
+            bot_id="bot-a",
+            publisher=publisher,
+            history_resync_seconds=30,
+        )
+        await handler.start("R_100", timeframe_seconds=60)
+        _, callback = connection.subscriptions["ticks:bot-a:R_100"]
+
+        await callback({"tick": {"epoch": 181, "quote": 12.5, "symbol": "R_100"}})
+        await callback({"tick": {"epoch": 211, "quote": 12.8, "symbol": "R_100"}})
+
+        self.assertEqual(publisher.events[-1]["type"], "market.history")
+        self.assertEqual(publisher.events[-1]["points"][-1]["time"], 180)
+        self.assertEqual(publisher.events[-1]["points"][-1]["close"], 12.8)
+
 
 if __name__ == "__main__":
     unittest.main()

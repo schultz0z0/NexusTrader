@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     RUNTIME_HEARTBEAT_SECONDS: int = 5
     MARKET_STALE_AFTER_SECONDS: int = 15
     SETTLEMENT_WAIT_TIMEOUT_SECONDS: int = 600
+    MARKET_HISTORY_RESYNC_SECONDS: int = 30
     
     # Notificacoes
     TELEGRAM_BOT_TOKEN: str = ""
@@ -50,6 +51,8 @@ class Settings(BaseSettings):
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:
             raise ValueError("SETTLEMENT_WAIT_TIMEOUT_SECONDS deve ser positivo")
+        if self.MARKET_HISTORY_RESYNC_SECONDS < 5:
+            raise ValueError("MARKET_HISTORY_RESYNC_SECONDS deve ser pelo menos 5")
         return self
 
 settings = Settings()
