@@ -79,7 +79,7 @@ function renderSnapshot() {
     showChartState("Trocando mercado", `Aguardando o histórico de ${bot.symbol} · ${timeframe(bot.timeframe_seconds)}.`);
   }
   renderActiveTrade(snapshot.active_trade);
-  renderTrades(snapshot.recent_trades?.length ? snapshot.recent_trades : store.get().trades);
+  renderTrades(store.get().trades || []);
 }
 
 function updateMarket(event) {
@@ -160,8 +160,20 @@ function applyEvent(event) {
   if (event.type === "market.history" && marketMatchesBot(event, selectedBot())) { snapshot.market = event; snapshot.last_tick = null; chart.setHistory(event); $("#chart-state").hidden = !(event.points || []).length; }
   if (event.type === "market.tick" && marketMatchesBot(event, selectedBot())) { snapshot.last_tick = event; updateMarket(event); }
   if (["trade.opened", "trade.updated"].includes(event.type)) { snapshot.active_trade = event.trade; renderActiveTrade(event.trade); }
-  if (event.type === "trade.closed") { snapshot.active_trade = null; snapshot.recent_trades = [event.trade, ...(snapshot.recent_trades || []).filter((t) => t.contract_id !== event.trade.contract_id)]; chart.closeTrade(event.trade); renderActiveTrade(null); renderTrades(snapshot.recent_trades); toast(`Contrato #${event.trade.contract_id}: ${money.format(Number(event.trade.profit || 0))}`); refreshAccounts(); }
-  if (event.type === "runtime.status") { const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); }
+  if (event.type === "trade.closed") { 
+    const currentTrades = store.get().trades || []; 
+    const updatedTrades = [event.trade, ...currentTrades.filter((t) => t.contract_id !== event.trade.contract_id)];
+    store.set({ trades: updatedTrades });
+    snapshot.active_trade = null; 
+    chart.closeTrade(event.trade); 
+    renderActiveTrade(null); 
+    renderTrades(updatedTrades); 
+    toast(`Contrato #${event.trade.contract_id}: ${money.format(Number(event.trade.profit || 0))}`); 
+    refreshAccounts(); 
+  }
+  if (event.type === "runtime.status") { 
+    const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); 
+  }
   store.set({ snapshot });
 }
 

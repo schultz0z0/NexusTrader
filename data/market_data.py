@@ -27,7 +27,10 @@ class MarketDataHandler:
         self._owns_publisher = publisher is None
         self.buffer_size = int(buffer_size)
         self.bollinger_period = int(bollinger_period)
-        self.bollinger_std_dev = float(bollinger_std_dev) if bollinger_std_dev is not None else None
+        try:
+            self.bollinger_std_dev = float(bollinger_std_dev)
+        except (TypeError, ValueError):
+            self.bollinger_std_dev = None
         self._ticks = deque(maxlen=self.buffer_size)
         self._candles = deque(maxlen=self.buffer_size)
         self._subscription_key = None
