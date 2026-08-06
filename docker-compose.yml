@@ -9,14 +9,14 @@ services:
     env_file:
       - "${ENV_FILE:-.env}"
     environment:
-      DB_PATH: /app/data/nexus_trader.db
+      DB_PATH: /app/storage/nexus_trader.db
       DOMAIN: "${DOMAIN:-trade.solucoes-nexus.tech}"
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
       API_BASE_URL: http://nexus-api:8000
     volumes:
-      - nexus-data:/app/data
+      - nexus-data:/app/storage
     ports:
       - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-8989}:8000"
     healthcheck:
@@ -48,14 +48,14 @@ services:
     env_file:
       - "${ENV_FILE:-.env}"
     environment:
-      DB_PATH: /app/data/nexus_trader.db
+      DB_PATH: /app/storage/nexus_trader.db
       API_BASE_URL: http://nexus-api:8000
       DOMAIN: "${DOMAIN:-trade.solucoes-nexus.tech}"
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
     volumes:
-      - nexus-data:/app/data
+      - nexus-data:/app/storage
     security_opt:
       - no-new-privileges:true
 

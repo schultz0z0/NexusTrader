@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create directory for persistent SQLite database
-RUN mkdir -p /app/data
+RUN mkdir -p /app/storage
 
 # Default command (overridden in docker-compose.yml for separate services)
 CMD ["python", "main.py"]
