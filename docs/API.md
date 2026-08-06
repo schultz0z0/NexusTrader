@@ -11,7 +11,8 @@ Rotas do dashboard recebem `X-API-Key: <DASHBOARD_API_KEY>`. O WebSocket recebe 
 | Método | Rota | Função |
 |---|---|---|
 | GET | `/bots` | Listar instâncias |
-| POST | `/bots` | Criar instância demo |
+| GET | `/accounts` | Listar contas Deriv normalizadas (`demo`/`real`) e saldo atual |
+| POST | `/bots` | Criar instância demo ou real conforme flag do servidor |
 | GET | `/bots/{bot_id}` | Obter configuração/estado |
 | PUT | `/bots/{bot_id}` | Substituir configuração e incrementar revisão |
 | DELETE | `/bots/{bot_id}` | Excluir uma instância parada |
@@ -27,7 +28,7 @@ Exemplo de criação:
   "name": "BB Vol 100 — 1m",
   "strategy_id": "bollinger",
   "strategy_config": {"period": 20, "std_dev": 2.0},
-  "account_id": "VRTC123456",
+  "account_id": "DOT123456",
   "account_type": "demo",
   "symbol": "R_100",
   "timeframe_seconds": 60,
@@ -56,6 +57,10 @@ Exemplo de criação:
 ```
 
 Depois transmite apenas eventos daquele robô: `market.history`, `market.tick`, `runtime.status`, `strategy.signal`, `risk.blocked`, `trade.opened`, `trade.updated` e `trade.closed`.
+
+Eventos de mercado cujo `symbol` ou `timeframe_seconds` não correspondem à configuração selecionada são descartados. Atualizações repetidas de contrato atualizam o P&L e o spot, mas não criam novos marcadores no gráfico.
+
+No dashboard, `/accounts` alimenta um seletor global. A escolha é aplicada às configurações paradas e não pode ser trocada durante `STARTING`, `RUNNING` ou `STOPPING`; o backend continua tratando `account_id` e `account_type` em cada robô para persistência, recuperação e validação independente do navegador.
 
 ## Interno
 

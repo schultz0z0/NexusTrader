@@ -10,6 +10,11 @@ services:
       - "${ENV_FILE:-.env}"
     environment:
       DB_PATH: /app/data/nexus_trader.db
+      DOMAIN: "${DOMAIN:-trade.solucoes-nexus.tech}"
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
+      DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
+      ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
+      API_BASE_URL: http://nexus-api:8000
     volumes:
       - nexus-data:/app/data
     ports:
@@ -24,7 +29,7 @@ services:
       - no-new-privileges:true
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN:-trade.solucoes-nexus.tech}`)"
       - "traefik.http.routers.nexustrader.entrypoints=websecure"
       - "traefik.http.routers.nexustrader.tls.certresolver=letsencrypt"
       - "traefik.http.services.nexustrader.loadbalancer.server.port=8000"
@@ -45,6 +50,10 @@ services:
     environment:
       DB_PATH: /app/data/nexus_trader.db
       API_BASE_URL: http://nexus-api:8000
+      DOMAIN: "${DOMAIN:-trade.solucoes-nexus.tech}"
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
+      DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
+      ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
     volumes:
       - nexus-data:/app/data
     security_opt:

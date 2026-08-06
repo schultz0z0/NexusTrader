@@ -18,6 +18,12 @@
         <span><strong>NEXUS</strong><small>TRADER</small></span>
       </a>
       <div id="environment-badge" class="environment"><span class="pulse"></span><span>AMBIENTE DEMO</span></div>
+      <div class="global-account">
+        <label for="account-select">CONTA GLOBAL</label>
+        <select id="account-select" aria-describedby="account-summary"><option value="">Carregando contas...</option></select>
+        <input id="account-type" type="hidden" value="demo">
+        <small id="account-summary">Sincronizando com a Deriv</small>
+      </div>
       <div class="command-spacer"></div>
       <div id="connection-status" class="connection is-offline"><i></i><span>Desconectado</span></div>
       <button id="open-config" class="icon-button" type="button" title="Configurar robô" aria-label="Configurar robô">
@@ -101,13 +107,6 @@
       <input id="config-id" type="hidden">
       <fieldset><legend>Identidade e mercado</legend>
         <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: BB Vol 100 — 1m"></label>
-        <label>Conta Deriv
-          <select id="account-select" name="account_id" required aria-describedby="account-summary">
-            <option value="">Carregando contas...</option>
-          </select>
-          <input id="account-type" name="account_type" type="hidden" value="demo">
-          <small id="account-summary" class="account-summary">A conta e o saldo serão consultados diretamente na Deriv.</small>
-        </label>
         <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>

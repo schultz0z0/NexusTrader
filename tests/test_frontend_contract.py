@@ -45,6 +45,8 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html_source = stream.read()
         with open(os.path.join(root, "static", "js", "api.js"), encoding="utf-8") as stream:
             api_source = stream.read()
         with open(os.path.join(root, "static", "js", "app.js"), encoding="utf-8") as stream:
@@ -52,7 +54,10 @@ class FrontendContractTests(unittest.TestCase):
 
         self.assertIn('/api/v1/accounts', api_source)
         self.assertNotIn('account_type: "demo"', app_source)
-        self.assertIn('account_type: data.account_type', app_source)
+        self.assertIn('account_type: account.account_type', app_source)
+        self.assertLess(html_source.index('id="account-select"'), html_source.index('id="bot-config"'))
+        config_source = html_source[html_source.index('id="bot-config"'):]
+        self.assertNotIn('name="account_id"', config_source)
 
 
 if __name__ == "__main__":

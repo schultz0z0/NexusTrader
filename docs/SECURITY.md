@@ -6,7 +6,8 @@
 - Dashboard REST usa `X-API-Key`; WebSocket é autenticado e isolado por `bot_id`.
 - Comunicação bot → API usa `X-Internal-Token`.
 - CORS não aceita origens arbitrárias.
-- Conta real é bloqueada em schema, start da API, início da sessão e imediatamente antes de `buy`.
+- Conta real é bloqueada por padrão e só é aceita quando `ALLOW_REAL_TRADING=true`; conta/tipo são revalidados na Deriv no start e a flag é conferida novamente imediatamente antes de `buy`.
+- O dashboard destaca conta real em vermelho e exige confirmação adicional antes do comando de início.
 - Containers usam `no-new-privileges` e a porta local escuta em loopback por padrão.
 - Tokens não aparecem em exemplos de documentação.
 

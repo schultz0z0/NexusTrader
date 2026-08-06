@@ -1,6 +1,6 @@
 # NexusTrader
 
-Plataforma web para orquestrar robôs de opções da Deriv com isolamento por robô, proteção de banca, gráfico em tempo real e acompanhamento completo do contrato. A execução está deliberadamente limitada a contas **demo**.
+Plataforma web para orquestrar robôs de opções da Deriv com isolamento por robô, proteção de banca, gráfico em tempo real e acompanhamento completo do contrato. Contas **demo** e **real** são selecionáveis; execução real exige liberação explícita no servidor e confirmação adicional no painel.
 
 ## Estado atual
 
@@ -8,7 +8,7 @@ Plataforma web para orquestrar robôs de opções da Deriv com isolamento por ro
 - Reconexão automática com restauração de assinaturas de ticks e contratos.
 - Múltiplos robôs independentes, configurados e iniciados pelo dashboard.
 - Gráfico de linha para 1 segundo e velas para 1/5 minutos.
-- Entrada, P&L flutuante, expiração e encerramento visíveis ao vivo.
+- Entrada, P&L flutuante, expiração e encerramento visíveis ao vivo, com um marcador de entrada e um de resultado por contrato.
 - Martingale, Soros e mão fixa; meta, stop, stake máxima, limite diário e circuit breaker.
 - API e WebSocket protegidos por chave em produção.
 
@@ -20,7 +20,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Abra `http://127.0.0.1:8989`, informe `DASHBOARD_API_KEY` e cadastre o ID da sua conta demo. Antes de operar, veja o [guia de desenvolvimento](docs/DEVELOPMENT.md) e o [runbook de produção](docs/OPERATIONS.md).
+Abra `http://127.0.0.1:8989`, informe `DASHBOARD_API_KEY` e use o seletor global no topo para escolher uma das contas retornadas pela Deriv. A troca global é bloqueada enquanto qualquer robô estiver iniciando, rodando ou parando. Valide tudo em DEMO antes de habilitar REAL. Antes de operar, veja o [guia de desenvolvimento](docs/DEVELOPMENT.md) e o [runbook de produção](docs/OPERATIONS.md).
 
 ## Documentação
 

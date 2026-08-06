@@ -3,6 +3,7 @@ import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 
 const $ = (selector) => document.querySelector(selector);
+const ACCOUNT_STORAGE_KEY = "nexus.global.account";
 const store = new Store({ bots: [], accounts: [], selectedId: null, snapshot: null, trades: [], connected: false });
 const chart = new TradingChart($("#chart"));
 let socket = null;
@@ -10,6 +11,7 @@ let socketToken = 0;
 let reconnectTimer = null;
 let countdownTimer = null;
 let realConfirmationResolver = null;
+let activeAccountId = localStorage.getItem(ACCOUNT_STORAGE_KEY) || "";
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD" });
 const price = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(Number(value) >= 100 ? 2 : 4) : "—";
 
@@ -19,6 +21,7 @@ function toast(message, type = "info") {
 }
 
 function selectedBot() { return store.get().bots.find((bot) => bot.id === store.get().selectedId); }
+function activeAccount() { return store.get().accounts.find((account) => account.account_id === activeAccountId) || null; }
 
 function renderBots() {
   const { bots, selectedId } = store.get();
@@ -37,20 +40,21 @@ function renderHeader() {
   const risk = bot?.risk_config || {};
   $("#metric-target").textContent = money.format(Number(risk.take_profit_daily || 0));
   $("#metric-stop").textContent = money.format(-Math.abs(Number(risk.stop_loss_daily || 0)));
-  renderAccountMode(bot);
+  renderAccountMode();
 }
 
-function renderAccountMode(bot) {
-  const real = bot?.account_type === "real";
+function renderAccountMode() {
+  const account = activeAccount();
+  const real = account?.account_type === "real";
   const badge = $("#environment-badge");
   badge.classList.toggle("real", real);
   badge.querySelector("span:last-child").textContent = real ? "CONTA REAL" : "AMBIENTE DEMO";
   $("#account-mode-card").classList.toggle("real", real);
   $("#account-shield").textContent = real ? "R" : "D";
   $("#account-mode-title").textContent = real ? "Conta real" : "Conta demo";
-  $("#account-mode-detail").textContent = bot?.account_id
-    ? `${bot.account_id} · ${real ? "capital real" : "saldo virtual"}`
-    : "Selecione um robô";
+  $("#account-mode-detail").textContent = account?.account_id
+    ? `${account.account_id} · ${real ? "capital real" : "saldo virtual"}`
+    : "Selecione uma conta";
 }
 
 function renderSnapshot() {
@@ -114,6 +118,11 @@ async function load(preferredId = null) {
     let accounts = store.get().accounts;
     try { accounts = await api.accounts(); } catch (error) { if (error instanceof ApiError && error.status === 401) throw error; toast(`Contas Deriv indisponíveis: ${error.message}`, "error"); }
     const current = preferredId || store.get().selectedId; store.set({ bots, accounts, selectedId: bots.some((b) => b.id === current) ? current : bots[0]?.id || null });
+    const remembered = accounts.find((account) => account.account_id === activeAccountId);
+    const configured = accounts.find((account) => account.account_id === bots.find((bot) => bot.id === store.get().selectedId)?.account_id);
+    const fallback = accounts.find((account) => account.account_type === "demo") || accounts[0];
+    activeAccountId = (remembered || configured || fallback)?.account_id || "";
+    populateAccountSelect(activeAccountId); syncAccountSelection(false);
     renderBots(); renderHeader(); if (store.get().selectedId) await selectBot(store.get().selectedId);
   } catch (error) { handleError(error); }
 }
@@ -154,7 +163,7 @@ function showChartState(title, detail) {
 
 function openDrawer(isNew = false) {
   const form = $("#config-form"); form.reset(); const bot = isNew ? null : selectedBot(); $("#config-id").value = bot?.id || ""; $("#config-title").textContent = bot ? `Editar ${bot.name}` : "Novo robô";
-  populateAccountSelect(bot?.account_id); if (bot) fillForm(form, bot); syncAccountSelection(); $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
+  if (bot) fillForm(form, bot); $("#bot-config").classList.add("open"); $("#bot-config").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").hidden = false;
 }
 function closeDrawer() { $("#bot-config").classList.remove("open"); $("#bot-config").setAttribute("aria-hidden", "true"); $("#drawer-backdrop").hidden = true; $("#form-error").hidden = true; }
 function fillForm(form, bot) { const values = { ...bot, ...(bot.strategy_config || {}), ...(bot.money_config || {}), ...(bot.risk_config || {}) }; Object.entries(values).forEach(([key, value]) => { if (form.elements[key] && typeof value !== "object") form.elements[key].value = value; }); }
@@ -166,20 +175,56 @@ function populateAccountSelect(preferredId = "") {
     : `<option value="">Nenhuma conta disponível</option>`;
   if (preferredId && accounts.some((account) => account.account_id === preferredId)) select.value = preferredId;
 }
-function syncAccountSelection() {
+function syncAccountSelection(persist = true) {
   const option = $("#account-select").selectedOptions[0];
   const type = option?.dataset.accountType || "demo";
+  activeAccountId = option?.value || "";
+  if (persist && activeAccountId) localStorage.setItem(ACCOUNT_STORAGE_KEY, activeAccountId);
   $("#account-type").value = type;
   const summary = $("#account-summary");
   summary.classList.toggle("real", type === "real");
   summary.textContent = option?.value
-    ? type === "real" ? "ATENÇÃO: operações nesta configuração usarão dinheiro real." : "Ambiente virtual: indicado para validação e testes."
+    ? `${type === "real" ? "REAL" : "DEMO"} · ${option.dataset.currency || "USD"} ${Number(option.dataset.balance || 0).toFixed(2)}`
     : "Não foi possível consultar as contas autorizadas pelo token Deriv.";
+  renderAccountMode();
 }
-function formPayload(form) { const data = Object.fromEntries(new FormData(form)); return { name: data.name, account_id: data.account_id, account_type: data.account_type, symbol: data.symbol, timeframe_seconds: Number(data.timeframe_seconds), strategy_id: data.strategy_id, strategy_config: { period: Number(data.period), std_dev: Number(data.std_dev) }, duration: Number(data.duration), duration_unit: data.duration_unit, initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
+function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: Number(data.timeframe_seconds), strategy_id: data.strategy_id, strategy_config: { period: Number(data.period), std_dev: Number(data.std_dev) }, duration: Number(data.duration), duration_unit: data.duration_unit, initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
 
-function confirmRealStart(bot) {
-  $("#real-confirm-account").textContent = bot.account_id;
+function configuredBotPayload(bot, account) {
+  return {
+    name: bot.name, account_id: account.account_id, account_type: account.account_type,
+    symbol: bot.symbol, timeframe_seconds: bot.timeframe_seconds,
+    strategy_id: bot.strategy_id, strategy_config: bot.strategy_config || {},
+    duration: bot.duration, duration_unit: bot.duration_unit,
+    initial_stake: bot.initial_stake, money_management: bot.money_management,
+    money_config: bot.money_config || {}, risk_config: bot.risk_config || {},
+  };
+}
+
+async function changeGlobalAccount() {
+  const select = $("#account-select");
+  const previousId = activeAccountId;
+  const running = store.get().bots.some((bot) => bot.desired_state === "RUNNING" || ["STARTING", "RUNNING", "STOPPING"].includes(bot.runtime_state));
+  if (running) { select.value = previousId; toast("Pare todos os robôs antes de trocar a conta global.", "error"); return; }
+  syncAccountSelection();
+  const account = activeAccount();
+  if (!account) return;
+  select.disabled = true;
+  try {
+    const updatedBots = await Promise.all(store.get().bots.map((bot) =>
+      bot.account_id === account.account_id && bot.account_type === account.account_type
+        ? Promise.resolve(bot)
+        : api.updateBot(bot.id, configuredBotPayload(bot, account))
+    ));
+    store.set({ bots: updatedBots }); renderBots(); renderHeader();
+    toast(`Conta global alterada para ${account.account_type === "real" ? "REAL" : "DEMO"} · ${account.account_id}.`);
+  } catch (error) {
+    activeAccountId = previousId; select.value = previousId; syncAccountSelection(false); handleError(error); await load();
+  } finally { select.disabled = false; }
+}
+
+function confirmRealStart(bot, account) {
+  $("#real-confirm-account").textContent = account.account_id;
   $("#real-confirm-bot").textContent = bot.name;
   $("#real-account-dialog").hidden = false;
   return new Promise((resolve) => { realConfirmationResolver = resolve; });
@@ -192,11 +237,11 @@ function closeRealConfirmation(confirmed) {
 
 $("#bot-list").addEventListener("click", (event) => { const button = event.target.closest("[data-bot-id]"); if (button) selectBot(button.dataset.botId); });
 $("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
-$("#account-select").addEventListener("change", syncAccountSelection);
+$("#account-select").addEventListener("change", changeGlobalAccount);
 $("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(false));
 $("#confirm-real-start").addEventListener("click", () => closeRealConfirmation(true));
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
-$("#toggle-bot").addEventListener("click", async () => { const bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; if (starting && bot.account_type === "real" && !(await confirmRealStart(bot))) return; try { const updated = starting ? await api.startBot(bot.id) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${bot.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
+$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } if (starting && account.account_type === "real" && !(await confirmRealStart(bot, account))) return; try { if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } const updated = starting ? await api.startBot(bot.id) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
 $("#stop-all").addEventListener("click", async () => { const running = store.get().bots.filter((bot) => bot.desired_state === "RUNNING"); await Promise.allSettled(running.map((bot) => api.stopBot(bot.id))); await load(); toast(`${running.length} robô(s) receberam parada segura.`); });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });
 
