@@ -112,8 +112,10 @@ o painel mostrou o bot `OFF`.
 Em localhost/DEMO foram observados 500 candles iniciais, ticks ao vivo, indicadores,
 zero erros de console e dois contratos de 120 segundos fechados corretamente. O segundo
 cenário incluiu restart controlado e recuperação de settlement. A evidência completa
-está na auditoria vigente. A baseline automatizada dessa validação foi de 76 testes
-Python e 5 testes JavaScript, além de `compileall` e `pip check` sem falhas.
+está na auditoria vigente. A baseline automatizada daquela validação anterior foi de 76
+testes Python e 5 testes JavaScript. Após a implementação e reconciliação final, a
+baseline vigente passou para 94 testes Python e 11 testes JavaScript, além de
+`compileall` e `pip check` sem falhas.
 
 ## Riscos e pendências conhecidas
 
