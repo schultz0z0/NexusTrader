@@ -29,7 +29,7 @@ O perfil operacional vigente é fixo no backend:
 | Ambiente | Estado conhecido em 2026-08-06 |
 |---|---|
 | Repositório | correções de estabilidade/segurança e auditoria registradas no branch `main` |
-| Localhost | stack validada em DEMO; encerramento observado com 2 trades fechados, 0 abertos e bot `STOPPED` |
+| Localhost | stack validada em DEMO; após reconciliação pontual pós-rollout, 7 trades fechados, 0 abertos e `desired_state=STOPPED` |
 | Produção | inspeção somente leitura em `https://trade.solucoes-nexus.tech/`; nenhum deploy foi executado nesta sessão |
 
 Não presuma que a VPS contém os commits auditados apenas porque eles estão no
@@ -73,7 +73,9 @@ flowchart LR
 ## Estabilidade já implementada e validada
 
 - contratos abertos pertencentes ao bot são resubscritos depois de restart, mesmo que
-  tenham desaparecido de `portfolio`;
+  tenham desaparecido de `portfolio`; após a expiração, a assinatura é respaldada por
+  consultas `proposal_open_contract` até a Deriv informar `is_sold=1`, único gate de
+  encerramento;
 - settlement só é marcado como processado depois da persistência;
 - eventos críticos têm retry e o histórico completo é republicado periodicamente;
 - o candle ao vivo continua a última vela histórica em vez de criar um estado solto;
@@ -84,6 +86,28 @@ flowchart LR
 - parada e espera de settlement são limitadas e recuperáveis;
 - a chave do dashboard não entra mais na URL: o frontend obtém ticket WebSocket de uso
   único.
+
+Durante esse intervalo pós-expiração, snapshots e eventos mantêm o trade aberto com
+`lifecycle_state="awaiting_settlement"`. O dashboard mostra **AGUARDANDO LIQUIDAÇÃO** e
+trata o P&L como provisório; ele só contabiliza o resultado e remove o card ativo após
+o evento terminal `trade.closed`.
+
+Na verificação pós-rollout de 2026-08-06, o contrato DEMO `8284624279` já constava como
+`closed/lost`, lucro `-50.00`, antes do restart controlado; portanto, o primeiro
+fechamento não foi atribuído ao restart. Um harness sem `BotSession`, trade loop ou
+`OrderExecutor` executou uma única consulta autenticada e allowlisted por contrato com
+o novo `ContractMonitor`: a Deriv confirmou `is_sold=1` e o upsert idempotente manteve
+7 trades e uma ocorrência. A mesma validação encontrou a linha local-owned
+`8288215859` ainda aberta, recebeu `is_sold=1/lost/-50.00` e a fechou pelo mesmo
+repository, também sem criar linha. Ao final havia 7 trades fechados e nenhum aberto;
+API e painel mostravam `active_trade=null`/sem posição, bot inicialmente `STOP` e zero
+novas ordens nos logs pós-rollout. O `runtime_state=STOPPING` remanescente era
+telemetria persistida
+do processo anterior; depois de confirmar 0 trades abertos, PIDs antigos encerrados e
+ausência de sessão nova, a limpeza controlada usou
+`DatabaseRepository.set_runtime_state` para normalizá-lo a `STOPPED`. Essa normalização
+foi operacional e explícita, não comportamento automático do orquestrador; após reload,
+o painel mostrou o bot `OFF`.
 
 Em localhost/DEMO foram observados 500 candles iniciais, ticks ao vivo, indicadores,
 zero erros de console e dois contratos de 120 segundos fechados corretamente. O segundo
@@ -104,6 +128,9 @@ Python e 5 testes JavaScript, além de `compileall` e `pip check` sem falhas.
    reproduza a credencial em issue, log ou documentação.
 7. Há warnings de depreciação do `TestClient`/HTTPX e dependências a revisar; eles não
    causaram falha funcional na validação de 2026-08-06.
+8. Um orquestrador reiniciado com `desired_state=STOPPED` não normaliza sozinho um
+   `runtime_state` antigo quando não existe sessão viva; consumidores devem distinguir
+   intenção persistida de telemetria do último processo.
 
 ## Desenvolvimento local seguro
 

@@ -64,6 +64,20 @@ Depois transmite apenas eventos daquele robô: `market.history`, `market.tick`, 
 
 Eventos de mercado cujo `symbol` ou `timeframe_seconds` não correspondem à configuração selecionada são descartados. Atualizações repetidas de contrato atualizam o P&L e o spot, mas não criam novos marcadores no gráfico.
 
+Trades ativos expõem `lifecycle_state` com `live` ou `awaiting_settlement`; o payload
+terminal usa `closed`. Um contrato expirado permanece ativo enquanto `is_sold=0`, mesmo
+que tenha `status="open"` e P&L provisório. A assinatura é respaldada por consultas
+pontuais `proposal_open_contract` após a expiração, e somente `is_sold=1` produz
+`trade.closed`. O navegador mostra **AGUARDANDO LIQUIDAÇÃO** nesse intervalo, não soma o
+resultado provisório ao journal e só limpa `active_trade` no fechamento terminal.
+
+`desired_state` é a intenção de controle persistida. `runtime_state` é a última
+telemetria publicada pela sessão e pode permanecer, por exemplo, em `STOPPING` após um
+restart no qual `desired_state=STOPPED` impede corretamente a criação de uma nova
+sessão. O endpoint `/bots/{bot_id}/trades` é o journal histórico autoritativo;
+`snapshot.active_trade` e `snapshot.recent_trades` pertencem ao read model descartável
+do runtime.
+
 No dashboard, `/accounts` alimenta um seletor global. A escolha é aplicada às configurações paradas e não pode ser trocada durante `STARTING`, `RUNNING` ou `STOPPING`; o backend continua tratando `account_id` e `account_type` em cada robô para persistência, recuperação e validação independente do navegador.
 
 ## Interno
