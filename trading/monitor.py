@@ -29,9 +29,12 @@ class ContractMonitor:
         self._settled_contracts = set()
         self._settlement_locks = {}
         self._reconciliation_tasks = {}
+        self._monitoring_tasks = set()
         self._expiry_events = {}
         self._expiry_times = {}
         self._subscription_keys = set()
+        self._unsubscribe_locks = {}
+        self._processed_point_responses = set()
         self._closed = False
 
     async def monitor_contract(
@@ -43,6 +46,8 @@ class ContractMonitor:
         if self._closed:
             return
 
+        current = asyncio.current_task()
+        self._monitoring_tasks.add(current)
         logger.info(f"Iniciando monitoramento do contrato {contract_id}...")
         subscription_key = f"contract:{contract_id}"
         request = {
@@ -61,25 +66,28 @@ class ContractMonitor:
             )
 
         try:
-            await self.connection.subscribe(subscription_key, request, on_update)
-        except Exception:
-            self._subscription_keys.discard(subscription_key)
-            self._expiry_events.pop(contract_id, None)
-            raise
+            try:
+                await self.connection.subscribe(subscription_key, request, on_update)
+            except Exception:
+                self._subscription_keys.discard(subscription_key)
+                self._expiry_events.pop(contract_id, None)
+                raise
 
-        existing_task = self._reconciliation_tasks.get(contract_id)
-        if (
-            not self._closed
-            and contract_id not in self._settled_contracts
-            and (existing_task is None or existing_task.done())
-        ):
-            self._reconciliation_tasks[contract_id] = asyncio.create_task(
-                self._reconcile_contract(
-                    contract_id,
-                    on_settled_callback,
-                    on_update_callback,
+            existing_task = self._reconciliation_tasks.get(contract_id)
+            if (
+                not self._closed
+                and contract_id not in self._settled_contracts
+                and (existing_task is None or existing_task.done())
+            ):
+                self._reconciliation_tasks[contract_id] = asyncio.create_task(
+                    self._reconcile_contract(
+                        contract_id,
+                        on_settled_callback,
+                        on_update_callback,
+                    )
                 )
-            )
+        finally:
+            self._monitoring_tasks.discard(current)
 
     async def _handle_contract_payload(
         self,
@@ -93,6 +101,15 @@ class ContractMonitor:
         poc = data.get("proposal_open_contract")
         if not poc or int(poc.get("contract_id", -1)) != int(contract_id):
             return
+        if contract_id in self._settled_contracts:
+            return
+
+        req_id = data.get("req_id")
+        if req_id is not None and not data.get("subscription"):
+            response_key = (int(contract_id), req_id)
+            if response_key in self._processed_point_responses:
+                return
+            self._processed_point_responses.add(response_key)
 
         if poc.get("date_expiry") is not None:
             self._expiry_times[contract_id] = float(poc["date_expiry"])
@@ -126,14 +143,16 @@ class ContractMonitor:
             # do chamador concluiu. Uma falha transitória continuará elegível
             # para o próximo update ou consulta pontual vendido da Deriv.
             self._settled_contracts.add(contract_id)
-            await self._unsubscribe_contract(contract_id)
-            self._expiry_events.pop(contract_id, None)
-            self._expiry_times.pop(contract_id, None)
+            try:
+                await self._unsubscribe_contract(contract_id)
+            finally:
+                self._expiry_events.pop(contract_id, None)
+                self._expiry_times.pop(contract_id, None)
 
-            current = asyncio.current_task()
-            task = self._reconciliation_tasks.pop(contract_id, None)
-            if task and task is not current:
-                task.cancel()
+                current = asyncio.current_task()
+                task = self._reconciliation_tasks.pop(contract_id, None)
+                if task and task is not current:
+                    task.cancel()
 
     async def _reconcile_contract(
         self,
@@ -208,10 +227,15 @@ class ContractMonitor:
 
     async def _unsubscribe_contract(self, contract_id):
         subscription_key = f"contract:{contract_id}"
-        if subscription_key not in self._subscription_keys:
-            return
-        self._subscription_keys.remove(subscription_key)
-        await self.connection.unsubscribe(subscription_key)
+        lock = self._unsubscribe_locks.setdefault(
+            subscription_key,
+            asyncio.Lock(),
+        )
+        async with lock:
+            if subscription_key not in self._subscription_keys:
+                return
+            await self.connection.unsubscribe(subscription_key)
+            self._subscription_keys.remove(subscription_key)
 
     async def close(self):
         self._closed = True
@@ -225,14 +249,28 @@ class ContractMonitor:
             return_exceptions=True,
         )
 
+        monitoring_tasks = [
+            task for task in self._monitoring_tasks
+            if task is not current
+        ]
+        await asyncio.gather(*monitoring_tasks, return_exceptions=True)
+
         contract_ids = [
             key.split(":", 1)[1]
             for key in list(self._subscription_keys)
         ]
         for contract_id in contract_ids:
-            await self._unsubscribe_contract(contract_id)
+            try:
+                await self._unsubscribe_contract(contract_id)
+            except Exception as exc:
+                logger.warning(
+                    f"Falha ao remover monitor do contrato {contract_id}: {exc}"
+                )
 
         self._reconciliation_tasks.clear()
+        self._monitoring_tasks.clear()
         self._expiry_events.clear()
         self._expiry_times.clear()
         self._settlement_locks.clear()
+        self._unsubscribe_locks.clear()
+        self._processed_point_responses.clear()

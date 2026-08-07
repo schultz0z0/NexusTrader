@@ -404,6 +404,214 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settlements, [])
         self.assertEqual(connection.unsubscribed, ["contract:42"])
 
+    async def test_close_coordinates_with_inflight_subscription(self):
+        class BlockingSubscribeConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.subscribe_started = asyncio.Event()
+                self.release_subscribe = asyncio.Event()
+                self.active_subscriptions = set()
+
+            async def subscribe(self, key, request, handler):
+                self.subscribe_started.set()
+                await self.release_subscribe.wait()
+                self.subscriptions[key] = handler
+                self.active_subscriptions.add(key)
+                return "sub-42"
+
+            async def unsubscribe(self, key):
+                self.unsubscribed.append(key)
+                self.active_subscriptions.discard(key)
+
+        connection = BlockingSubscribeConnection()
+        monitor = ContractMonitor(connection)
+        monitoring = asyncio.create_task(
+            monitor.monitor_contract(42, _done)
+        )
+        await asyncio.wait_for(connection.subscribe_started.wait(), timeout=0.5)
+
+        closing = asyncio.create_task(monitor.close())
+        await asyncio.sleep(0)
+        connection.release_subscribe.set()
+        await asyncio.wait_for(
+            asyncio.gather(monitoring, closing),
+            timeout=0.5,
+        )
+
+        self.assertEqual(connection.active_subscriptions, set())
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
+
+    async def test_close_retries_unsubscribe_after_transient_failure(self):
+        class FlakyUnsubscribeConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.unsubscribe_attempts = 0
+
+            async def unsubscribe(self, key):
+                self.unsubscribe_attempts += 1
+                if self.unsubscribe_attempts == 1:
+                    raise RuntimeError("temporary unsubscribe failure")
+                self.unsubscribed.append(key)
+
+        connection = FlakyUnsubscribeConnection()
+        monitor = ContractMonitor(connection)
+        await monitor.monitor_contract(42, _done)
+        errors = []
+
+        for _ in range(2):
+            try:
+                await monitor.close()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        self.assertEqual(errors, [])
+        self.assertEqual(connection.unsubscribe_attempts, 2)
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
+
+    async def test_late_open_payload_after_settlement_is_ignored(self):
+        connection = FakeConnection()
+        monitor = ContractMonitor(connection)
+        settlements = []
+        updates = []
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settlements.append(contract["contract_id"]) or _done(),
+            on_update_callback=lambda contract: updates.append(
+                contract["current_spot"]
+            ) or _done(),
+        )
+        callback = connection.subscriptions["contract:42"]
+        await callback({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "won",
+                "current_spot": "101.00",
+                "profit": "0.95",
+                "payout": "1.95",
+            }
+        })
+
+        await callback({
+            "subscription": {"id": "sub-42"},
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "open",
+                "current_spot": "100.50",
+                "profit": "0.50",
+                "payout": "1.95",
+            },
+        })
+
+        self.assertEqual(settlements, [42])
+        self.assertEqual(updates, [])
+        await monitor.close()
+
+    async def test_point_response_routed_to_subscription_is_forwarded_once(self):
+        point_response = {
+            "req_id": 77,
+            "msg_type": "proposal_open_contract",
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "open",
+                "current_spot": "100.10",
+                "profit": "-0.10",
+                "payout": "1.95",
+            },
+        }
+
+        class RoutedPointConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.second_query_started = asyncio.Event()
+                self.never = asyncio.Event()
+
+            async def send(self, request):
+                self.sent.append(request)
+                if len(self.sent) == 1:
+                    await self.subscriptions["contract:42"](point_response)
+                    return point_response
+                self.second_query_started.set()
+                await self.never.wait()
+
+        connection = RoutedPointConnection()
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        updates = []
+        settlements = []
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settlements.append(contract["contract_id"]) or _done(),
+            on_update_callback=lambda contract: updates.append(
+                contract["current_spot"]
+            ) or _done(),
+        )
+        callback = connection.subscriptions["contract:42"]
+
+        try:
+            await asyncio.wait_for(
+                connection.second_query_started.wait(),
+                timeout=0.5,
+            )
+            self.assertEqual(updates, ["100.10"])
+
+            await callback({
+                "req_id": 77,
+                "msg_type": "proposal_open_contract",
+                "subscription": {"id": "sub-42"},
+                "proposal_open_contract": {
+                    "contract_id": 42,
+                    "contract_type": "CALL",
+                    "currency": "USD",
+                    "is_sold": 0,
+                    "is_expired": 1,
+                    "date_expiry": 1,
+                    "status": "open",
+                    "current_spot": "100.20",
+                    "profit": "-0.05",
+                    "payout": "1.95",
+                },
+            })
+            self.assertEqual(updates, ["100.10", "100.20"])
+
+            await callback({
+                "req_id": 77,
+                "msg_type": "proposal_open_contract",
+                "subscription": {"id": "sub-42"},
+                "proposal_open_contract": {
+                    "contract_id": 42,
+                    "contract_type": "CALL",
+                    "currency": "USD",
+                    "is_sold": 1,
+                    "is_expired": 1,
+                    "date_expiry": 1,
+                    "status": "won",
+                    "current_spot": "101.00",
+                    "profit": "0.95",
+                    "payout": "1.95",
+                },
+            })
+            self.assertEqual(settlements, [42])
+        finally:
+            await monitor.close()
+
 
 class CrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_wait_has_a_bounded_failure_state(self):
