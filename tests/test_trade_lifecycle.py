@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -12,9 +13,12 @@ class FakeConnection:
         self.sent = []
         self.subscriptions = {}
         self.unsubscribed = []
+        self.contract_responses = []
 
     async def send(self, request):
         self.sent.append(request)
+        if "proposal_open_contract" in request and self.contract_responses:
+            return self.contract_responses.pop(0)
         return {"buy": {"contract_id": 42}}
 
     async def subscribe(self, key, request, handler):
@@ -23,6 +27,15 @@ class FakeConnection:
 
     async def unsubscribe(self, key):
         self.unsubscribed.append(key)
+
+
+async def _done():
+    return None
+
+
+async def _wait_until(predicate):
+    while not predicate():
+        await asyncio.sleep(0)
 
 
 class DemoExecutionGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -65,7 +78,19 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
 
         await monitor.monitor_contract(42, on_settled)
         callback = connection.subscriptions["contract:42"]
-        sold = {"proposal_open_contract": {"contract_id": 42, "is_sold": 1, "status": "won", "profit": "0.95"}}
+        sold = {
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "won",
+                "profit": "0.95",
+                "payout": "1.95",
+            }
+        }
 
         with self.assertRaises(RuntimeError):
             await callback(sold)
@@ -73,6 +98,7 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(attempts, [42, 42])
         self.assertEqual(connection.unsubscribed, ["contract:42"])
+        await monitor.close()
 
     async def test_duplicate_sold_update_settles_contract_once(self):
         connection = FakeConnection()
@@ -90,6 +116,8 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
                 "contract_type": "CALL",
                 "currency": "USD",
                 "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
                 "status": "won",
                 "profit": "0.95",
                 "payout": "1.95",
@@ -100,6 +128,7 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(settlements, [42])
         self.assertEqual(connection.unsubscribed, ["contract:42"])
+        await monitor.close()
 
     async def test_open_contract_update_is_forwarded_for_live_chart(self):
         connection = FakeConnection()
@@ -120,12 +149,260 @@ class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
                 "contract_type": "CALL",
                 "currency": "USD",
                 "is_sold": 0,
+                "is_expired": 0,
+                "date_expiry": 4102444800,
+                "status": "open",
                 "current_spot": "100.25",
                 "profit": "0.10",
+                "payout": "1.95",
             }
         })
 
         self.assertEqual(updates, ["100.25"])
+        await monitor.close()
+
+    async def test_point_query_settles_when_subscription_misses_terminal_update(self):
+        connection = FakeConnection()
+        connection.contract_responses.append({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "lost",
+                "profit": "-1.00",
+                "payout": "0",
+            }
+        })
+        settled = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settled.append(contract) or _done(),
+        )
+        callback = connection.subscriptions["contract:42"]
+        await callback({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "open",
+                "profit": "-1.00",
+                "payout": "0",
+            }
+        })
+
+        await asyncio.wait_for(_wait_until(lambda: len(settled) == 1), timeout=0.5)
+
+        self.assertEqual(settled[0]["status"], "lost")
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
+        await monitor.close()
+
+    async def test_expired_unsold_query_keeps_reconciling_until_sold(self):
+        connection = FakeConnection()
+        connection.contract_responses.extend([
+            {
+                "proposal_open_contract": {
+                    "contract_id": 42,
+                    "contract_type": "CALL",
+                    "currency": "USD",
+                    "is_sold": 0,
+                    "is_expired": 1,
+                    "date_expiry": 1,
+                    "status": "open",
+                    "profit": "-1.00",
+                    "payout": "0",
+                }
+            },
+            {
+                "proposal_open_contract": {
+                    "contract_id": 42,
+                    "contract_type": "CALL",
+                    "currency": "USD",
+                    "is_sold": 1,
+                    "is_expired": 1,
+                    "date_expiry": 1,
+                    "status": "lost",
+                    "profit": "-1.00",
+                    "payout": "0",
+                }
+            },
+        ])
+        settled = []
+        forwarded_updates = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settled.append(contract) or _done(),
+            on_update_callback=lambda contract: forwarded_updates.append(
+                contract["is_sold"]
+            ) or _done(),
+        )
+        await connection.subscriptions["contract:42"]({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "open",
+                "profit": "-1.00",
+                "payout": "0",
+            }
+        })
+
+        await asyncio.wait_for(_wait_until(lambda: len(settled) == 1), timeout=0.5)
+
+        queries = [
+            item for item in connection.sent if "proposal_open_contract" in item
+        ]
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(settled[0]["is_sold"], 1)
+        self.assertEqual(forwarded_updates, [0, 0])
+        await monitor.close()
+
+    async def test_subscription_and_query_terminal_updates_settle_once(self):
+        sold = {
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "won",
+                "profit": "0.95",
+                "payout": "1.95",
+            }
+        }
+
+        class BlockingConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.query_started = asyncio.Event()
+                self.release_query = asyncio.Event()
+
+            async def send(self, request):
+                self.sent.append(request)
+                self.query_started.set()
+                await self.release_query.wait()
+                return sold
+
+        connection = BlockingConnection()
+        settlements = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settlements.append(contract["contract_id"]) or _done(),
+        )
+        callback = connection.subscriptions["contract:42"]
+        await callback({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 0,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "open",
+                "profit": "0",
+                "payout": "1.95",
+            }
+        })
+        await asyncio.wait_for(connection.query_started.wait(), timeout=0.5)
+
+        await callback(sold)
+        connection.release_query.set()
+        await asyncio.sleep(0)
+
+        self.assertEqual(settlements, [42])
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
+        await monitor.close()
+
+    async def test_missing_expiry_starts_fallback_after_interval(self):
+        connection = FakeConnection()
+        connection.contract_responses.append({
+            "proposal_open_contract": {
+                "contract_id": 42,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "lost",
+                "profit": "-1.00",
+                "payout": "0",
+            }
+        })
+        settlements = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settlements.append(contract["contract_id"]) or _done(),
+        )
+
+        await asyncio.wait_for(
+            _wait_until(lambda: settlements == [42]),
+            timeout=0.5,
+        )
+
+        self.assertIn(
+            {"proposal_open_contract": 1, "contract_id": 42},
+            connection.sent,
+        )
+        await monitor.close()
+
+    async def test_close_cancels_reconciliation_without_settlement(self):
+        class BlockingConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.query_started = asyncio.Event()
+                self.never = asyncio.Event()
+
+            async def send(self, request):
+                self.sent.append(request)
+                self.query_started.set()
+                await self.never.wait()
+
+        connection = BlockingConnection()
+        settlements = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=0.01,
+            expiry_grace_seconds=0,
+        )
+        await monitor.monitor_contract(
+            42,
+            lambda contract: settlements.append(contract) or _done(),
+        )
+        await asyncio.wait_for(connection.query_started.wait(), timeout=0.5)
+
+        await asyncio.wait_for(monitor.close(), timeout=0.5)
+
+        self.assertEqual(settlements, [])
+        self.assertEqual(connection.unsubscribed, ["contract:42"])
 
 
 class CrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
