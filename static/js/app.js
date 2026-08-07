@@ -1,6 +1,7 @@
 import { api, ApiError, setApiKey, websocketUrl } from "./api.js";
 import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
+import { contractPresentation } from "./trade_state.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
@@ -98,15 +99,21 @@ function renderActiveTrade(trade) {
     box.className = "active-trade empty"; box.innerHTML = `<div class="radar"><i></i><i></i><b></b></div><strong>Nenhuma posição aberta</strong><p>O contrato aparecerá aqui desde a compra até a liquidação.</p>`;
     chip.className = "status-chip neutral"; chip.textContent = "SEM POSIÇÃO"; chart.showTrade(null); return;
   }
-  const pnl = Number(trade.profit || 0); chip.className = "status-chip live"; chip.textContent = "AO VIVO";
+  const pnl = Number(trade.profit || 0);
   box.className = "active-trade";
-  box.innerHTML = `<div class="trade-live-head"><span class="direction ${String(trade.contract_type).toLowerCase()}">${escapeHtml(trade.contract_type || "—")}</span><span class="contract-id">#${escapeHtml(trade.contract_id)}</span></div><div class="live-pnl"><span>P&amp;L FLUTUANTE</span><strong class="${pnl >= 0 ? "positive" : "negative"}">${money.format(pnl)}</strong></div><div class="live-details"><div><span>Entrada</span><strong>${price(trade.entry_spot)}</strong></div><div><span>Spot atual</span><strong>${price(trade.exit_spot)}</strong></div><div><span>Stake</span><strong>${money.format(Number(trade.stake || 0))}</strong></div><div><span>Expira em</span><strong id="trade-countdown">—</strong></div></div>`;
-  chart.showTrade(trade); updateCountdown(trade.expiry_time); countdownTimer = setInterval(() => updateCountdown(trade.expiry_time), 1000);
+  box.innerHTML = `<div class="trade-live-head"><span class="direction ${String(trade.contract_type).toLowerCase()}">${escapeHtml(trade.contract_type || "—")}</span><span class="contract-id">#${escapeHtml(trade.contract_id)}</span></div><div class="live-pnl"><span id="trade-pnl-label">P&amp;L FLUTUANTE</span><strong class="${pnl >= 0 ? "positive" : "negative"}">${money.format(pnl)}</strong></div><div class="live-details"><div><span>Entrada</span><strong>${price(trade.entry_spot)}</strong></div><div><span>Spot atual</span><strong>${price(trade.exit_spot)}</strong></div><div><span>Stake</span><strong>${money.format(Number(trade.stake || 0))}</strong></div><div><span id="trade-countdown-label">Expira em</span><strong id="trade-countdown">—</strong></div></div>`;
+  chart.showTrade(trade); updateActiveTradePresentation(trade); countdownTimer = setInterval(() => updateActiveTradePresentation(trade), 1000);
 }
 
-function updateCountdown(expiry) {
-  const node = $("#trade-countdown"); if (!node) return;
-  const remaining = Math.max(0, Number(expiry || 0) - Math.floor(Date.now() / 1000)); node.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
+function updateActiveTradePresentation(trade) {
+  const view = contractPresentation(trade);
+  if (!view) return;
+  const chip = $("#operation-state");
+  chip.className = `status-chip ${view.state === "live" ? "live" : "waiting"}`;
+  chip.textContent = view.chip;
+  $("#trade-pnl-label").textContent = view.pnlLabel;
+  $("#trade-countdown-label").textContent = view.countdownLabel;
+  $("#trade-countdown").textContent = view.countdown;
 }
 
 function renderTrades(trades = []) {
