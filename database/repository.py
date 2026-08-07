@@ -6,9 +6,15 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from config.settings import settings
 from database.models import DatabaseModels
+from risk.state import advance_risk_state, initial_risk_state
 from utils.logger import setup_logger
 
 logger = setup_logger("Database")
+
+
+class ActiveOrderIntentError(RuntimeError):
+    """The account is quarantined until its previous buy outcome is resolved."""
+
 
 class DatabaseRepository:
     def __init__(self, db_path: str = None):
@@ -33,6 +39,7 @@ class DatabaseRepository:
                         VALUES (1.0, 50.0, 100.0, 50, 20.0, 3, 15)
                     """)
             await self._ensure_default_bot(db)
+            await self._backfill_risk_states(db)
             await db.commit()
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
 
@@ -46,6 +53,7 @@ class DatabaseRepository:
             "exit_spot": "REAL",
             "purchase_time": "INTEGER",
             "expiry_time": "INTEGER",
+            "risk_applied": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -97,6 +105,55 @@ class DatabaseRepository:
             json.dumps({"multiplier": 2.0, "max_levels": risk_data.get("max_consecutive_losses", 3)}),
             json.dumps({key: value for key, value in risk_data.items() if key not in {"id", "updated_at"}}),
         ))
+
+    async def _backfill_risk_states(self, db):
+        """Upgrade legacy journals once without changing already-versioned snapshots."""
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT bot.* FROM bot_instances AS bot
+            LEFT JOIN risk_states AS risk ON risk.bot_id = bot.id
+            WHERE risk.bot_id IS NULL
+        """) as cursor:
+            bots = [self._decode_bot(row) for row in await cursor.fetchall()]
+        for bot in bots:
+            state = initial_risk_state(float(bot.get("initial_stake", 1.0)))
+            async with db.execute("""
+                SELECT * FROM trades
+                WHERE bot_id = ? AND status = 'closed'
+                ORDER BY COALESCE(expiry_time, purchase_time, 0), id
+            """, (bot["id"],)) as cursor:
+                trades = [dict(row) for row in await cursor.fetchall()]
+            for trade in trades:
+                state = advance_risk_state(
+                    state,
+                    is_win=(
+                        str(trade.get("result") or "").lower() == "won"
+                        or float(trade.get("profit") or 0) > 0
+                    ),
+                    profit=float(trade.get("profit") or 0),
+                    mode=bot.get("money_management", "fixed"),
+                    initial_stake=float(bot.get("initial_stake", 1.0)),
+                    money_config=bot.get("money_config") or {},
+                    risk_config=bot.get("risk_config") or {},
+                    settled_epoch=float(
+                        trade.get("expiry_time") or trade.get("purchase_time") or 0
+                    ),
+                )
+            await db.execute("""
+                INSERT INTO risk_states (
+                    bot_id, current_stake, current_level, consecutive_wins,
+                    consecutive_losses, circuit_consecutive_losses,
+                    circuit_tripped_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                bot["id"], state["current_stake"], state["current_level"],
+                state["consecutive_wins"], state["consecutive_losses"],
+                state["circuit_consecutive_losses"], state["circuit_tripped_at"],
+            ))
+            await db.execute("""
+                UPDATE trades SET risk_applied = 1
+                WHERE bot_id = ? AND status = 'closed'
+            """, (bot["id"],))
 
     @staticmethod
     def _decode_bot(row):
@@ -293,6 +350,17 @@ class DatabaseRepository:
     async def set_desired_state(self, bot_id: str, state: str):
         return await self.update_bot(bot_id, {"desired_state": state})
 
+    async def stop_all_bots(self) -> int:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            cursor = await db.execute("""
+                UPDATE bot_instances
+                SET desired_state = 'STOPPED', config_revision = config_revision + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE desired_state != 'STOPPED'
+            """)
+            await db.commit()
+            return max(0, int(cursor.rowcount))
+
     async def set_runtime_state(self, bot_id: str, state: str, error: str = None):
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute("""
@@ -398,3 +466,385 @@ class DatabaseRepository:
                     "daily_pnl": float(row[0]),
                     "daily_trades": int(row[1])
                 }
+
+    @staticmethod
+    def _decode_order_intent(row):
+        if row is None:
+            return None
+        data = dict(row)
+        raw_metadata = data.get("metadata")
+        data["metadata"] = json.loads(raw_metadata) if raw_metadata else {}
+        return data
+
+    async def create_order_intent(self, data: dict) -> dict:
+        intent_id = data.get("id") or str(uuid.uuid4())
+        values = (
+            intent_id,
+            data["bot_id"],
+            data["account_id"],
+            data.get("session_id"),
+            data["proposal_id"],
+            data["symbol"],
+            data["contract_type"],
+            float(data["stake"]),
+            float(data["price"]),
+            int(data["duration"]),
+            data["duration_unit"],
+            int(data.get("signal_epoch") or 0),
+            json.dumps(data.get("metadata") or {}),
+        )
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute("""
+                    INSERT INTO order_intents (
+                        id, bot_id, account_id, session_id, proposal_id, symbol,
+                        contract_type, stake, price, duration, duration_unit,
+                        signal_epoch, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, values)
+                await db.commit()
+            except aiosqlite.IntegrityError as exc:
+                await db.rollback()
+                if "order_intents.account_id" in str(exc):
+                    raise ActiveOrderIntentError(
+                        f"A conta {data['account_id']} possui uma compra sem ownership confirmado"
+                    ) from exc
+                raise
+        return await self.get_order_intent(intent_id)
+
+    async def get_order_intent(self, intent_id: str):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM order_intents WHERE id = ?", (intent_id,)
+            ) as cursor:
+                return self._decode_order_intent(await cursor.fetchone())
+
+    async def list_unresolved_order_intents(
+        self, bot_id: str = None, account_id: str = None
+    ) -> list:
+        query = """
+            SELECT * FROM order_intents
+            WHERE state IN ('prepared', 'submitting', 'reconcile_pending', 'ambiguous')
+        """
+        params = []
+        if bot_id:
+            query += " AND bot_id = ?"
+            params.append(bot_id)
+        if account_id:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        query += " ORDER BY created_at"
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cursor:
+                return [self._decode_order_intent(row) for row in await cursor.fetchall()]
+
+    async def list_owned_intents_without_trade(self, bot_id: str) -> list:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT intent.*
+                FROM order_intents AS intent
+                LEFT JOIN trades AS trade
+                  ON trade.bot_id = intent.bot_id
+                 AND trade.contract_id = intent.contract_id
+                WHERE intent.bot_id = ? AND intent.state = 'owned'
+                  AND intent.contract_id IS NOT NULL AND trade.id IS NULL
+                ORDER BY intent.created_at
+            """, (bot_id,)) as cursor:
+                return [
+                    self._decode_order_intent(row) for row in await cursor.fetchall()
+                ]
+
+    async def list_order_intents(self, bot_id: str, limit=100) -> list:
+        limit = max(1, min(int(limit), 1000))
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM order_intents
+                WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?
+            """, (bot_id, limit)) as cursor:
+                return [
+                    self._decode_order_intent(row) for row in await cursor.fetchall()
+                ]
+
+    async def update_order_intent(
+        self,
+        intent_id: str,
+        state: str,
+        *,
+        error: str = None,
+        metadata: dict = None,
+    ) -> dict:
+        terminal = state in {"owned", "rejected", "cancelled"}
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("""
+                UPDATE order_intents
+                SET state = ?, error = ?,
+                    metadata = COALESCE(?, metadata),
+                    resolved_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                state,
+                error,
+                json.dumps(metadata) if metadata is not None else None,
+                1 if terminal else 0,
+                intent_id,
+            ))
+            await db.commit()
+        return await self.get_order_intent(intent_id)
+
+    async def mark_order_intent_owned(self, intent_id: str, contract: dict) -> dict:
+        contract_id = int(contract["contract_id"])
+        transaction_id = contract.get("transaction_id")
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("""
+                UPDATE order_intents
+                SET state = 'owned', contract_id = ?, transaction_id = ?, error = NULL,
+                    metadata = ?, resolved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                contract_id,
+                int(transaction_id) if transaction_id is not None else None,
+                json.dumps(contract),
+                intent_id,
+            ))
+            await db.commit()
+        return await self.get_order_intent(intent_id)
+
+    @staticmethod
+    def _decode_risk_state(row, initial_stake=1.0):
+        if row is None:
+            return initial_risk_state(initial_stake)
+        data = dict(row)
+        return {
+            "current_stake": float(data["current_stake"]),
+            "current_level": int(data["current_level"]),
+            "consecutive_wins": int(data["consecutive_wins"]),
+            "consecutive_losses": int(data["consecutive_losses"]),
+            "circuit_consecutive_losses": int(data["circuit_consecutive_losses"]),
+            "circuit_tripped_at": float(data["circuit_tripped_at"]),
+        }
+
+    async def get_risk_state(self, bot_id: str, initial_stake=1.0) -> dict:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM risk_states WHERE bot_id = ?", (bot_id,)
+            ) as cursor:
+                return self._decode_risk_state(await cursor.fetchone(), initial_stake)
+
+    async def settle_trade_and_risk(
+        self,
+        trade_data: dict,
+        *,
+        money_management: str,
+        money_config: dict,
+        risk_config: dict,
+        initial_stake: float,
+        settled_epoch: float,
+    ) -> dict:
+        bot_id = trade_data["bot_id"]
+        contract_id = int(trade_data["contract_id"])
+        columns = (
+            "bot_id", "session_id", "strategy_name", "symbol", "contract_type",
+            "contract_id", "stake", "payout", "profit", "result", "status",
+            "entry_spot", "exit_spot", "purchase_time", "expiry_time",
+        )
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT risk_applied FROM trades WHERE bot_id = ? AND contract_id = ?",
+                (bot_id, contract_id),
+            ) as cursor:
+                existing_trade = await cursor.fetchone()
+            async with db.execute(
+                "SELECT * FROM risk_states WHERE bot_id = ?", (bot_id,)
+            ) as cursor:
+                stored_state = self._decode_risk_state(
+                    await cursor.fetchone(), initial_stake
+                )
+            if existing_trade and int(existing_trade["risk_applied"] or 0) == 1:
+                await db.commit()
+                return {"applied": False, "state": stored_state}
+
+            updated = await db.execute("""
+                UPDATE trades SET
+                    session_id = ?, strategy_name = ?, symbol = ?, contract_type = ?,
+                    stake = ?, payout = ?, profit = ?, result = ?, status = ?,
+                    entry_spot = ?, exit_spot = ?, purchase_time = ?, expiry_time = ?
+                WHERE bot_id = ? AND contract_id = ?
+            """, (
+                trade_data.get("session_id"), trade_data.get("strategy_name"),
+                trade_data.get("symbol"), trade_data.get("contract_type"),
+                trade_data.get("stake"), trade_data.get("payout"),
+                trade_data.get("profit"), trade_data.get("result"),
+                trade_data.get("status"), trade_data.get("entry_spot"),
+                trade_data.get("exit_spot"), trade_data.get("purchase_time"),
+                trade_data.get("expiry_time"), bot_id, contract_id,
+            ))
+            if not updated.rowcount:
+                placeholders = ", ".join("?" for _ in columns)
+                await db.execute(
+                    f"INSERT INTO trades ({', '.join(columns)}) VALUES ({placeholders})",
+                    [trade_data.get(column) for column in columns],
+                )
+
+            next_state = advance_risk_state(
+                stored_state,
+                is_win=(
+                    str(trade_data.get("result") or "").lower() == "won"
+                    or float(trade_data.get("profit") or 0) > 0
+                ),
+                profit=float(trade_data.get("profit") or 0),
+                mode=money_management,
+                initial_stake=float(initial_stake),
+                money_config=money_config or {},
+                risk_config=risk_config or {},
+                settled_epoch=float(settled_epoch),
+            )
+            await db.execute("""
+                INSERT INTO risk_states (
+                    bot_id, current_stake, current_level, consecutive_wins,
+                    consecutive_losses, circuit_consecutive_losses,
+                    circuit_tripped_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(bot_id) DO UPDATE SET
+                    current_stake = excluded.current_stake,
+                    current_level = excluded.current_level,
+                    consecutive_wins = excluded.consecutive_wins,
+                    consecutive_losses = excluded.consecutive_losses,
+                    circuit_consecutive_losses = excluded.circuit_consecutive_losses,
+                    circuit_tripped_at = excluded.circuit_tripped_at,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                bot_id,
+                next_state["current_stake"],
+                next_state["current_level"],
+                next_state["consecutive_wins"],
+                next_state["consecutive_losses"],
+                next_state["circuit_consecutive_losses"],
+                next_state["circuit_tripped_at"],
+            ))
+            await db.execute(
+                "UPDATE trades SET risk_applied = 1 WHERE bot_id = ? AND contract_id = ?",
+                (bot_id, contract_id),
+            )
+            await db.commit()
+        return {"applied": True, "state": next_state}
+
+    async def record_bot_health(
+        self,
+        bot_id: str,
+        *,
+        deriv_connected: bool,
+        publisher_healthy: bool,
+        market_epoch: int = None,
+    ):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("""
+                INSERT INTO runtime_health (
+                    bot_id, deriv_connected, publisher_healthy, market_epoch, updated_at
+                ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(bot_id) DO UPDATE SET
+                    deriv_connected = excluded.deriv_connected,
+                    publisher_healthy = excluded.publisher_healthy,
+                    market_epoch = excluded.market_epoch,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                bot_id,
+                1 if deriv_connected else 0,
+                1 if publisher_healthy else 0,
+                int(market_epoch) if market_epoch else None,
+            ))
+            await db.commit()
+
+    async def record_service_heartbeat(self, service_name: str, details=None):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("""
+                INSERT INTO service_heartbeats (service_name, details, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(service_name) DO UPDATE SET
+                    details = excluded.details, updated_at = CURRENT_TIMESTAMP
+            """, (service_name, json.dumps(details or {})))
+            await db.commit()
+
+    async def readiness(self) -> dict:
+        checks = {"database": "ok", "orchestrator": "not_required", "bots": {}}
+        heartbeat_limit = max(15, int(settings.RUNTIME_HEARTBEAT_SECONDS) * 3)
+        market_limit = max(
+            int(settings.MARKET_STALE_AFTER_SECONDS),
+            int(settings.RUNTIME_HEARTBEAT_SECONDS) * 3,
+        )
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT id, runtime_state,
+                    CAST(strftime('%s','now') - strftime('%s', heartbeat_at) AS INTEGER)
+                        AS heartbeat_age
+                FROM bot_instances
+                WHERE desired_state = 'RUNNING'
+            """) as cursor:
+                running = [dict(row) for row in await cursor.fetchall()]
+            if not running:
+                return {"ready": True, "checks": checks}
+
+            async with db.execute("""
+                SELECT CAST(strftime('%s','now') - strftime('%s', updated_at) AS INTEGER)
+                    AS age
+                FROM service_heartbeats WHERE service_name = 'orchestrator'
+            """) as cursor:
+                service = await cursor.fetchone()
+            service_age = service["age"] if service else None
+            orchestrator_ok = service_age is not None and service_age <= heartbeat_limit
+            checks["orchestrator"] = "ok" if orchestrator_ok else "stale"
+
+            ready = orchestrator_ok
+            for bot in running:
+                async with db.execute("""
+                    SELECT COUNT(*) FROM order_intents
+                    WHERE bot_id = ?
+                      AND state IN ('prepared', 'submitting', 'reconcile_pending', 'ambiguous')
+                """, (bot["id"],)) as cursor:
+                    unresolved_intents = int((await cursor.fetchone())[0])
+                async with db.execute("""
+                    SELECT deriv_connected, publisher_healthy, market_epoch,
+                        CAST(strftime('%s','now') - strftime('%s', updated_at) AS INTEGER)
+                            AS health_age,
+                        CAST(strftime('%s','now') AS INTEGER) - market_epoch AS market_age
+                    FROM runtime_health WHERE bot_id = ?
+                """, (bot["id"],)) as cursor:
+                    health = await cursor.fetchone()
+                status = {
+                    "runtime": bot["runtime_state"],
+                    "heartbeat": "ok" if (
+                        bot["heartbeat_age"] is not None
+                        and bot["heartbeat_age"] <= heartbeat_limit
+                    ) else "stale",
+                    "deriv": "ok" if health and health["deriv_connected"] else "disconnected",
+                    "publisher": "ok" if health and health["publisher_healthy"] else "unhealthy",
+                    "market": "ok" if (
+                        health
+                        and health["market_age"] is not None
+                        and health["market_age"] <= market_limit
+                    ) else "stale",
+                    "ownership": "ok" if unresolved_intents == 0 else "quarantined",
+                }
+                bot_ok = (
+                    status["runtime"] == "RUNNING"
+                    and all(value == "ok" for key, value in status.items() if key != "runtime")
+                    and health
+                    and health["health_age"] is not None
+                    and health["health_age"] <= heartbeat_limit
+                )
+                status["ready"] = bool(bot_ok)
+                checks["bots"][bot["id"]] = status
+                ready = ready and bool(bot_ok)
+        return {"ready": bool(ready), "checks": checks}

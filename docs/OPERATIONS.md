@@ -1,46 +1,43 @@
-# Operação e produção
+# Operação, deploy e rollback na VPS
 
-## Primeira instalação
+O domínio previsto é `trade.solucoes-nexus.tech`. A porta do host permanece em
+`127.0.0.1:8989`; somente o proxy HTTPS deve ser público. Nunca use ordem REAL como
+smoke test.
+
+## 1. Preparar a primeira instalação
 
 ```bash
 git clone <repositorio> nexus-trader
 cd nexus-trader
 cp .env.example .env
-openssl rand -hex 32  # use para INTERNAL_API_TOKEN
-openssl rand -hex 32  # use outro valor para DASHBOARD_API_KEY
-docker compose config
-docker compose up -d --build
+openssl rand -hex 32  # INTERNAL_API_TOKEN
+openssl rand -hex 32  # DASHBOARD_API_KEY (use outro valor)
+nano .env
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d
 docker compose ps
 ```
 
-Configure `DOMAIN`, o PAT Deriv e mantenha ao menos uma conta `DOT` demo vinculada ao token. Contas `ROT` reais aparecem no mesmo seletor quando `ALLOW_REAL_TRADING=true`. Nunca reutilize a chave do dashboard como token interno. O bind HTTP padrão é `127.0.0.1:8989`; o acesso público deve passar pelo proxy HTTPS.
-
-## Atualização da VPS atual
-
-O domínio de produção é `trade.solucoes-nexus.tech` e já está mantido nas labels do Traefik. O `.env` da raiz foi ampliado para ser copiado para a VPS; antes de subir, abra-o com `nano .env` e preencha somente os valores vazios/secretos. Gere chaves independentes:
-
-```bash
-openssl rand -hex 32  # INTERNAL_API_TOKEN
-openssl rand -hex 32  # DASHBOARD_API_KEY
-nano .env
-```
-
-Confirme no arquivo:
+Configuração inicial segura:
 
 ```dotenv
 DOMAIN=trade.solucoes-nexus.tech
 HOST_BIND=127.0.0.1
 HOST_PORT=8989
-ALLOW_REAL_TRADING=true
 API_BASE_URL=http://nexus-api:8000
+ALLOW_REAL_TRADING=false
+REAL_MAX_STAKE_USD=0
 ```
 
-`ALLOW_REAL_TRADING=true` apenas libera a escolha. A conta é selecionada globalmente no topo do painel, propagada aos robôs parados, validada novamente pela Deriv no start e confirmada outra vez antes de iniciar em REAL. A troca global fica bloqueada enquanto qualquer robô estiver iniciando, rodando ou parando.
+O PAT precisa dos escopos oficiais `read` e `trade`. Não reutilize PAT, chave do
+dashboard ou token interno entre si.
 
-## Validação pós-deploy
+## 2. Health e smoke DEMO
 
 ```bash
-curl -fsS http://127.0.0.1:8989/api/v1/health
+curl -fsS http://127.0.0.1:8989/api/v1/health/live
+curl -fsS http://127.0.0.1:8989/api/v1/health/ready
 docker compose logs --tail=100 nexus-api
 docker compose logs --tail=100 nexus-bot
 ```
@@ -48,62 +45,99 @@ docker compose logs --tail=100 nexus-bot
 No dashboard:
 
 1. informe `DASHBOARD_API_KEY`;
-2. confirme o selo `AMBIENTE DEMO` e a conta `DOT...`;
-3. selecione uma conta demo no controle global do topo e salve a configuração do robô;
-4. inicie um único robô com stake mínima;
-5. confirme histórico de velas/linha, ticks, estado `LIVE` e heartbeat;
-6. acompanhe uma operação desde `trade.opened` até `trade.closed`;
-7. troque ativo e timeframe com o robô parado e confirme que o gráfico antigo some antes do novo stream;
-8. confirme que cada contrato mostra apenas um marcador de entrada e um de saída/resultado;
-9. pare e confirme `STOPPED` depois de eventuais contratos ativos encerrarem.
+2. selecione uma conta **DEMO**;
+3. confirme o cartão fixo Donchian 21, ZigZag 1/15/3, 1m e 2 minutos;
+4. salve stake mínima e limites conservadores;
+5. inicie um robô, confirme histórico, ticks, Donchian/ZigZag e WebSocket;
+6. acompanhe `trade.opened`, `trade.updated`, eventual **AGUARDANDO LIQUIDAÇÃO** e
+   somente então `trade.closed`;
+7. pare e aguarde `desired_state=STOPPED` e `runtime_state=STOPPED`;
+8. confirme `/health/ready` novamente e console do browser sem erros.
 
-Somente depois desse smoke test em DEMO, selecione uma conta REAL sem saldo/stake ou mantenha o robô parado para validar a interface, o selo vermelho e o diálogo de confirmação. O procedimento de deploy não exige nem recomenda enviar uma ordem real.
+Se não surgir sinal naturalmente, não force uma compra. A correção do motor é validada
+pelos testes/fixtures; o smoke da VPS verifica integração.
 
-## Atualização
+## 3. Liberar o seletor REAL
 
-Solicite parada pelo painel antes do deploy. `docker compose stop nexus-bot` possui sete minutos de tolerância para concluir contratos ativos.
+Só depois do smoke DEMO, escolha um teto que o operador realmente aceita perder por
+operação:
+
+```dotenv
+ALLOW_REAL_TRADING=true
+REAL_MAX_STAKE_USD=1.00
+```
 
 ```bash
+docker compose config --quiet
+docker compose up -d --force-recreate nexus-api nexus-bot
+curl -fsS http://127.0.0.1:8989/api/v1/health/ready
+```
+
+O valor `1.00` é exemplo, não recomendação financeira. REAL só inicia quando a conta
+retornada pela Deriv coincide com ID/tipo persistidos, a stake não excede o teto e o
+usuário digita `REAL <account_id>`. O backend emite um ticket de 60 segundos vinculado
+à revisão atual e o consome uma vez. Validar seletor/modal não exige iniciar o robô.
+
+## 4. Atualização segura
+
+Solicite **PARAR TUDO** no painel e confirme que não há contratos `open`. Depois:
+
+```bash
+cd nexus-trader
+PREVIOUS_COMMIT=$(git rev-parse HEAD)
+mkdir -p backups
 docker compose stop nexus-bot
 # aguarde contratos abertos encerrarem e confirme o estado antes de continuar
+docker compose stop nexus-api
+docker run --rm -v nexus-trader_nexus-data:/data -v "$PWD/backups:/backup" alpine sh -c 'cp /data/nexus_trader.db /backup/nexus_trader-$(date +%F-%H%M%S).db'
 git pull --ff-only
-docker compose config
-docker compose up -d --build
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:8989/api/v1/health
 ```
 
-Se a VPS recebe os arquivos por cópia em vez de Git, copie o projeto e o `.env` atualizado preservando o volume `nexus-data`; então execute a mesma sequência a partir de `docker compose config`.
+O nome real do volume pode variar com `COMPOSE_PROJECT_NAME`; confirme com
+`docker volume ls` antes do backup. Nunca copie apenas o `.db` com WAL ativo. Para
+backup online, use a API de backup do SQLite em um procedimento dedicado.
 
-## Backup e restauração
+## 5. Rollback
 
-O banco reside no volume `nexus-data`. Faça backup consistente com os containers parados ou usando o backup online do SQLite. Não copie apenas o `.db` enquanto arquivos WAL estão ativos sem uma estratégia consistente.
-
-Exemplo conservador:
+Se health ou smoke DEMO falhar:
 
 ```bash
 docker compose stop nexus-bot nexus-api
-docker run --rm -v nexus-trader_nexus-data:/data -v "$PWD/backups:/backup" alpine sh -c 'cp /data/nexus_trader.db /backup/nexus_trader-$(date +%F-%H%M%S).db'
-docker compose up -d
+git switch --detach "$PREVIOUS_COMMIT"
+docker compose config --quiet
+docker compose up -d --build
+curl -fsS http://127.0.0.1:8989/api/v1/health/ready
 ```
 
-Teste periodicamente a restauração em outro volume.
+Se a migração/dados também precisarem voltar, mantenha os containers parados, preserve
+uma cópia forense do banco atual e restaure o arquivo confirmado do diretório
+`backups/` para o volume. Teste restaurações periodicamente em outro volume.
 
-## Observabilidade
+## 6. Diagnóstico
 
-Estados úteis: `STARTING`, `RUNNING`, `STOPPING`, `STOPPED`, `ERROR`. Investigue:
+- `health/ready` 503 com bot RUNNING: leia `checks.bots`; distingue heartbeat, Deriv,
+  publisher, mercado e `ownership=quarantined`.
+- Ownership em quarentena: pare o bot, consulte
+  `GET /api/v1/bots/{id}/order-intents` e compare com statement/contrato na Deriv. Não
+  repita `buy`.
+- `STOPPING`: aguarde settlement; o grace period do bot é sete minutos.
+- 401 no painel: valide `DASHBOARD_API_KEY` e a chave armazenada no browser.
+- REAL bloqueado: verifique flag e teto nos dois serviços com
+  `docker compose config` sem publicar a saída em logs/tickets.
+- Banco bloqueado: garanta um único stack usando o volume; WAL e busy timeout já estão
+  ativos.
+- Emergência: `POST /api/v1/bots/stop-all` via painel persiste STOPPED e revoga tickets
+  REAL; contratos já comprados continuam monitorados até settlement.
 
-- heartbeat antigo: processo ou integração parou de progredir;
-- `failed_events`: comunicação interna API/bot falhou;
-- `dropped_market_events`: API lenta e fila sob pressão;
-- reconexões sucessivas: rede, OTP, token ou disponibilidade Deriv;
-- `risk.blocked`: limite operacional, não falha técnica.
+## 7. Regras operacionais permanentes
 
-## Incidentes
-
-- **Gráfico sem ticks:** confirme `nexus-bot`, `API_BASE_URL=http://nexus-api:8000`, eventos internos e logs de reconexão. As assinaturas agora são restauradas automaticamente.
-- **401 no painel:** confira `DASHBOARD_API_KEY`; limpe a chave salva no navegador e informe novamente.
-- **401/403 Deriv:** valide PAT, App ID, escopos `read`/`trade` e se as contas `DOT`/`ROT` pertencem ao token.
-- **Conta REAL bloqueada:** confirme `ALLOW_REAL_TRADING=true` nos dois containers com `docker compose config`; reinicie o stack após editar o `.env`.
-- **Robô em STOPPING:** existe contrato aberto; não mate o processo salvo em emergência real.
-- **Banco bloqueado:** confirme volume único e apenas um stack escrevendo nele; WAL e `busy_timeout` já estão habilitados.
+- Firewall: apenas SSH por chave e HTTPS; nunca exponha `8989`.
+- Proteja `.env` e backups com permissões restritas/criptografia.
+- Monitore tamanho do volume, log rotation, reinícios e readiness.
+- Rode campanha DEMO e replay out-of-sample antes de considerar capital real.
+- Rotacione externamente qualquer token já exposto; não o reproduza em logs ou docs.

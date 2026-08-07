@@ -11,9 +11,10 @@ Plataforma web para orquestrar robôs de opções da Deriv com isolamento por ro
 - Integração pela API atual da Deriv: REST para contas/OTP e WebSocket autenticado para mercado e negociação.
 - Reconexão automática com restauração de assinaturas de ticks e contratos.
 - Múltiplos robôs independentes, configurados e iniciados pelo dashboard.
-- Somente Donchian+ZigZag habilitado: R_75, candles de 1 minuto e expiração de 2 minutos.
+- Somente Donchian+ZigZag habilitado: Donchian 21, ZigZag 1/15/3, candles de 1 minuto e expiração de 2 minutos.
 - Entrada, P&L flutuante, expiração e encerramento visíveis ao vivo, com um marcador de entrada e um de resultado por contrato.
-- Martingale, Soros e mão fixa; meta, stop, stake máxima, limite diário e circuit breaker.
+- Ownership durável de compras, risco/settlement atômicos e replay/paper determinístico.
+- Martingale, Soros e mão fixa persistentes; meta, stop, stake máxima, limite diário e circuit breaker.
 - API e WebSocket protegidos por chave em produção.
 
 ## Início rápido
@@ -29,7 +30,8 @@ Abra `http://127.0.0.1:8989`, informe `DASHBOARD_API_KEY` e use o seletor global
 ## Documentação
 
 - [Estado atual e handoff para agentes](docs/CURRENT-STATE.md)
-- [Auditoria vigente](docs/AUDIT-2026-08-06.md)
+- [Validação final de 2026-08-07](docs/VALIDATION-2026-08-07.md)
+- [Auditoria histórica de 2026-08-06](docs/AUDIT-2026-08-06.md)
 - [Arquitetura](docs/ARCHITECTURE.md)
 - [API do NexusTrader](docs/API.md)
 - [Integração Deriv atual](docs/DERIV-API-REFERENCE.md)

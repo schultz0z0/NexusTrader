@@ -113,11 +113,49 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started.json()["data"]["desired_state"], "RUNNING")
         self.assertEqual(stopped.json()["data"]["desired_state"], "STOPPED")
 
+    def test_server_side_stop_all_persists_emergency_stop_for_every_bot(self):
+        first = self.client.post("/api/v1/bots", json={
+            "name": "First", "account_id": "DOT100", "account_type": "demo",
+        }).json()["data"]
+        second = self.client.post("/api/v1/bots", json={
+            "name": "Second", "account_id": "DOT100", "account_type": "demo",
+        }).json()["data"]
+        self.client.post(f"/api/v1/bots/{first['id']}/start")
+        self.client.post(f"/api/v1/bots/{second['id']}/start")
+
+        stopped = self.client.post("/api/v1/bots/stop-all")
+
+        self.assertEqual(stopped.status_code, 200)
+        self.assertEqual(stopped.json()["data"]["stopped"], 2)
+        states = {item["id"]: item["desired_state"] for item in self.client.get("/api/v1/bots").json()["data"]}
+        self.assertEqual(states[first["id"]], "STOPPED")
+        self.assertEqual(states[second["id"]], "STOPPED")
+
     def test_health_endpoint_reports_database_and_control_plane_ready(self):
         response = self.client.get("/api/v1/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok", "database": "ok"})
+        self.assertEqual(response.json()["status"], "ready")
+        self.assertEqual(response.json()["checks"]["database"], "ok")
+
+    def test_liveness_does_not_depend_on_external_services(self):
+        response = self.client.get("/api/v1/health/live")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "alive"})
+
+    def test_readiness_fails_closed_for_running_bot_without_fresh_runtime_health(self):
+        created = self.client.post("/api/v1/bots", json={
+            "name": "Running health", "account_id": "DOT100",
+            "account_type": "demo", "symbol": "R_75",
+        }).json()["data"]
+        self.client.post(f"/api/v1/bots/{created['id']}/start")
+
+        response = self.client.get("/api/v1/health/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "not_ready")
+        self.assertIn(created["id"], response.json()["checks"]["bots"])
 
     def test_account_catalog_returns_normalized_real_and_demo_accounts(self):
         async def account_provider():
@@ -134,18 +172,82 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(response.json()["data"][0]["account_type"], "real")
         self.assertEqual(response.json()["data"][1]["balance"], 1000.0)
 
-    def test_real_account_configuration_is_rejected(self):
+    def test_real_account_can_be_selected_while_execution_is_disabled(self):
         previous = settings.ALLOW_REAL_TRADING
+        previous_cap = settings.REAL_MAX_STAKE_USD
         settings.ALLOW_REAL_TRADING = False
+        settings.REAL_MAX_STAKE_USD = 0.0
         try:
-            response = self.client.post("/api/v1/bots", json={
+            configured = self.client.post("/api/v1/bots", json={
                 "name": "Conta real",
                 "account_id": "CR100",
                 "account_type": "real",
                 "symbol": "R_100",
             })
+            started = self.client.post(
+                f"/api/v1/bots/{configured.json()['data']['id']}/start"
+            ) if configured.status_code == 201 else None
         finally:
             settings.ALLOW_REAL_TRADING = previous
+            settings.REAL_MAX_STAKE_USD = previous_cap
+
+        self.assertEqual(configured.status_code, 201)
+        self.assertEqual(configured.json()["data"]["account_type"], "real")
+        self.assertEqual(started.status_code, 403)
+
+    def test_real_start_requires_exact_server_side_confirmation_ticket(self):
+        previous_allow = settings.ALLOW_REAL_TRADING
+        previous_cap = settings.REAL_MAX_STAKE_USD
+        settings.ALLOW_REAL_TRADING = True
+        settings.REAL_MAX_STAKE_USD = 5.0
+        try:
+            created = self.client.post("/api/v1/bots", json={
+                "name": "Conta real protegida", "account_id": "CR100",
+                "account_type": "real", "symbol": "R_75", "initial_stake": 1.0,
+            }).json()["data"]
+
+            denied = self.client.post(f"/api/v1/bots/{created['id']}/start")
+            wrong = self.client.post(
+                f"/api/v1/bots/{created['id']}/real-confirmation",
+                json={"phrase": "SIM"},
+            )
+            issued = self.client.post(
+                f"/api/v1/bots/{created['id']}/real-confirmation",
+                json={"phrase": "REAL CR100"},
+            )
+            ticket = issued.json()["data"]["ticket"]
+            started = self.client.post(
+                f"/api/v1/bots/{created['id']}/start",
+                json={"real_ticket": ticket},
+            )
+        finally:
+            settings.ALLOW_REAL_TRADING = previous_allow
+            settings.REAL_MAX_STAKE_USD = previous_cap
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(wrong.status_code, 422)
+        self.assertEqual(issued.status_code, 200)
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(started.json()["data"]["desired_state"], "RUNNING")
+
+    def test_real_stake_above_server_cap_is_rejected_on_start(self):
+        previous_allow = settings.ALLOW_REAL_TRADING
+        previous_cap = settings.REAL_MAX_STAKE_USD
+        settings.ALLOW_REAL_TRADING = True
+        settings.REAL_MAX_STAKE_USD = 2.0
+        try:
+            configured = self.client.post("/api/v1/bots", json={
+                "name": "Stake real excessiva", "account_id": "CR100",
+                "account_type": "real", "symbol": "R_75", "initial_stake": 2.01,
+            })
+            response = self.client.post(
+                f"/api/v1/bots/{configured.json()['data']['id']}/start"
+            ) if configured.status_code == 201 else configured
+        finally:
+            settings.ALLOW_REAL_TRADING = previous_allow
+            settings.REAL_MAX_STAKE_USD = previous_cap
+
+        self.assertEqual(configured.status_code, 201)
         self.assertEqual(response.status_code, 422)
 
     def test_internal_events_require_internal_token_and_feed_bot_snapshot(self):

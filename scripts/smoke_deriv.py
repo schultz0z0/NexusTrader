@@ -1,4 +1,4 @@
-"""Smoke test for the current Deriv REST + OTP + WebSocket flow (demo only)."""
+"""Read-only smoke test for the current Deriv REST + OTP + WebSocket flow."""
 
 import argparse
 import asyncio
@@ -6,9 +6,6 @@ import json
 
 from core.auth import AuthManager
 from core.connection import NexusConnection
-from trading.executor import OrderExecutor
-from trading.monitor import ContractMonitor
-from trading.proposal import ProposalManager
 from trading.safety import ensure_demo_account
 
 
@@ -22,14 +19,14 @@ def is_demo(account):
     return (
         kind in {"demo", "virtual"}
         or account.get("is_virtual") in {1, True, "1", "true"}
-        or identifier.startswith("VRTC")
+        or identifier.startswith(("VRTC", "DOT"))
     )
 
 
-async def run(execute_trade=False, symbol="R_100", stake=1.0):
+async def run(symbol="R_100"):
     auth = AuthManager()
     connection = NexusConnection(auth, reconnect_delays=(1, 2, 4))
-    summary = {"rest": False, "websocket": False, "history": False, "tick": False, "trade": None}
+    summary = {"rest": False, "websocket": False, "history": False, "tick": False}
     try:
         accounts = await auth.list_accounts()
         demos = [item for item in accounts if is_demo(item)]
@@ -67,43 +64,17 @@ async def run(execute_trade=False, symbol="R_100", stake=1.0):
         await connection.unsubscribe("smoke:tick")
         summary["tick"] = True
 
-        if execute_trade:
-            proposal = await ProposalManager(connection).request_proposal(
-                symbol=symbol,
-                contract_type="CALL",
-                stake=stake,
-                duration=5,
-                duration_unit="t",
-            )
-            if not proposal:
-                raise RuntimeError("Proposal demo nao retornada")
-            bought = await OrderExecutor(connection, account_type="demo").buy(
-                proposal["id"], proposal["ask_price"]
-            )
-            if not bought:
-                raise RuntimeError("Compra demo rejeitada")
-            settled = asyncio.get_running_loop().create_future()
-
-            async def on_settled(contract):
-                if not settled.done():
-                    settled.set_result(contract)
-
-            await ContractMonitor(connection).monitor_contract(bought["contract_id"], on_settled)
-            result = await asyncio.wait_for(settled, timeout=120)
-            summary["trade"] = {
-                "contract_id": result.get("contract_id"),
-                "status": result.get("status"),
-                "profit": result.get("profit"),
-            }
         print(json.dumps(summary, ensure_ascii=False))
     finally:
         await connection.disconnect()
 
 
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trade", action="store_true", help="Compra um contrato CALL de 5 ticks na demo")
     parser.add_argument("--symbol", default="R_100")
-    parser.add_argument("--stake", type=float, default=1.0)
-    arguments = parser.parse_args()
-    asyncio.run(run(arguments.trade, arguments.symbol, arguments.stake))
+    return parser
+
+
+if __name__ == "__main__":
+    arguments = build_parser().parse_args()
+    asyncio.run(run(arguments.symbol))

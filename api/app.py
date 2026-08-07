@@ -4,10 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import require_dashboard_key
 from api.live_store import LiveStore
+from api.real_tickets import RealStartTicketStore
 from api.routes.bots import router as bots_router
 from api.routes.bot_control import router as legacy_bot_router
 from api.routes.config import router as legacy_config_router
@@ -37,6 +39,7 @@ def create_app(repository=None, live_store=None, account_provider=None):
     live_store = live_store or LiveStore()
     account_provider = account_provider or _deriv_account_provider
     ticket_store = WebSocketTicketStore()
+    real_ticket_store = RealStartTicketStore()
 
     @asynccontextmanager
     async def lifespan(application):
@@ -51,6 +54,7 @@ def create_app(repository=None, live_store=None, account_provider=None):
     )
     application.state.repository = repository
     application.state.live_store = live_store
+    application.state.real_start_tickets = real_ticket_store
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[],
@@ -63,19 +67,52 @@ def create_app(repository=None, live_store=None, account_provider=None):
     async def security_headers(request, call_next):
         response = await call_next(request)
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src https://fonts.gstatic.com; connect-src 'self' ws: wss:; "
+            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; "
+            "form-action 'self'"
+        )
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         return response
     application.include_router(bots_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_bot_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_config_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_trades_router, dependencies=[Depends(require_dashboard_key)])
-    application.include_router(internal_router)
+    application.include_router(internal_router, include_in_schema=False)
+
+    @application.get("/api/v1/health/live", include_in_schema=False)
+    async def health_live():
+        return {"status": "alive"}
+
+    async def readiness_response():
+        try:
+            result = await repository.readiness()
+        except Exception as exc:
+            logger.exception("Readiness falhou: %s", exc)
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "checks": {"database": "error"}},
+            )
+        return JSONResponse(
+            status_code=200 if result["ready"] else 503,
+            content={
+                "status": "ready" if result["ready"] else "not_ready",
+                "checks": result["checks"],
+            },
+        )
+
+    @application.get("/api/v1/health/ready", include_in_schema=False)
+    async def health_ready():
+        return await readiness_response()
 
     @application.get("/api/v1/health", include_in_schema=False)
     async def health():
-        await repository.list_bots()
-        return {"status": "ok", "database": "ok"}
+        return await readiness_response()
 
     @application.get("/api/v1/strategies", dependencies=[Depends(require_dashboard_key)])
     async def strategies():

@@ -1,5 +1,5 @@
 import unittest
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 from api.app import app
 
 class TestFastAPIApp(unittest.TestCase):
@@ -17,6 +17,9 @@ class TestFastAPIApp(unittest.TestCase):
         self.assertIn("NexusTrader", response.text)
         self.assertEqual(response.headers["x-frame-options"], "DENY")
         self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
+        self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["permissions-policy"], "camera=(), microphone=(), geolocation=()")
 
     def test_get_bot_status(self):
         response = self.client.get("/api/v1/bot/status")

@@ -15,8 +15,8 @@ from risk.risk_manager import RiskManager
 from strategies.base import MoneyManager
 
 from strategies.donchian_zigzag import DonchianZigZagStrategy
-from trading.executor import OrderExecutor
 from trading.monitor import ContractMonitor
+from trading.ownership import ActiveOrderIntentError, OrderOwnershipCoordinator
 from trading.proposal import ProposalManager
 from trading.safety import ensure_account_allowed
 from utils.logger import setup_logger
@@ -104,8 +104,20 @@ class BotSession:
             risk_config = self.bot.get("risk_config") or {}
             risk = RiskManager(risk_config)
             circuit_breaker = CircuitBreaker(risk_config)
+            if hasattr(self.repository, "get_risk_state"):
+                persisted_risk = await self.repository.get_risk_state(
+                    self.bot_id,
+                    initial_stake=float(self.bot.get("initial_stake", 1.0)),
+                )
+                strategy.money_manager.restore_state(persisted_risk)
+                circuit_breaker.restore_state(persisted_risk)
             proposal_manager = ProposalManager(self._connection)
-            executor = OrderExecutor(self._connection, account_type=selected_account["account_type"])
+            ownership = OrderOwnershipCoordinator(
+                self._connection,
+                self.repository,
+                account_type=selected_account["account_type"],
+            )
+            await ownership.start()
             monitor = ContractMonitor(self._connection)
             self._market_data = MarketDataHandler(
                 self._connection,
@@ -119,8 +131,9 @@ class BotSession:
                 int(self.bot.get("timeframe_seconds", 60)),
             )
             await self._recover_owned_contracts(monitor, strategy, circuit_breaker)
+            await self._recover_order_intents(ownership, monitor, strategy, circuit_breaker)
             await self._set_status("RUNNING")
-            await self._trade_loop(strategy, risk, circuit_breaker, proposal_manager, executor, monitor)
+            await self._trade_loop(strategy, risk, circuit_breaker, proposal_manager, ownership, monitor)
 
             if self._active_contracts:
                 await self._set_status("STOPPING")
@@ -167,14 +180,40 @@ class BotSession:
     async def _daily_totals(self):
         return await self.repository.get_bot_daily_stats(self.bot_id)
 
-    async def _trade_loop(self, strategy, risk, circuit_breaker, proposal_manager, executor, monitor):
+    async def _trade_loop(self, strategy, risk, circuit_breaker, proposal_manager, ownership, monitor):
         symbol = self.bot.get("symbol", "R_100")
         while not self._stop_requested.is_set():
             await self.repository.touch_bot_heartbeat(self.bot_id)
             if self._active_contracts:
                 await asyncio.sleep(0.2)
                 continue
+            if hasattr(self.repository, "list_unresolved_order_intents"):
+                unresolved = await self.repository.list_unresolved_order_intents(self.bot_id)
+                if unresolved:
+                    await self._recover_order_intents(
+                        ownership, monitor, strategy, circuit_breaker
+                    )
+                    unresolved = await self.repository.list_unresolved_order_intents(self.bot_id)
+                    if unresolved:
+                        await self._publish(
+                            "risk.blocked",
+                            reason="ownership_quarantine",
+                            order_intent_ids=[item["id"] for item in unresolved],
+                        )
+                        await asyncio.sleep(settings.CONTRACT_RECONCILE_INTERVAL_SECONDS)
+                        continue
             latest = self._market_data.get_latest_tick(symbol)
+            if hasattr(self.repository, "record_bot_health"):
+                await self.repository.record_bot_health(
+                    self.bot_id,
+                    deriv_connected=bool(
+                        self._connection and self._connection.is_connected
+                    ),
+                    publisher_healthy=bool(
+                        getattr(self.publisher, "is_healthy", True)
+                    ),
+                    market_epoch=int(latest.get("epoch", 0)) if latest else None,
+                )
             if not latest or time.time() - int(latest.get("epoch", 0)) > settings.MARKET_STALE_AFTER_SECONDS:
                 await asyncio.sleep(0.5)
                 continue
@@ -216,7 +255,23 @@ class BotSession:
             )
             if not proposal or self._stop_requested.is_set():
                 continue
-            buy = await executor.buy(proposal["id"], proposal["ask_price"])
+            try:
+                buy = await ownership.buy({
+                    "bot_id": self.bot_id,
+                    "account_id": self.bot["account_id"],
+                    "session_id": self._session_id,
+                    "proposal_id": proposal["id"],
+                    "symbol": symbol,
+                    "contract_type": signal.action,
+                    "stake": stake,
+                    "price": proposal["ask_price"],
+                    "duration": params["duration"],
+                    "duration_unit": params["duration_unit"],
+                    "signal_epoch": signal.timestamp,
+                })
+            except ActiveOrderIntentError as exc:
+                await self._publish("risk.blocked", reason="ownership_quarantine", error=str(exc))
+                continue
             if buy:
                 await self._register_contract(buy, signal.action, strategy, monitor, circuit_breaker)
 
@@ -260,9 +315,23 @@ class BotSession:
 
         async def on_settled(poc):
             trade = self._trade_payload(poc, strategy, "closed")
-            await self.repository.upsert_trade(trade)
-            strategy.on_trade_result(poc)
-            circuit_breaker.record_result(float(poc.get("profit", 0) or 0) > 0)
+            if hasattr(self.repository, "settle_trade_and_risk"):
+                result = await self.repository.settle_trade_and_risk(
+                    trade,
+                    money_management=self.bot.get("money_management", "fixed"),
+                    money_config=self.bot.get("money_config") or {},
+                    risk_config=self.bot.get("risk_config") or {},
+                    initial_stake=float(self.bot.get("initial_stake", 1.0)),
+                    settled_epoch=float(
+                        poc.get("date_settlement") or time.time()
+                    ),
+                )
+                strategy.money_manager.restore_state(result["state"])
+                circuit_breaker.restore_state(result["state"])
+            else:
+                await self.repository.upsert_trade(trade)
+                strategy.on_trade_result(poc)
+                circuit_breaker.record_result(float(poc.get("profit", 0) or 0) > 0)
             self._active_contracts.discard(contract_id)
             await self._publish("trade.closed", trade=trade)
 
@@ -319,4 +388,37 @@ class BotSession:
                 monitor,
                 circuit_breaker,
                 persist_open=False,
+            )
+
+    async def _recover_order_intents(self, ownership, monitor, strategy, circuit_breaker):
+        if not hasattr(self.repository, "list_unresolved_order_intents"):
+            return
+        if hasattr(self.repository, "list_owned_intents_without_trade"):
+            for intent in await self.repository.list_owned_intents_without_trade(self.bot_id):
+                contract = {
+                    **(intent.get("metadata") or {}),
+                    "contract_id": intent["contract_id"],
+                    "contract_type": intent["contract_type"],
+                    "buy_price": intent["price"],
+                }
+                if int(contract["contract_id"]) not in self._active_contracts:
+                    await self._register_contract(
+                        contract,
+                        intent["contract_type"],
+                        strategy,
+                        monitor,
+                        circuit_breaker,
+                        persist_open=True,
+                    )
+        for intent, contract in await ownership.reconcile_pending(self.bot_id):
+            contract_id = int(contract["contract_id"])
+            if contract_id in self._active_contracts:
+                continue
+            await self._register_contract(
+                contract,
+                contract.get("contract_type") or intent["contract_type"],
+                strategy,
+                monitor,
+                circuit_breaker,
+                persist_open=True,
             )

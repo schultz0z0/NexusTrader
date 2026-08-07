@@ -20,12 +20,18 @@ Esse encadeamento elimina o erro anterior no qual uma URL OTP era obtida, descar
 | `ticks` + `subscribe=1` | Stream de preço ao vivo |
 | `proposal` | Cotação do contrato antes da compra |
 | `buy` | Compra somente depois de revalidar conta e liberação operacional |
+| `transaction` + `subscribe=1` | Captura compras aceitas mesmo se a resposta direta se perder |
 | `proposal_open_contract` + `subscribe=1` | P&L, spot e status até `is_sold=1` |
 | `portfolio` | Ajuda a reconciliar contratos; ownership persistido também é resubscrito mesmo quando ausente da resposta |
+| `statement` | Backfill de transações buy para reconciliar reconnect/restart |
 | `forget` | Cancelamento de uma assinatura remota |
 | `ping` | Heartbeat da conexão |
 
 Requisições são correlacionadas por `req_id`. Assinaturas possuem chaves estáveis locais (`ticks:{bot}:{symbol}` e `contract:{id}`), independentes do ID remoto que muda após reconectar.
+
+`req_id` não é idempotency key. Por isso cada compra é persistida antes do envio e
+transport errors nunca causam retry de `buy`. Um único candidato assume ownership;
+zero candidatos permanece pendente e múltiplos colocam a conta em quarentena.
 
 ## Contratos e durações
 
@@ -40,8 +46,9 @@ Antes de adicionar outro tipo de contrato, confirme disponibilidade e parâmetro
 
 ## Segurança operacional
 
-`account_type=real` é bloqueado por padrão e somente passa quando
-`ALLOW_REAL_TRADING=true`; conta e tipo são revalidados na Deriv no start e a flag é
-conferida novamente imediatamente antes de `buy`. O dashboard também exige confirmação.
-O launcher local força a flag para `false`, portanto toda validação de desenvolvimento é
-DEMO.
+A conta REAL pode ser selecionada e persistida mesmo com execução bloqueada, para que o
+operador veja com clareza qual conta está configurada. A fronteira financeira permanece
+no `start`: `account_type=real` só inicia quando `ALLOW_REAL_TRADING=true`, conta e tipo
+são revalidados na Deriv, a stake respeita `REAL_MAX_STAKE_USD` e o backend consome uma
+confirmação de uso único. O launcher local força a flag para `false`, portanto nenhuma
+execução REAL pode começar durante a validação de desenvolvimento.

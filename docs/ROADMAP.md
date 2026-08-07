@@ -1,34 +1,15 @@
-# Roadmap
+# Roadmap pós-prontidão
 
-## Base concluída nesta reestruturação
+A fase de correção funcional, ownership, risco persistente, replay, readiness, seletor
+REAL protegido e hardening Docker foi concluída no código. Próximas evoluções não são
+pré-requisitos para o deploy de uma única VPS:
 
-- API atual Deriv com REST de contas/OTP e WebSocket autenticado.
-- Reconexão supervisionada e restauração de subscriptions.
-- Orquestração persistente de múltiplos robôs isolados.
-- Parada segura e lifecycle idempotente de contratos.
-- Conta demo por padrão e conta real protegida por flag, revalidação e confirmação.
-- Histórico de candles, atualização incremental e gráfico Donchian+ZigZag em 1m.
-- Operação aberta, marcador no gráfico, P&L, expiração e journal ao vivo.
-- Dashboard de trading responsivo, API autenticada e documentação operacional.
+1. campanha DEMO longa e datasets out-of-sample versionados para avaliar performance;
+2. métricas Prometheus, alertas externos e tracing distribuído;
+3. autenticação multiusuário, RBAC e trilha administrativa;
+4. PostgreSQL e fila durável para escala horizontal com leases distribuídos;
+5. orçamento agregado e scheduler por conta;
+6. venda da biblioteca de gráfico no próprio bundle com SRI/build frontend.
 
-## Próximo ciclo — qualidade de estratégia
-
-1. Motor de backtest/replay usando a mesma interface das estratégias ao vivo.
-2. Métricas: expectancy, payout mínimo, profit factor, drawdown, sequência de perdas, estabilidade por janela e regime.
-3. Estratégias versionadas com schemas próprios e parâmetros imutáveis por execução.
-4. Indicadores incrementais (EMA, RSI, ATR, ADX e suporte/resistência) sem recalcular todo o buffer.
-5. Filtros de latência, payout, volatilidade, horário e qualidade/staleness do feed.
-6. Paper trading determinístico antes de liberar cada versão em demo.
-
-## Ciclo seguinte — operação profissional
-
-- Calendário/scheduler por robô e limite agregado por conta.
-- Portfólio de robôs com orçamento de risco compartilhado.
-- Relatórios por estratégia, ativo, timeframe e versão.
-- Auditoria administrativa e autenticação multiusuário/RBAC.
-- Métricas Prometheus, alertas e tracing.
-- PostgreSQL + Redis Streams/NATS e leasing para workers horizontais.
-
-## Critérios antes de discutir conta real
-
-Conta real permanece fora do escopo atual. Uma decisão futura exige revisão de segurança independente, paper/demo prolongado, backtest fora da amostra, limites agregados, kill switch testado, auditoria, observabilidade e aceite explícito do proprietário. Nenhuma performance passada elimina risco de perda.
+Conta REAL nunca é liberada automaticamente por métrica. A decisão exige aceite humano,
+teto de stake definido e compreensão de que performance passada não garante resultado.

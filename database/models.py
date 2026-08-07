@@ -83,4 +83,63 @@ duration_unit TEXT NOT NULL DEFAULT 'm',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS order_intents (
+            id TEXT PRIMARY KEY,
+            bot_id TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            session_id TEXT,
+            proposal_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            contract_type TEXT NOT NULL,
+            stake REAL NOT NULL,
+            price REAL NOT NULL,
+            duration INTEGER NOT NULL,
+            duration_unit TEXT NOT NULL,
+            signal_epoch INTEGER,
+            state TEXT NOT NULL DEFAULT 'prepared',
+            contract_id INTEGER,
+            transaction_id INTEGER,
+            error TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP,
+            FOREIGN KEY(bot_id) REFERENCES bot_instances(id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_order_intents_account_unresolved
+        ON order_intents(account_id)
+        WHERE state IN ('prepared', 'submitting', 'reconcile_pending', 'ambiguous');
+
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_order_intents_contract
+        ON order_intents(contract_id)
+        WHERE contract_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS risk_states (
+            bot_id TEXT PRIMARY KEY,
+            current_stake REAL NOT NULL,
+            current_level INTEGER NOT NULL DEFAULT 0,
+            consecutive_wins INTEGER NOT NULL DEFAULT 0,
+            consecutive_losses INTEGER NOT NULL DEFAULT 0,
+            circuit_consecutive_losses INTEGER NOT NULL DEFAULT 0,
+            circuit_tripped_at REAL NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(bot_id) REFERENCES bot_instances(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS runtime_health (
+            bot_id TEXT PRIMARY KEY,
+            deriv_connected INTEGER NOT NULL DEFAULT 0,
+            publisher_healthy INTEGER NOT NULL DEFAULT 0,
+            market_epoch INTEGER,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(bot_id) REFERENCES bot_instances(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS service_heartbeats (
+            service_name TEXT PRIMARY KEY,
+            details TEXT NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         """

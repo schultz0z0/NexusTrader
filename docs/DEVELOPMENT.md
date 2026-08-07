@@ -27,8 +27,9 @@ powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1
 ```
 
 O launcher abre somente `http://127.0.0.1:8990`, usa o banco isolado
-`storage/nexus_trader.dev.db` e força `ALLOW_REAL_TRADING=false`. Assim, uma conta
-REAL é rejeitada pelo backend mesmo que exista no seletor.
+`storage/nexus_trader.dev.db` e força `ALLOW_REAL_TRADING=false`. A conta REAL continua
+visível e selecionável para validar a interface, mas qualquer tentativa de iniciar o robô
+nessa conta é rejeitada pelo backend antes de proposta ou compra.
 
 No painel:
 
@@ -44,13 +45,31 @@ O launcher não edita o `.env`, não seleciona conta e não inicia o bot automat
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q api core data database risk strategies trading
+python -m compileall -q api backtest core data database risk strategies trading
 node --check static/js/app.js
 node --test tests/js/*.test.mjs
 python -m pip check
 ```
 
-Os testes cobrem configuração, banco, reconexão/replay, candles, fila limitada, risco, lifecycle, orquestração, API e contrato do frontend.
+Os testes cobrem configuração, ownership, risco persistente, replay, candles, fila, lifecycle, health, orquestração, API, Docker e frontend.
+
+### Replay/paper determinístico
+
+Cada linha do dataset contém `epoch`, `quote` e opcionalmente `payout_ratio`:
+
+```json
+{"epoch":1786000000,"quote":49350.12,"payout_ratio":0.92}
+```
+
+Execute:
+
+```bash
+python -m backtest.cli --input data/replay.jsonl > replay-report.json
+```
+
+Ticks devem estar em ordem estrita e cobrir o primeiro tick em/depois da expiração de
+cada posição. Caso contrário o relatório é `INCOMPLETE` e a operação é inválida, nunca
+forçada como win/loss. O hash SHA-256 torna o resultado reproduzível.
 
 Smoke test opcional e somente leitura usando as credenciais do `.env`:
 

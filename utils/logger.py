@@ -1,8 +1,8 @@
 import logging
 import sys
-from colorama import Fore, Style, init
+from colorama import Fore, Style, just_fix_windows_console
 
-init(autoreset=True)
+just_fix_windows_console()
 
 class ColoredFormatter(logging.Formatter):
     COLORS = {

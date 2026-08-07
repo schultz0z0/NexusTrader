@@ -23,17 +23,35 @@ class BotPayload(BaseModel):
 
     @model_validator(mode="after")
     def demo_only(self):
+        fixed_strategy = {
+            "period": 21,
+            "deviation": 1,
+            "depth": 15,
+            "backstep": 3,
+        }
         if self.strategy_id != "donchian":
             raise ValueError("Somente a estrategia Donchian + ZigZag esta habilitada")
+        if self.strategy_config and self.strategy_config != fixed_strategy:
+            raise ValueError("Parametros Donchian/ZigZag sao fixos em 21/1/15/3")
+        self.strategy_config = fixed_strategy
         if self.timeframe_seconds != 60:
             raise ValueError("Donchian + ZigZag opera somente em candles de 1 minuto")
         if self.duration != 2 or self.duration_unit != "m":
             raise ValueError("Donchian + ZigZag usa expiracao fixa de 2 minutos")
-        if self.account_type.lower() != "demo" and not settings.ALLOW_REAL_TRADING:
-            raise ValueError("Somente contas demo estao habilitadas")
+        self.account_type = self.account_type.lower()
+        if self.account_type not in {"demo", "real"}:
+            raise ValueError("Tipo de conta deve ser demo ou real")
         if self.money_management not in {"fixed", "martingale", "soros"}:
             raise ValueError("Gestao de stake invalida")
         return self
+
+
+class StartPayload(BaseModel):
+    real_ticket: str = ""
+
+
+class RealConfirmationPayload(BaseModel):
+    phrase: str
 
 
 def _repo(request):
@@ -48,6 +66,13 @@ async def list_bots(request: Request):
 @router.post("", status_code=201)
 async def create_bot(payload: BotPayload, request: Request):
     return {"status": "success", "data": await _repo(request).create_bot(payload.model_dump())}
+
+
+@router.post("/stop-all")
+async def stop_all_bots(request: Request):
+    stopped = await _repo(request).stop_all_bots()
+    request.app.state.real_start_tickets.revoke_all()
+    return {"status": "success", "data": {"stopped": stopped}}
 
 
 @router.get("/{bot_id}")
@@ -75,15 +100,49 @@ async def delete_bot(bot_id: str, request: Request):
     await _repo(request).delete_bot(bot_id)
 
 
-@router.post("/{bot_id}/start")
-async def start_bot(bot_id: str, request: Request):
+@router.post("/{bot_id}/real-confirmation")
+async def confirm_real_bot(
+    bot_id: str,
+    payload: RealConfirmationPayload,
+    request: Request,
+):
     bot = await _repo(request).get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "Robo nao encontrado")
-    if bot.get("account_type", "demo").lower() != "demo" and not settings.ALLOW_REAL_TRADING:
-        raise HTTPException(422, "Somente contas demo estao habilitadas")
+    if bot.get("account_type", "demo").lower() != "real":
+        raise HTTPException(409, "Confirmacao REAL nao se aplica a conta demo")
+    if not settings.ALLOW_REAL_TRADING:
+        raise HTTPException(403, "Execucao real desabilitada no servidor")
+    if settings.REAL_MAX_STAKE_USD <= 0:
+        raise HTTPException(503, "Teto de stake REAL nao configurado")
+    if float(bot.get("initial_stake") or 0) > settings.REAL_MAX_STAKE_USD:
+        raise HTTPException(422, "Stake inicial excede o teto REAL do servidor")
+    expected = f"REAL {bot['account_id']}"
+    if payload.phrase.strip() != expected:
+        raise HTTPException(422, f"Digite exatamente: {expected}")
+    ticket = request.app.state.real_start_tickets.issue(bot)
+    return {"status": "success", "data": {"ticket": ticket, "expires_in": 60}}
+
+
+@router.post("/{bot_id}/start")
+async def start_bot(bot_id: str, request: Request, payload: StartPayload = None):
+    bot = await _repo(request).get_bot(bot_id)
+    if not bot:
+        raise HTTPException(404, "Robo nao encontrado")
+    if bot.get("account_type", "demo").lower() == "real":
+        if not settings.ALLOW_REAL_TRADING:
+            raise HTTPException(403, "Execucao real desabilitada no servidor")
+        if (
+            settings.REAL_MAX_STAKE_USD <= 0
+            or float(bot.get("initial_stake") or 0) > settings.REAL_MAX_STAKE_USD
+        ):
+            raise HTTPException(422, "Stake REAL excede o teto do servidor")
+        if not request.app.state.real_start_tickets.consume(
+            payload.real_ticket if payload else "", bot
+        ):
+            raise HTTPException(403, "Confirmacao REAL ausente, expirada ou invalida")
     if not bot.get("account_id"):
-        raise HTTPException(422, "Configure a conta demo antes de iniciar")
+        raise HTTPException(422, "Configure uma conta Deriv antes de iniciar")
     return {"status": "success", "data": await _repo(request).set_desired_state(bot_id, "RUNNING")}
 
 
@@ -97,6 +156,16 @@ async def stop_bot(bot_id: str, request: Request):
 @router.get("/{bot_id}/trades")
 async def bot_trades(bot_id: str, request: Request, limit: int = 100):
     return {"status": "success", "data": await _repo(request).list_trades(bot_id, limit)}
+
+
+@router.get("/{bot_id}/order-intents")
+async def bot_order_intents(bot_id: str, request: Request, limit: int = 100):
+    if not await _repo(request).get_bot(bot_id):
+        raise HTTPException(404, "Robo nao encontrado")
+    return {
+        "status": "success",
+        "data": await _repo(request).list_order_intents(bot_id, limit),
+    }
 
 
 @router.get("/{bot_id}/snapshot")

@@ -14,6 +14,7 @@ services:
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
+      REAL_MAX_STAKE_USD: "${REAL_MAX_STAKE_USD:-0}"
       DEV_MODE: "false"
       API_BASE_URL: http://nexus-api:8000
     volumes:
@@ -21,16 +22,31 @@ services:
     ports:
       - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-8989}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health/live"]
       interval: 10s
       timeout: 3s
       retries: 6
       start_period: 10s
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    pids_limit: 256
+    cpus: "1.0"
+    mem_limit: 512m
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN:-trade.solucoes-nexus.tech}`)"
+      - "traefik.http.routers.nexustrader.rule=Host(`${DOMAIN:-trade.solucoes-nexus.tech}`) && !PathPrefix(`/api/v1/internal`)"
       - "traefik.http.routers.nexustrader.entrypoints=websecure"
       - "traefik.http.routers.nexustrader.tls.certresolver=letsencrypt"
       - "traefik.http.services.nexustrader.loadbalancer.server.port=8000"
@@ -55,11 +71,26 @@ services:
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN must be set}"
       DASHBOARD_API_KEY: "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
       ALLOW_REAL_TRADING: "${ALLOW_REAL_TRADING:-false}"
+      REAL_MAX_STAKE_USD: "${REAL_MAX_STAKE_USD:-0}"
       DEV_MODE: "false"
     volumes:
       - nexus-data:/app/storage
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    pids_limit: 256
+    cpus: "1.5"
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   nexus-data:

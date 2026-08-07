@@ -41,6 +41,10 @@ class CircuitBreaker:
                     f"Operacoes pausadas por {self.cooldown_seconds // 60} minutos para protecao da banca."
                 )
 
+    def restore_state(self, state: Dict[str, Any]):
+        self.consecutive_losses = int(state.get("circuit_consecutive_losses", 0))
+        self.tripped_at = float(state.get("circuit_tripped_at", 0.0))
+
     def is_tripped(self) -> Tuple[bool, int]:
         if self.tripped_at == 0.0:
             return False, 0

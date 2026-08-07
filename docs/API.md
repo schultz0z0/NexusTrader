@@ -19,9 +19,12 @@ chave permanente não entra na URL. A rota de eventos entre containers aceita ap
 | GET | `/bots/{bot_id}` | Obter configuração/estado |
 | PUT | `/bots/{bot_id}` | Substituir configuração e incrementar revisão |
 | DELETE | `/bots/{bot_id}` | Excluir uma instância parada |
-| POST | `/bots/{bot_id}/start` | Persistir `desired_state=RUNNING` |
+| POST | `/bots/{bot_id}/real-confirmation` | Emitir ticket REAL após frase exata |
+| POST | `/bots/{bot_id}/start` | Persistir RUNNING; REAL exige `real_ticket` |
 | POST | `/bots/{bot_id}/stop` | Solicitar parada segura |
+| POST | `/bots/stop-all` | Parada global persistente e revogação de tickets REAL |
 | GET | `/bots/{bot_id}/trades?limit=100` | Journal persistente |
+| GET | `/bots/{bot_id}/order-intents?limit=100` | Auditoria de ownership de compras |
 | GET | `/bots/{bot_id}/snapshot` | Read model ao vivo |
 
 Exemplo de criação:
@@ -30,7 +33,7 @@ Exemplo de criação:
 {
   "name": "Donchian R_75 — 1m",
   "strategy_id": "donchian",
-  "strategy_config": {},
+  "strategy_config": {"period":21,"deviation":1,"depth":15,"backstep":3},
   "account_id": "DOT123456",
   "account_type": "demo",
   "symbol": "R_75",
@@ -84,6 +87,13 @@ No dashboard, `/accounts` alimenta um seletor global. A escolha é aplicada às 
 
 `POST /api/v1/internal/events` recebe envelopes com `event_id`, `schema_version`, `type`, `bot_id` e `epoch`. IDs repetidos são aceitos como duplicados e não reaplicados.
 
+O ingress de produção exclui esse prefixo; ele continua disponível apenas na rede
+interna Docker e exige `X-Internal-Token`.
+
 ## Saúde e compatibilidade
 
-`GET /api/v1/health` valida que API e banco respondem. Rotas `/api/v1/bot/*`, `/config/risk` e `/trades/*` permanecem como fachada de compatibilidade para o primeiro robô, mas integrações novas devem usar `/bots`.
+- `GET /health/live`: processo HTTP vivo.
+- `GET /health/ready`: banco e todos os componentes de bots desejados RUNNING.
+- `GET /health`: alias da readiness.
+
+Rotas legadas permanecem para DEMO; start REAL só existe no fluxo versionado com ticket.

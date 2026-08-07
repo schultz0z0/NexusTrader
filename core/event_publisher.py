@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 
@@ -26,11 +27,25 @@ class HttpEventPublisher:
         self._closing = False
         self.dropped_market_events = 0
         self.failed_events = 0
+        self.last_success_epoch = None
+        self.last_failure_epoch = None
         self.retry_delays = tuple(float(delay) for delay in retry_delays)
 
     @property
     def queue_size(self):
         return self._queue.qsize()
+
+    @property
+    def is_healthy(self):
+        worker_ok = self._worker_task is not None and not self._worker_task.done()
+        recovered = (
+            self.last_failure_epoch is None
+            or (
+                self.last_success_epoch is not None
+                and self.last_success_epoch >= self.last_failure_epoch
+            )
+        )
+        return worker_ok and recovered
 
     async def start(self):
         if self._worker_task is None or self._worker_task.done():
@@ -63,6 +78,7 @@ class HttpEventPublisher:
                             headers={"X-Internal-Token": self.internal_token},
                         )
                         response.raise_for_status()
+                        self.last_success_epoch = time.time()
                         break
                     except asyncio.CancelledError:
                         raise
@@ -78,6 +94,7 @@ class HttpEventPublisher:
                 raise
             except Exception as exc:
                 self.failed_events += 1
+                self.last_failure_epoch = time.time()
                 logger.error(f"Falha ao publicar evento {event.get('type')}: {exc}")
             finally:
                 self._queue.task_done()

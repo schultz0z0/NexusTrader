@@ -87,6 +87,17 @@ class BotOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(factory.sessions), 2)
         await orchestrator.stop()
 
+    async def test_stale_runtime_is_normalized_when_stopped_bot_has_no_session(self):
+        repo = FakeRepository([{
+            "id": "bot-a", "desired_state": "STOPPED",
+            "runtime_state": "STOPPING", "config_revision": 1,
+        }])
+        orchestrator = BotOrchestrator(repo, session_factory=FakeSessionFactory())
+
+        await orchestrator.reconcile_once()
+
+        self.assertEqual(repo.runtime_updates, [("bot-a", "STOPPED", None)])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,22 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertGreaterEqual(compose.count("ALLOW_REAL_TRADING:"), 2)
         self.assertIn("API_BASE_URL: http://nexus-api:8000", compose)
         self.assertIn("trade.solucoes-nexus.tech", compose)
+        self.assertGreaterEqual(compose.count("REAL_MAX_STAKE_USD:"), 2)
+        self.assertGreaterEqual(compose.count("read_only: true"), 2)
+        self.assertGreaterEqual(compose.count("pids_limit:"), 2)
+        self.assertGreaterEqual(compose.count("max-size:"), 2)
+        self.assertIn("!PathPrefix(`/api/v1/internal`)", compose)
+        self.assertIn("/api/v1/health/live", compose)
+
+    def test_image_runs_as_non_root_with_dedicated_runtime_stage(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "Dockerfile"), encoding="utf-8") as stream:
+            dockerfile = stream.read()
+
+        self.assertIn("AS builder", dockerfile)
+        self.assertIn("USER nexus", dockerfile)
+        self.assertIn("COPY --from=builder", dockerfile)
+        self.assertNotIn("gcc \\\n+    &&", dockerfile[dockerfile.rfind("FROM python"):])
 
     def test_operations_runbook_contains_safe_vps_update_sequence(self):
         root = os.path.dirname(os.path.dirname(__file__))

@@ -33,6 +33,7 @@ class FrontendContractTests(unittest.TestCase):
             "environment-badge", "account-select", "account-type",
             "account-summary", "real-account-dialog",
             "confirm-real-start", "cancel-real-start",
+            "real-confirm-phrase", "strategy-fixed-profile",
         }.issubset(parser.ids))
         self.assertIn("/static/styles.css", parser.styles)
         self.assertIn("/static/js/app.js", parser.scripts)
@@ -62,6 +63,12 @@ class FrontendContractTests(unittest.TestCase):
         self.assertLess(html_source.index('id="account-select"'), html_source.index('id="bot-config"'))
         config_source = html_source[html_source.index('id="bot-config"'):]
         self.assertNotIn('name="account_id"', config_source)
+        self.assertIn('/real-confirmation', api_source)
+        self.assertIn('REAL ${account.account_id}', app_source)
+        self.assertIn('period: 21', app_source)
+        self.assertIn('deviation: 1', app_source)
+        self.assertIn('depth: 15', app_source)
+        self.assertIn('backstep: 3', app_source)
 
 
 if __name__ == "__main__":

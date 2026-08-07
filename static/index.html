@@ -107,12 +107,14 @@
       <input id="config-id" type="hidden">
       <fieldset><legend>Identidade e mercado</legend>
         <label>Nome do robô<input name="name" required maxlength="80" placeholder="Ex.: Donchian R_75 — 1m"></label>
-        <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<select name="timeframe_seconds"><option value="1">Ticks / 1s</option><option value="60" selected>Velas 1m</option><option value="300">Velas 5m</option></select></label></div>
+        <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<input value="Velas 1m (fixo)" readonly></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>
         <label>Modelo<select name="strategy_id" id="strategy-select"><option value="donchian" selected>Donchian + ZigZag</option></select></label>
-        <div class="form-row" id="bollinger-config-row"><label>Período<input name="period" type="number" min="5" value="20"></label><label>Desvio padrão<input name="std_dev" type="number" min="0.5" step="0.1" value="2"></label></div>
-        <div class="form-row" id="duration-config-row"><label>Expiração<input name="duration" type="number" min="1" value="5"></label><label>Unidade<select name="duration_unit"><option value="t">Ticks</option><option value="m">Minutos</option></select></label></div>
+        <div id="strategy-fixed-profile">
+          <div class="form-row"><label>Donchian<input value="Período 21" readonly></label><label>ZigZag<input value="Desvio 1% · Profundidade 15" readonly></label></div>
+          <div class="form-row"><label>Backstep<input value="3" readonly></label><label>Expiração<input value="2 minutos" readonly></label></div>
+        </div>
       </fieldset>
       <fieldset><legend>Gestão de stake</legend>
         <div class="form-row"><label>Stake inicial (USD)<input name="initial_stake" type="number" min="0.35" step="0.01" value="1"></label><label>Modelo<select name="money_management"><option value="fixed">Mão fixa</option><option value="martingale">Martingale</option><option value="soros">Soros</option></select></label></div>
@@ -135,6 +137,8 @@
       <h2 id="real-account-title">Iniciar robô em conta REAL?</h2>
       <p id="real-account-message">Esta ação pode enviar ordens com dinheiro real. Revise conta, ativo, stake, meta e stop antes de continuar.</p>
       <div class="confirmation-details"><span>Conta</span><strong id="real-confirm-account">—</strong><span>Robô</span><strong id="real-confirm-bot">—</strong></div>
+      <label>Digite <strong id="real-confirm-instruction">REAL CONTA</strong><input id="real-confirm-phrase" type="text" autocomplete="off" spellcheck="false"></label>
+      <small id="real-confirm-error" class="form-error" hidden></small>
       <div class="confirmation-actions"><button id="cancel-real-start" class="secondary-button" type="button">CANCELAR</button><button id="confirm-real-start" class="real-button" type="button">SIM, INICIAR EM REAL</button></div>
     </section>
   </div>

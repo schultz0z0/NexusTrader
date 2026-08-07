@@ -12,6 +12,7 @@ class LocalDevProfileTests(unittest.TestCase):
         script = LAUNCHER.read_text(encoding="utf-8")
 
         self.assertIn('$env:ALLOW_REAL_TRADING = "false"', script)
+        self.assertIn('$env:REAL_MAX_STAKE_USD = "0"', script)
         self.assertIn('$env:DOMAIN = "localhost"', script)
         self.assertIn("nexus_trader.dev.db", script)
         self.assertIn("127.0.0.1", script)
@@ -21,7 +22,7 @@ class LocalDevProfileTests(unittest.TestCase):
         script = LAUNCHER.read_text(encoding="utf-8")
 
         self.assertIn("api.app:app", script)
-        self.assertIn("/api/v1/health", script)
+        self.assertIn("/api/v1/health/live", script)
         self.assertIn("main.py", script)
         self.assertIn("-WindowStyle Hidden", script)
         self.assertIn("$apiProcess.Id", script)

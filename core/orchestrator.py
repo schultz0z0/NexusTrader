@@ -46,11 +46,21 @@ class BotOrchestrator:
             elif running and not running.stop_requested:
                 running.stop_requested = True
                 await running.session.request_stop()
+            elif (
+                running is None
+                and bot.get("runtime_state") in {"STARTING", "RUNNING", "STOPPING"}
+            ):
+                await self.repository.set_runtime_state(bot_id, "STOPPED")
 
         for bot_id, running in list(self._sessions.items()):
             if bot_id not in bots and not running.stop_requested:
                 running.stop_requested = True
                 await running.session.request_stop()
+        if hasattr(self.repository, "record_service_heartbeat"):
+            await self.repository.record_service_heartbeat(
+                "orchestrator",
+                {"running_bot_ids": list(self.running_bot_ids)},
+            )
 
     async def _start_session(self, bot):
         session = self.session_factory(dict(bot))

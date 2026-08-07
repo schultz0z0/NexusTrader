@@ -2,6 +2,7 @@ import { api, ApiError, setApiKey, websocketUrl } from "./api.js";
 import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 import { contractPresentation } from "./trade_state.js";
+import { configuredBotPayload } from "./bot_config.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
@@ -210,6 +211,12 @@ function applyEvent(event) {
       }).catch(() => {});
     }
   }
+  if (event.type === "risk.blocked") {
+    const detail = event.reason === "ownership_quarantine"
+      ? "Compra com ownership pendente: novas ordens estão bloqueadas."
+      : `Operação bloqueada pelo risco: ${event.reason || "limite operacional"}.`;
+    toast(detail, "error");
+  }
   store.set({ snapshot });
 }
 
@@ -251,18 +258,7 @@ function syncAccountSelection(persist = true) {
     : "Não foi possível consultar as contas autorizadas pelo token Deriv.";
   renderAccountMode();
 }
-function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: Number(data.timeframe_seconds), strategy_id: data.strategy_id, strategy_config: { period: Number(data.period), std_dev: Number(data.std_dev) }, duration: Number(data.duration), duration_unit: data.duration_unit, initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
-
-function configuredBotPayload(bot, account) {
-  return {
-    name: bot.name, account_id: account.account_id, account_type: account.account_type,
-    symbol: bot.symbol, timeframe_seconds: bot.timeframe_seconds,
-    strategy_id: bot.strategy_id, strategy_config: bot.strategy_config || {},
-    duration: bot.duration, duration_unit: bot.duration_unit,
-    initial_stake: bot.initial_stake, money_management: bot.money_management,
-    money_config: bot.money_config || {}, risk_config: bot.risk_config || {},
-  };
-}
+function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: 60, strategy_id: data.strategy_id, strategy_config: { period: 21, deviation: 1, depth: 15, backstep: 3 }, duration: 2, duration_unit: "m", initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
 
 async function changeGlobalAccount() {
   const select = $("#account-select");
@@ -289,39 +285,35 @@ async function changeGlobalAccount() {
 function confirmRealStart(bot, account) {
   $("#real-confirm-account").textContent = account.account_id;
   $("#real-confirm-bot").textContent = bot.name;
+  $("#real-confirm-instruction").textContent = `REAL ${account.account_id}`;
+  $("#real-confirm-phrase").value = "";
+  $("#real-confirm-error").hidden = true;
   $("#real-account-dialog").hidden = false;
+  setTimeout(() => $("#real-confirm-phrase").focus(), 0);
   return new Promise((resolve) => { realConfirmationResolver = resolve; });
 }
-function closeRealConfirmation(confirmed) {
+function closeRealConfirmation(value) {
   $("#real-account-dialog").hidden = true;
   const resolve = realConfirmationResolver; realConfirmationResolver = null;
-  if (resolve) resolve(confirmed);
+  if (resolve) resolve(value);
 }
 
 $("#bot-list").addEventListener("click", (event) => { const button = event.target.closest("[data-bot-id]"); if (button) selectBot(button.dataset.botId); });
 $("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $("#account-select").addEventListener("change", changeGlobalAccount);
-$("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(false));
+$("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(null));
 
 $("#strategy-select").addEventListener("change", (e) => {
-  const isDonchian = e.target.value === "donchian";
-  const bollingerRow = $("#bollinger-config-row");
-  const durationRow = $("#duration-config-row");
-  const timeframeSelect = document.querySelector('select[name="timeframe_seconds"]');
-  if (bollingerRow) bollingerRow.hidden = isDonchian;
-  if (durationRow) durationRow.hidden = isDonchian;
-  if (timeframeSelect) timeframeSelect.parentElement.hidden = isDonchian;
-  if (isDonchian) {
-    const form = $("#config-form");
-    if (form.elements["duration"]) form.elements["duration"].value = "2";
-    if (form.elements["duration_unit"]) form.elements["duration_unit"].value = "m";
-    if (timeframeSelect) timeframeSelect.value = "60";
-  }
+  if (e.target.value !== "donchian") e.target.value = "donchian";
 });
-$("#confirm-real-start").addEventListener("click", () => closeRealConfirmation(true));
+$("#confirm-real-start").addEventListener("click", () => {
+  const account = activeAccount(); const phrase = $("#real-confirm-phrase").value.trim(); const expected = `REAL ${account?.account_id || ""}`;
+  if (phrase !== expected) { $("#real-confirm-error").textContent = `Digite exatamente: ${expected}`; $("#real-confirm-error").hidden = false; return; }
+  closeRealConfirmation(phrase);
+});
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
-$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } if (starting && account.account_type === "real" && !(await confirmRealStart(bot, account))) return; try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; snapshot.recent_trades = []; store.set({ trades: [], snapshot }); chart.clearMarkers(); renderActiveTrade(null); renderTrades([]); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } const updated = starting ? await api.startBot(bot.id) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
-$("#stop-all").addEventListener("click", async () => { const running = store.get().bots.filter((bot) => bot.desired_state === "RUNNING"); await Promise.allSettled(running.map((bot) => api.stopBot(bot.id))); await load(); toast(`${running.length} robô(s) receberam parada segura.`); });
+$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; snapshot.recent_trades = []; store.set({ trades: [], snapshot }); chart.clearMarkers(); renderActiveTrade(null); renderTrades([]); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } let realTicket = ""; if (starting && account.account_type === "real") { const phrase = await confirmRealStart(bot, account); if (!phrase) return; realTicket = (await api.realConfirmation(bot.id, phrase)).ticket; } const updated = starting ? await api.startBot(bot.id, realTicket) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
+$("#stop-all").addEventListener("click", async () => { try { const result = await api.stopAll(); await load(); toast(`${result.stopped} robô(s) receberam parada segura.`); } catch (error) { handleError(error); } });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });
 
 function handleError(error) { if (error instanceof ApiError && error.status === 401) { $("#auth-gate").hidden = false; $("#auth-error").textContent = "Chave obrigatória ou inválida."; } else toast(error.message || "Erro inesperado", "error"); }

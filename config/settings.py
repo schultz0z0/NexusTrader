@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     API_BASE_URL: str = "http://127.0.0.1:8000"
     BUSINESS_TIMEZONE: str = "America/Sao_Paulo"
     ALLOW_REAL_TRADING: bool = False
+    REAL_MAX_STAKE_USD: float = 0.0
     EVENT_QUEUE_MAX: int = 2000
     RUNTIME_HEARTBEAT_SECONDS: int = 5
     MARKET_STALE_AFTER_SECONDS: int = 15

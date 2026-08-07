@@ -17,7 +17,7 @@ $apiStdout = Join-Path $logsDir "dev-api.stdout.log"
 $apiStderr = Join-Path $logsDir "dev-api.stderr.log"
 $botStdout = Join-Path $logsDir "dev-bot.stdout.log"
 $botStderr = Join-Path $logsDir "dev-bot.stderr.log"
-$healthUrl = "http://${BindAddress}:${Port}/api/v1/health"
+$healthUrl = "http://${BindAddress}:${Port}/api/v1/health/live"
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Ambiente Python ausente. Crie .venv e instale requirements.txt antes de iniciar."
@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Force -Path $storageDir, $logsDir | Out-Null
 
 # Overrides locais são deliberadamente aplicados somente a estes processos.
 $env:ALLOW_REAL_TRADING = "false"
+$env:REAL_MAX_STAKE_USD = "0"
 $env:DERIV_ACCOUNT_TYPE = "demo"
 $env:DEV_MODE = "true"
 $env:DOMAIN = "localhost"
@@ -65,7 +66,7 @@ try {
         }
         try {
             $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
-            if ($health.status -eq "ok") {
+            if ($health.status -eq "alive") {
                 $healthy = $true
                 break
             }

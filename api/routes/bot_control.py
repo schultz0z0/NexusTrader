@@ -56,6 +56,11 @@ async def update_bot_settings(payload: BotSettingsSchema, request: Request):
 @router.post("/start")
 async def start_bot(request: Request):
     bot = await _default(request)
+    if bot.get("account_type", "demo").lower() == "real":
+        raise HTTPException(
+            403,
+            "Use o endpoint versionado com confirmacao de uso unico para conta REAL",
+        )
     if not bot.get("account_id"):
         raise HTTPException(422, "Configure a conta demo antes de iniciar")
     updated = await request.app.state.repository.set_desired_state(bot["id"], "RUNNING")
