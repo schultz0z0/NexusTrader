@@ -65,6 +65,291 @@ class DemoExecutionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.sent, [{"buy": "proposal-id", "price": 1.0}])
 
 
+class BotSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.strategy = type(
+            "Strategy",
+            (),
+            {"name": lambda self: "Donchian+ZigZag"},
+        )()
+        self.session = BotSession(
+            object(),
+            {"id": "bot-a", "symbol": "R_75"},
+            publisher=object(),
+        )
+
+    def test_expired_unsold_payload_is_awaiting_settlement(self):
+        payload = self.session._trade_payload({
+            "contract_id": 42,
+            "contract_type": "CALL",
+            "underlying": "R_75",
+            "is_sold": 0,
+            "is_expired": 1,
+            "status": "open",
+            "profit": "-1.00",
+            "buy_price": "1.00",
+            "payout": "0",
+            "date_expiry": 100,
+            "date_settlement": None,
+        }, self.strategy, "open")
+
+        self.assertEqual(payload["status"], "open")
+        self.assertEqual(payload["lifecycle_state"], "awaiting_settlement")
+        self.assertFalse(payload["is_sold"])
+        self.assertTrue(payload["is_expired"])
+        self.assertIsNone(payload["date_settlement"])
+
+    def test_unexpired_unsold_payload_is_live(self):
+        payload = self.session._trade_payload({
+            "contract_id": 42,
+            "contract_type": "CALL",
+            "underlying": "R_75",
+            "is_sold": 0,
+            "is_expired": 0,
+            "status": "open",
+            "profit": "0.10",
+            "buy_price": "1.00",
+            "payout": "1.95",
+            "date_expiry": 200,
+        }, self.strategy, "open")
+
+        self.assertEqual(payload["lifecycle_state"], "live")
+        self.assertFalse(payload["is_sold"])
+        self.assertFalse(payload["is_expired"])
+
+    def test_sold_payload_is_closed_and_keeps_settlement_timestamp(self):
+        payload = self.session._trade_payload({
+            "contract_id": 42,
+            "contract_type": "CALL",
+            "underlying": "R_75",
+            "is_sold": 1,
+            "is_expired": 1,
+            "status": "won",
+            "profit": "0.95",
+            "buy_price": "1.00",
+            "payout": "1.95",
+            "date_expiry": 100,
+            "date_settlement": 101,
+        }, self.strategy, "open")
+
+        self.assertEqual(payload["status"], "open")
+        self.assertEqual(payload["lifecycle_state"], "closed")
+        self.assertTrue(payload["is_sold"])
+        self.assertTrue(payload["is_expired"])
+        self.assertEqual(payload["date_settlement"], 101)
+
+    async def test_open_trade_is_created_with_live_lifecycle(self):
+        class Repository:
+            def __init__(self):
+                self.trades = []
+
+            async def upsert_trade(self, trade):
+                self.trades.append(trade)
+
+        class Publisher:
+            async def publish(self, event):
+                return True
+
+        class Monitor:
+            async def monitor_contract(
+                self,
+                contract_id,
+                on_settled,
+                on_update_callback=None,
+            ):
+                return None
+
+        repository = Repository()
+        session = BotSession(
+            repository,
+            {"id": "bot-a", "symbol": "R_75", "initial_stake": 1.0},
+            publisher=Publisher(),
+        )
+
+        await session._register_contract(
+            {
+                "contract_id": 42,
+                "buy_price": "1.00",
+                "payout": "1.95",
+                "date_expiry": 100,
+            },
+            "CALL",
+            self.strategy,
+            Monitor(),
+            object(),
+        )
+
+        self.assertEqual(repository.trades[0]["status"], "open")
+        self.assertEqual(repository.trades[0]["lifecycle_state"], "live")
+        self.assertFalse(repository.trades[0]["is_sold"])
+        self.assertFalse(repository.trades[0]["is_expired"])
+        self.assertIsNone(repository.trades[0]["date_settlement"])
+
+    async def test_run_closes_monitor_before_market_and_connection(self):
+        events = []
+
+        class Repository:
+            async def create_session(self, session_id):
+                return None
+
+            async def set_runtime_state(self, bot_id, status, error=None):
+                return None
+
+            async def close_session(self, session_id, status="closed"):
+                return None
+
+            async def list_trades(self, bot_id, limit=1000):
+                return []
+
+        class Publisher:
+            async def start(self):
+                return None
+
+            async def publish(self, event):
+                return True
+
+        class Auth:
+            async def list_accounts(self):
+                return [{
+                    "account_id": "DOT-DEMO",
+                    "account_type": "demo",
+                    "status": "active",
+                }]
+
+            async def close(self):
+                events.append("auth")
+
+        class Connection:
+            def __init__(self, auth):
+                self.auth = auth
+
+            async def connect(self, account_id):
+                return True
+
+            async def disconnect(self):
+                events.append("connection")
+
+        class Market:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def start(self, symbol, timeframe):
+                return None
+
+            async def close(self):
+                events.append("market")
+
+        class Monitor:
+            def __init__(self, connection):
+                pass
+
+            async def close(self):
+                events.append("monitor")
+
+        class CompletedSession(BotSession):
+            async def _trade_loop(self, *args):
+                return None
+
+        bot = {
+            "id": "bot-a",
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "strategy_id": "donchian",
+            "symbol": "R_75",
+            "timeframe_seconds": 60,
+            "duration": 2,
+            "duration_unit": "m",
+            "initial_stake": 1.0,
+        }
+        auth = Auth()
+        with patch("core.bot_session.AuthManager", return_value=auth), \
+             patch("core.bot_session.NexusConnection", Connection), \
+             patch("core.bot_session.MarketDataHandler", Market), \
+             patch("core.bot_session.ContractMonitor", Monitor):
+            await CompletedSession(
+                Repository(),
+                bot,
+                publisher=Publisher(),
+            ).run()
+
+        self.assertEqual(events, ["monitor", "market", "connection"])
+
+    async def test_run_closes_created_monitor_after_partial_initialization_failure(self):
+        events = []
+
+        class Repository:
+            async def create_session(self, session_id):
+                return None
+
+            async def set_runtime_state(self, bot_id, status, error=None):
+                return None
+
+            async def close_session(self, session_id, status="closed"):
+                return None
+
+        class Publisher:
+            async def start(self):
+                return None
+
+            async def publish(self, event):
+                return True
+
+        class Auth:
+            async def list_accounts(self):
+                return [{
+                    "account_id": "DOT-DEMO",
+                    "account_type": "demo",
+                    "status": "active",
+                }]
+
+        class Connection:
+            def __init__(self, auth):
+                pass
+
+            async def connect(self, account_id):
+                return True
+
+            async def disconnect(self):
+                events.append("connection")
+
+        class Monitor:
+            def __init__(self, connection):
+                pass
+
+            async def close(self):
+                events.append("monitor")
+
+        bot = {
+            "id": "bot-a",
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "strategy_id": "donchian",
+            "symbol": "R_75",
+            "timeframe_seconds": 60,
+            "duration": 2,
+            "duration_unit": "m",
+            "initial_stake": 1.0,
+        }
+        with patch("core.bot_session.AuthManager", return_value=Auth()), \
+             patch("core.bot_session.NexusConnection", Connection), \
+             patch("core.bot_session.ContractMonitor", Monitor), \
+             patch(
+                 "core.bot_session.MarketDataHandler",
+                 side_effect=RuntimeError("market initialization failed"),
+             ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "market initialization failed",
+            ):
+                await BotSession(
+                    Repository(),
+                    bot,
+                    publisher=Publisher(),
+                ).run()
+
+        self.assertEqual(events, ["monitor", "connection"])
+
+
 class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_settlement_callback_is_retried_on_next_sold_update(self):
         connection = FakeConnection()

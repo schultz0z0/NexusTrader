@@ -82,6 +82,7 @@ class BotSession:
         await self._set_status("STARTING")
         auth = AuthManager()
         self._connection = NexusConnection(auth)
+        monitor = None
 
         try:
             accounts = await auth.list_accounts()
@@ -131,6 +132,8 @@ class BotSession:
             await self._set_status("ERROR", str(exc))
             raise
         finally:
+            if monitor:
+                await monitor.close()
             if self._market_data:
                 await self._market_data.close()
             if self._connection:
@@ -240,6 +243,10 @@ class BotSession:
             "profit": 0.0,
             "result": "open",
             "status": "open",
+            "lifecycle_state": "live",
+            "is_sold": False,
+            "is_expired": False,
+            "date_settlement": None,
             "entry_spot": contract.get("entry_spot"),
             "purchase_time": contract.get("purchase_time"),
             "expiry_time": contract.get("date_expiry"),
@@ -262,6 +269,11 @@ class BotSession:
         await monitor.monitor_contract(contract_id, on_settled, on_update)
 
     def _trade_payload(self, poc, strategy, status):
+        is_sold = poc.get("is_sold") == 1
+        is_expired = poc.get("is_expired") == 1
+        lifecycle_state = "closed" if status == "closed" or is_sold else (
+            "awaiting_settlement" if is_expired else "live"
+        )
         return {
             "bot_id": self.bot_id,
             "session_id": self._session_id,
@@ -274,6 +286,10 @@ class BotSession:
             "profit": float(poc.get("profit", 0) or 0),
             "result": poc.get("status", status),
             "status": status,
+            "lifecycle_state": lifecycle_state,
+            "is_sold": is_sold,
+            "is_expired": is_expired,
+            "date_settlement": poc.get("date_settlement"),
             "entry_spot": poc.get("entry_spot"),
             "exit_spot": poc.get("exit_spot", poc.get("current_spot")),
             "purchase_time": poc.get("purchase_time"),
