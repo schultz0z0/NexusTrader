@@ -46,6 +46,37 @@ class SettingsContractTests(unittest.TestCase):
                 DASHBOARD_API_KEY="",
             )
 
+    def test_contract_reconcile_interval_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            Settings(
+                _env_file=None,
+                DERIV_APP_ID="test-app",
+                DERIV_API_TOKEN="test-token",
+                DEV_MODE=True,
+                CONTRACT_RECONCILE_INTERVAL_SECONDS=0,
+            )
+
+    def test_contract_expiry_grace_cannot_be_negative(self):
+        with self.assertRaises(ValueError):
+            Settings(
+                _env_file=None,
+                DERIV_APP_ID="test-app",
+                DERIV_API_TOKEN="test-token",
+                DEV_MODE=True,
+                CONTRACT_EXPIRY_GRACE_SECONDS=-1,
+            )
+
+    def test_contract_reconciliation_defaults_are_safe(self):
+        configured = Settings(
+            _env_file=None,
+            DERIV_APP_ID="test-app",
+            DERIV_API_TOKEN="test-token",
+            DEV_MODE=True,
+        )
+
+        self.assertEqual(configured.CONTRACT_RECONCILE_INTERVAL_SECONDS, 5)
+        self.assertEqual(configured.CONTRACT_EXPIRY_GRACE_SECONDS, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     RUNTIME_HEARTBEAT_SECONDS: int = 5
     MARKET_STALE_AFTER_SECONDS: int = 15
     SETTLEMENT_WAIT_TIMEOUT_SECONDS: int = 600
+    CONTRACT_RECONCILE_INTERVAL_SECONDS: int = 5
+    CONTRACT_EXPIRY_GRACE_SECONDS: int = 1
     MARKET_HISTORY_RESYNC_SECONDS: int = 30
     
     # Notificacoes
@@ -51,6 +53,10 @@ class Settings(BaseSettings):
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:
             raise ValueError("SETTLEMENT_WAIT_TIMEOUT_SECONDS deve ser positivo")
+        if self.CONTRACT_RECONCILE_INTERVAL_SECONDS < 1:
+            raise ValueError("CONTRACT_RECONCILE_INTERVAL_SECONDS deve ser pelo menos 1")
+        if self.CONTRACT_EXPIRY_GRACE_SECONDS < 0:
+            raise ValueError("CONTRACT_EXPIRY_GRACE_SECONDS nao pode ser negativo")
         if self.MARKET_HISTORY_RESYNC_SECONDS < 5:
             raise ValueError("MARKET_HISTORY_RESYNC_SECONDS deve ser pelo menos 5")
         return self
