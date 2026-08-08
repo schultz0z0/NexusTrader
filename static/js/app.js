@@ -252,7 +252,13 @@ function syncAccountSelection(persist = true) {
     : "Não foi possível consultar as contas autorizadas pelo token Deriv.";
   renderAccountMode();
 }
-function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: 60, strategy_id: data.strategy_id, strategy_config: { period: 21, deviation: 1, depth: 15, backstep: 3 }, duration: 2, duration_unit: "m", initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
+const parseNum = (val, fallback = 0) => {
+  if (typeof val === "number") return val;
+  if (!val) return fallback;
+  const num = Number(String(val).replace(",", "."));
+  return Number.isNaN(num) ? fallback : num;
+};
+function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: 60, strategy_id: data.strategy_id, strategy_config: { period: 21, deviation: 1, depth: 15, backstep: 3 }, duration: 2, duration_unit: "m", initial_stake: parseNum(data.initial_stake, 1.0), money_management: data.money_management, money_config: { multiplier: parseNum(data.multiplier, 2), max_levels: parseNum(data.max_levels, 3) }, risk_config: { take_profit_daily: parseNum(data.take_profit_daily, 5), stop_loss_daily: parseNum(data.stop_loss_daily, 2.5), max_daily_trades: parseNum(data.max_daily_trades, 50), max_single_stake: parseNum(data.max_single_stake, 1), max_consecutive_losses: parseNum(data.max_consecutive_losses, 3), cooldown_minutes: parseNum(data.cooldown_minutes, 10) } }; }
 
 async function changeGlobalAccount() {
   const select = $("#account-select");
