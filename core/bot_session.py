@@ -15,6 +15,7 @@ from risk.risk_manager import RiskManager
 from strategies.base import MoneyManager
 
 from strategies.donchian_zigzag import DonchianZigZagStrategy
+from strategies.nexus_speed import NexusSpeedStrategy
 from trading.monitor import ContractMonitor
 from trading.ownership import ActiveOrderIntentError, OrderOwnershipCoordinator
 from trading.proposal import ProposalManager
@@ -54,7 +55,7 @@ class BotSession:
 
     def _build_strategy(self):
         strategy_id = self.bot.get("strategy_id", "donchian")
-        if strategy_id not in ("donchian",):
+        if strategy_id not in ("donchian", "nexus_speed"):
             raise ValueError(f"Estrategia nao suportada: {strategy_id}")
 
         strategy_config = self.bot.get("strategy_config") or {}
@@ -72,6 +73,42 @@ class BotSession:
             return DonchianZigZagStrategy(
                 money_manager=money,
             )
+        if self.bot.get("duration_unit", "s") != "s":
+            raise ValueError("Nexus Speed usa expiracao fixa de 10 segundos")
+        min_profit_ratio = float(strategy_config.get("min_profit_ratio", 0.87))
+        if min_profit_ratio < 0.87:
+            raise ValueError("Nexus Speed exige min_profit_ratio >= 0.87")
+        return NexusSpeedStrategy(
+            money_manager=money,
+            duration=int(self.bot.get("duration", 10)),
+            touch_tolerance_bps=float(
+                strategy_config.get("touch_tolerance_bps", 1.0)
+            ),
+            ema_flat_tolerance_pips=float(
+                strategy_config.get("ema_flat_tolerance_pips", 1.0)
+            ),
+            min_profit_ratio=min_profit_ratio,
+            max_entry_delay_ticks=int(
+                strategy_config.get("max_entry_delay_ticks", 1)
+            ),
+            min_closed_candles=int(strategy_config.get("min_closed_candles", 270)),
+        )
+
+    @staticmethod
+    def _nexus_trade_block_reason(strategy, signal, proposal, latest):
+        if not isinstance(strategy, NexusSpeedStrategy):
+            return None
+        latest_sequence = latest.get("sequence") if latest else None
+        if signal.tick_sequence is None or latest_sequence is None:
+            return "signal_stale_by_ticks"
+        if int(latest_sequence) - int(signal.tick_sequence) > strategy.max_entry_delay_ticks:
+            return "signal_stale_by_ticks"
+        profit_ratio = ProposalManager.profit_ratio(proposal)
+        if profit_ratio is None:
+            return "proposal_profit_ratio_unavailable"
+        if profit_ratio + 1e-12 < strategy.min_profit_ratio:
+            return "profit_ratio_below_minimum"
+        return None
 
     async def run(self):
         ensure_account_allowed(self.bot)
@@ -113,6 +150,19 @@ class BotSession:
                 strategy.money_manager.restore_state(persisted_risk)
                 circuit_breaker.restore_state(persisted_risk)
             proposal_manager = ProposalManager(self._connection)
+            if isinstance(strategy, NexusSpeedStrategy):
+                symbol = self.bot.get("symbol", "R_100")
+                await proposal_manager.validate_contract_types(
+                    symbol, {"CALL", "PUT"}
+                )
+                params = strategy.get_contract_params()
+                await proposal_manager.validate_fixed_duration(
+                    symbol,
+                    {"CALL", "PUT"},
+                    strategy.get_stake(),
+                    params["duration"],
+                    params["duration_unit"],
+                )
             ownership = OrderOwnershipCoordinator(
                 self._connection,
                 self.repository,
@@ -269,6 +319,24 @@ class BotSession:
                 params["duration_unit"],
             )
             if not proposal or self._stop_requested.is_set():
+                continue
+            latest_after_proposal = self._market_data.get_latest_tick(symbol)
+            block_reason = self._nexus_trade_block_reason(
+                strategy, signal, proposal, latest_after_proposal
+            )
+            if block_reason:
+                await self._publish(
+                    "risk.blocked",
+                    reason=block_reason,
+                    signal_tick_sequence=signal.tick_sequence,
+                    latest_tick_sequence=(
+                        latest_after_proposal.get("sequence")
+                        if latest_after_proposal
+                        else None
+                    ),
+                    profit_ratio=ProposalManager.profit_ratio(proposal),
+                    min_profit_ratio=getattr(strategy, "min_profit_ratio", None),
+                )
                 continue
             try:
                 buy = await ownership.buy({
