@@ -57,6 +57,9 @@ class ReplayEngine:
             manifest["min_profit_ratio"] = float(
                 getattr(strategy, "min_profit_ratio", 0.87)
             )
+            manifest["adx_threshold"] = float(
+                getattr(strategy, "adx_threshold", 30.0)
+            )
         else:
             manifest["duration_seconds"] = duration_seconds
             manifest["strategy"] = "donchian"

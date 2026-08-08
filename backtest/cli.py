@@ -7,10 +7,10 @@ from strategies.donchian_zigzag import DonchianZigZagStrategy
 from strategies.nexus_speed import NexusSpeedStrategy
 
 
-def strategy_factory(strategy_id):
+def strategy_factory(strategy_id: str, adx_threshold: int = 30):
     return {
         "donchian": DonchianZigZagStrategy,
-        "nexus_speed": NexusSpeedStrategy,
+        "nexus_speed": lambda: NexusSpeedStrategy(adx_threshold=adx_threshold),
     }[strategy_id]
 
 
@@ -23,6 +23,13 @@ def main():
         default="donchian",
         help="Estrategia fixa usada no replay",
     )
+    parser.add_argument(
+        "--adx-threshold",
+        type=int,
+        choices=(20, 25, 30),
+        default=30,
+        help="ADX mínimo do Nexus Speed",
+    )
     args = parser.parse_args()
     path = Path(args.input)
     ticks = [
@@ -30,7 +37,9 @@ def main():
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    engine = ReplayEngine(strategy_factory=strategy_factory(args.strategy))
+    engine = ReplayEngine(
+        strategy_factory=strategy_factory(args.strategy, args.adx_threshold)
+    )
     print(json.dumps(engine.run(ticks), ensure_ascii=False, indent=2))
 
 

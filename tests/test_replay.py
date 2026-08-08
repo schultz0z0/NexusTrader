@@ -31,6 +31,7 @@ class OneShotStrategy:
 
 class FiveTickStrategy(OneShotStrategy):
     min_profit_ratio = 0.87
+    adx_threshold = 25.0
 
     def analyze(self, ticks, candles=None):
         if not self.sent:
@@ -51,8 +52,12 @@ class FiveTickStrategy(OneShotStrategy):
 
 
 class DeterministicReplayTests(unittest.TestCase):
-    def test_cli_exposes_nexus_speed_replay(self):
-        self.assertIs(strategy_factory("nexus_speed"), NexusSpeedStrategy)
+    def test_replay_factory_configures_selected_nexus_adx_threshold(self):
+        factory = strategy_factory("nexus_speed", adx_threshold=25)
+        strategy = factory()
+
+        self.assertIsInstance(strategy, NexusSpeedStrategy)
+        self.assertEqual(strategy.adx_threshold, 25.0)
 
     def test_replay_is_deterministic_and_uses_first_tick_at_or_after_expiry(self):
         ticks = [
@@ -100,6 +105,7 @@ class DeterministicReplayTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["manifest"]["duration_ticks"], 5)
+        self.assertEqual(result["manifest"]["adx_threshold"], 25.0)
         self.assertEqual(result["trades"][0]["entry_epoch"], 0)
         self.assertEqual(result["trades"][0]["entry_spot"], 101.0)
         self.assertEqual(result["trades"][0]["exit_epoch"], 2)
