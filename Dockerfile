@@ -24,7 +24,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl libicu72 \
+RUN apt-get update && apt-get install -y --no-install-recommends curl libicu76 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 nexus \
     && useradd --uid 10001 --gid nexus --create-home --shell /usr/sbin/nologin nexus

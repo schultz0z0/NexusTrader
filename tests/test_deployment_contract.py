@@ -29,7 +29,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("AS builder", dockerfile)
         self.assertIn("USER nexus", dockerfile)
         self.assertIn("COPY --from=builder", dockerfile)
-        self.assertIn("libicu72", dockerfile)
+        self.assertIn("libicu76", dockerfile)
         self.assertNotIn("gcc \\\n+    &&", dockerfile[dockerfile.rfind("FROM python"):])
 
     def test_operations_runbook_contains_safe_vps_update_sequence(self):
