@@ -49,10 +49,13 @@ class MoneyManager:
         return round(self.current_stake, 2)
 
     def restore_state(self, state: Dict[str, Any]):
-        self.current_stake = float(state.get("current_stake", self.initial_stake))
         self.current_level = int(state.get("current_level", 0))
         self.consecutive_wins = int(state.get("consecutive_wins", 0))
         self.consecutive_losses = int(state.get("consecutive_losses", 0))
+        if self.current_level == 0:
+            self.current_stake = self.initial_stake
+        else:
+            self.current_stake = float(state.get("current_stake", self.initial_stake))
 
     def on_trade_result(self, is_win: bool, profit: float = 0.0):
         if is_win:
