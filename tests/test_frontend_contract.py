@@ -52,6 +52,8 @@ class FrontendContractTests(unittest.TestCase):
             api_source = stream.read()
         with open(os.path.join(root, "static", "js", "app.js"), encoding="utf-8") as stream:
             app_source = stream.read()
+        with open(os.path.join(root, "static", "js", "bot_config.js"), encoding="utf-8") as stream:
+            bot_config_source = stream.read()
 
         self.assertIn('/api/v1/accounts', api_source)
         self.assertIn('/api/v1/ws-tickets/', api_source)
@@ -65,10 +67,10 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotIn('name="account_id"', config_source)
         self.assertIn('/real-confirmation', api_source)
         self.assertIn('REAL ${account.account_id}', app_source)
-        self.assertIn('period: 21', app_source)
-        self.assertIn('deviation: 1', app_source)
-        self.assertIn('depth: 15', app_source)
-        self.assertIn('backstep: 3', app_source)
+        self.assertIn('period: 21', bot_config_source)
+        self.assertIn('deviation: 1', bot_config_source)
+        self.assertIn('depth: 15', bot_config_source)
+        self.assertIn('backstep: 3', bot_config_source)
 
 
 if __name__ == "__main__":
