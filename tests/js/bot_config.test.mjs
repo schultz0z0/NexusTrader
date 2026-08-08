@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { configuredBotPayload } from "../../static/js/bot_config.js";
+import { configuredBotPayload, strategyProfile } from "../../static/js/bot_config.js";
+
+test("Nexus defaults to ADX 30", () => {
+  assert.equal(strategyProfile("nexus_speed").strategy_config.adx_threshold, 30);
+});
+
+test("Nexus preserves selected ADX threshold", () => {
+  const profile = strategyProfile("nexus_speed", { adx_threshold: 25 });
+  assert.equal(profile.strategy_config.adx_threshold, 25);
+});
 
 test("account changes always migrate legacy strategy parameters to the fixed profile", () => {
   const payload = configuredBotPayload(
@@ -38,7 +47,7 @@ test("account changes preserve the fixed Nexus Speed five-tick profile", () => {
       symbol: "R_100",
       timeframe_seconds: 60,
       strategy_id: "nexus_speed",
-      strategy_config: { min_profit_ratio: 0.87 },
+      strategy_config: { min_profit_ratio: 0.87, adx_threshold: 20 },
       duration: 5,
       duration_unit: "t",
       initial_stake: 1,
@@ -54,5 +63,6 @@ test("account changes preserve the fixed Nexus Speed five-tick profile", () => {
   assert.equal(payload.duration_unit, "t");
   assert.equal(payload.strategy_config.ema_period, 5);
   assert.equal(payload.strategy_config.min_profit_ratio, 0.87);
+  assert.equal(payload.strategy_config.adx_threshold, 20);
   assert.equal(payload.account_type, "demo");
 });

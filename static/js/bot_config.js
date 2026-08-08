@@ -18,11 +18,12 @@ const NEXUS_SPEED_CONFIG = Object.freeze({
   min_closed_candles: 270,
 });
 
-export function strategyProfile(strategyId) {
+export function strategyProfile(strategyId, overrides = {}) {
   if (strategyId === "nexus_speed") {
+    const adxThreshold = Number(overrides.adx_threshold ?? 30);
     return {
       strategy_id: "nexus_speed",
-      strategy_config: { ...NEXUS_SPEED_CONFIG },
+      strategy_config: { ...NEXUS_SPEED_CONFIG, adx_threshold: adxThreshold },
       timeframe_seconds: 60,
       duration: 5,
       duration_unit: "t",
@@ -38,7 +39,7 @@ export function strategyProfile(strategyId) {
 }
 
 export function configuredBotPayload(bot, account) {
-  const profile = strategyProfile(bot.strategy_id);
+  const profile = strategyProfile(bot.strategy_id, bot.strategy_config);
   return {
     name: bot.name,
     account_id: account.account_id,
