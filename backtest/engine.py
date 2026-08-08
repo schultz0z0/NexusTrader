@@ -60,6 +60,20 @@ class ReplayEngine:
             manifest["adx_threshold"] = float(
                 getattr(strategy, "adx_threshold", 30.0)
             )
+            manifest["strategy_config"] = {
+                "ema_period": strategy.ema_period,
+                "adx_period": strategy.adx_period,
+                "adx_threshold": strategy.adx_threshold,
+                "atr_period": strategy.atr_period,
+                "min_distance_atr": strategy.min_distance_atr,
+                "touch_tolerance_bps": strategy.touch_tolerance_bps,
+                "ema_flat_tolerance_pips": strategy.ema_flat_tolerance_pips,
+                "min_profit_ratio": strategy.min_profit_ratio,
+                "max_entry_delay_ticks": strategy.max_entry_delay_ticks,
+                "min_closed_candles": strategy.min_closed_candles,
+                "duration": params["duration"],
+                "duration_unit": params["duration_unit"],
+            }
         else:
             manifest["duration_seconds"] = duration_seconds
             manifest["strategy"] = "donchian"

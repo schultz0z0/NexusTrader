@@ -101,8 +101,24 @@ class MarketDataHandler:
             result.append({"time": int(points[index]["time"]), "value": current})
         return result
 
-    def _current_ema(self):
-        history = self._ema_history(list(self._candles))
+    def _frozen_ema_history(self, points: list, active_candle_time: int):
+        closed = [
+            point
+            for point in points
+            if int(point["time"]) < int(active_candle_time)
+        ]
+        history = self._ema_history(closed)
+        if not history:
+            return []
+        return [
+            *history,
+            {"time": int(active_candle_time), "value": history[-1]["value"]},
+        ]
+
+    def _current_ema(self, active_candle_time: int):
+        history = self._frozen_ema_history(
+            list(self._candles), active_candle_time
+        )
         return history[-1]["value"] if history else None
 
     async def _load_and_publish_history(self):
@@ -164,7 +180,17 @@ class MarketDataHandler:
 
     async def _publish_history(self, points, line_mode, epoch=None):
         donchian, zigzag = self._calculate_history_indicators(points)
-        ema = self._ema_history(points) if self.indicator_mode == "ema" else []
+        ema = []
+        if self.indicator_mode == "ema":
+            if line_mode or not points:
+                ema = self._ema_history(points)
+            else:
+                active_candle_time = (
+                    int(epoch) // self.timeframe_seconds * self.timeframe_seconds
+                    if epoch is not None
+                    else int(points[-1]["time"])
+                )
+                ema = self._frozen_ema_history(points, active_candle_time)
         await self.publisher.publish(runtime_event(
             "market.history",
             self.bot_id,
@@ -224,7 +250,7 @@ class MarketDataHandler:
                 indicator_mode=self.indicator_mode,
                 bollinger=self._bollinger_values(),
                 zigzag=self._calculate_history_indicators(list(self._candles))[1],
-                ema=self._current_ema(),
+                ema=self._current_ema(candle.time),
             ))
             if epoch - self._last_history_publish_epoch >= self.history_resync_seconds:
                 if self.timeframe_seconds <= 1:

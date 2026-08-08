@@ -106,9 +106,7 @@ class LiveStore:
                 series = state["market"].setdefault("ema", [])
                 ema_time = point.get("time") if point else event.get("epoch")
                 ema_point = {"time": ema_time, "value": event["ema"]}
-                if series and series[-1].get("time") == ema_time:
-                    series[-1] = ema_point
-                else:
+                if not series or series[-1].get("time") != ema_time:
                     series.append(ema_point)
                     del series[:-self.history_limit]
         elif event_type in {"trade.opened", "trade.updated"}:

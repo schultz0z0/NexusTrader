@@ -255,6 +255,66 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(duplicate)
 
+    def test_transition_telemetry_covers_qualification_touch_and_failure(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+
+        qualification = strategy.drain_transition_events()
+        self.assertEqual(qualification[-1], {
+            "phase": "qualification",
+            "state": "ARMED_CALL",
+            "reason_code": "filters_passed",
+            "candle_time": 180,
+            "tick_sequence": 2,
+        })
+
+        ticks.append(self._tick(3, 190, 100.0))
+        strategy.analyze(ticks, self._candles(180, 110.0))
+        self.assertEqual(strategy.drain_transition_events(), [{
+            "phase": "touch",
+            "state": "AWAITING_CONFIRMATION",
+            "reason_code": "touch_detected",
+            "candle_time": 180,
+            "tick_sequence": 3,
+        }])
+
+        ticks.append(self._tick(4, 191, 99.98))
+        strategy.analyze(ticks, self._candles(180, 110.0))
+        self.assertEqual(strategy.drain_transition_events(), [{
+            "phase": "confirmation",
+            "state": "ABORTED",
+            "reason_code": "confirmation_failed",
+            "candle_time": 180,
+            "tick_sequence": 4,
+        }])
+
+    def test_transition_telemetry_records_emitted_signal(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+        strategy.drain_transition_events()
+        ticks.extend([
+            self._tick(3, 190, 100.0),
+            self._tick(4, 191, 100.02),
+        ])
+
+        signal = strategy.analyze(ticks, self._candles(180, 110.0))
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(strategy.drain_transition_events(), [
+            {
+                "phase": "touch",
+                "state": "AWAITING_CONFIRMATION",
+                "reason_code": "touch_detected",
+                "candle_time": 180,
+                "tick_sequence": 3,
+            },
+            {
+                "phase": "signal",
+                "state": "SIGNAL_EMITTED",
+                "reason_code": "confirmation_passed",
+                "candle_time": 180,
+                "tick_sequence": 4,
+            },
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

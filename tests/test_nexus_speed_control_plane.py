@@ -68,6 +68,28 @@ class NexusSpeedPayloadTests(unittest.TestCase):
         self.assertEqual(payload.strategy_config["adx_threshold"], 25)
         self.assertEqual(payload.strategy_config["min_profit_ratio"], 0.87)
 
+    def test_api_normalizes_legacy_full_profile_without_adx_threshold(self):
+        payload = BotPayload(
+            name="Legacy Nexus Speed",
+            strategy_id="nexus_speed",
+            duration=5,
+            duration_unit="t",
+            strategy_config={
+                "ema_period": 5,
+                "adx_period": 10,
+                "atr_period": 14,
+                "min_distance_atr": 0.30,
+                "touch_tolerance_bps": 1,
+                "ema_flat_tolerance_pips": 1,
+                "min_profit_ratio": 0.87,
+                "max_entry_delay_ticks": 1,
+                "min_closed_candles": 270,
+            },
+        )
+
+        self.assertEqual(payload.strategy_config["adx_threshold"], 30)
+        self.assertIs(type(payload.strategy_config["adx_threshold"]), int)
+
     def test_api_rejects_unapproved_adx_threshold(self):
         with self.assertRaises(ValidationError):
             BotPayload(
@@ -127,7 +149,7 @@ class NexusSpeedMarketTelemetryTests(unittest.TestCase):
             {"time": 360, "value": 4.0},
         ])
 
-    def test_live_store_keeps_ema_history_and_updates_same_candle(self):
+    def test_live_store_freezes_ema_reference_during_same_candle(self):
         store = LiveStore()
         store.apply({
             "event_id": "history",
@@ -170,5 +192,5 @@ class NexusSpeedMarketTelemetryTests(unittest.TestCase):
         self.assertEqual(market["indicator_mode"], "ema")
         self.assertEqual(market["ema"], [
             {"time": 300, "value": 100.0},
-            {"time": 360, "value": 101.0},
+            {"time": 360, "value": 100.5},
         ])

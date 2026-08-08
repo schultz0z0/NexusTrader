@@ -32,6 +32,14 @@ class OneShotStrategy:
 class FiveTickStrategy(OneShotStrategy):
     min_profit_ratio = 0.87
     adx_threshold = 25.0
+    ema_period = 5
+    adx_period = 10
+    atr_period = 14
+    min_distance_atr = 0.30
+    touch_tolerance_bps = 1.0
+    ema_flat_tolerance_pips = 1.0
+    max_entry_delay_ticks = 1
+    min_closed_candles = 270
 
     def analyze(self, ticks, candles=None):
         if not self.sent:
@@ -106,6 +114,20 @@ class DeterministicReplayTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["manifest"]["duration_ticks"], 5)
         self.assertEqual(result["manifest"]["adx_threshold"], 25.0)
+        self.assertEqual(result["manifest"]["strategy_config"], {
+            "ema_period": 5,
+            "adx_period": 10,
+            "adx_threshold": 25.0,
+            "atr_period": 14,
+            "min_distance_atr": 0.30,
+            "touch_tolerance_bps": 1.0,
+            "ema_flat_tolerance_pips": 1.0,
+            "min_profit_ratio": 0.87,
+            "max_entry_delay_ticks": 1,
+            "min_closed_candles": 270,
+            "duration": 5,
+            "duration_unit": "t",
+        })
         self.assertEqual(result["trades"][0]["entry_epoch"], 0)
         self.assertEqual(result["trades"][0]["entry_spot"], 101.0)
         self.assertEqual(result["trades"][0]["exit_epoch"], 2)

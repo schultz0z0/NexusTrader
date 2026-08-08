@@ -2,7 +2,7 @@ import unittest
 
 from core.bot_session import BotSession
 from strategies.base import Signal
-from strategies.nexus_speed import NexusSpeedStrategy
+from strategies.nexus_speed import IndicatorSnapshot, NexusSpeedStrategy
 from trading.proposal import ProposalManager
 
 
@@ -44,6 +44,15 @@ class NexusSpeedRuntimeTests(unittest.TestCase):
         )._build_strategy()
 
         self.assertEqual(strategy.adx_threshold, 25.0)
+
+    def test_runtime_rejects_non_integer_persisted_adx_thresholds(self):
+        for threshold in (25.5, "25", True):
+            with self.subTest(threshold=threshold), self.assertRaisesRegex(
+                ValueError, "20, 25 ou 30"
+            ):
+                self._session(
+                    strategy_config={"adx_threshold": threshold}
+                )._build_strategy()
 
     def test_rejects_non_five_tick_nexus_configuration(self):
         with self.assertRaisesRegex(ValueError, "5 ticks"):
@@ -161,3 +170,84 @@ class ProposalValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item["contract_type"] for item in connection.requests}, {"CALL", "PUT"})
         self.assertTrue(all(item["duration"] == 5 for item in connection.requests))
         self.assertTrue(all(item["duration_unit"] == "t" for item in connection.requests))
+
+
+class RecordingPublisher:
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, event):
+        self.events.append(event)
+        return True
+
+
+class NexusSpeedRuntimeTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _candles(opening):
+        return [
+            {"time": 0, "open": 97, "high": 99, "low": 96, "close": 98},
+            {"time": 60, "open": 98, "high": 100, "low": 97, "close": 99},
+            {"time": 120, "open": 99, "high": 101, "low": 98, "close": 100},
+            {
+                "time": 180,
+                "open": opening,
+                "high": opening,
+                "low": opening,
+                "close": opening,
+            },
+        ]
+
+    async def test_runtime_publishes_transitions_and_signal_coordinates(self):
+        publisher = RecordingPublisher()
+        session = BotSession(
+            object(),
+            {
+                "id": "nexus-speed-a",
+                "strategy_id": "nexus_speed",
+                "duration": 5,
+                "duration_unit": "t",
+            },
+            publisher=publisher,
+        )
+        strategy = NexusSpeedStrategy(
+            min_closed_candles=3,
+            indicator_provider=lambda _: IndicatorSnapshot(100, 99, 31, 20),
+        )
+        startup = {
+            "sequence": 1,
+            "epoch": 121,
+            "quote": 100.0,
+            "pip_size": 2,
+            "is_live": True,
+        }
+        opening = {
+            "sequence": 2,
+            "epoch": 181,
+            "quote": 110.0,
+            "pip_size": 2,
+            "is_live": True,
+        }
+        strategy.analyze([startup], self._candles(100.0)[:-1])
+        strategy.analyze([startup, opening], self._candles(110.0))
+
+        await session._publish_nexus_transitions(strategy)
+        signal = Signal(
+            "CALL",
+            "fixture",
+            100.02,
+            191,
+            tick_sequence=4,
+            candle_time=180,
+        )
+        await session._publish_strategy_signal(signal)
+
+        transition = publisher.events[0]
+        self.assertEqual(transition["type"], "strategy.transition")
+        self.assertEqual(transition["phase"], "qualification")
+        self.assertEqual(transition["reason_code"], "filters_passed")
+        self.assertEqual(transition["tick_sequence"], 2)
+        self.assertEqual(transition["candle_time"], 180)
+        signal_event = publisher.events[-1]
+        self.assertEqual(signal_event["type"], "strategy.signal")
+        self.assertEqual(signal_event["tick_sequence"], 4)
+        self.assertEqual(signal_event["candle_time"], 180)

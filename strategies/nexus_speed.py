@@ -87,6 +87,7 @@ class NexusSpeedStrategy(BaseStrategy):
         self._direction: Optional[str] = None
         self._lower_band: Optional[float] = None
         self._upper_band: Optional[float] = None
+        self._transition_events: list[dict] = []
 
     def name(self) -> str:
         return "NexusSpeed(EMA5,ADX10,ATR14)"
@@ -118,7 +119,7 @@ class NexusSpeedStrategy(BaseStrategy):
                 and sequence != self.last_processed_sequence + 1
             )
             if has_gap and self.state == "AWAITING_CONFIRMATION":
-                self._abort("tick_sequence_gap")
+                self._abort("tick_sequence_gap", tick)
 
             if self.current_candle_time is None:
                 self.current_candle_time = candle_time
@@ -149,13 +150,15 @@ class NexusSpeedStrategy(BaseStrategy):
 
         closed = closed_candles(candles, self.current_candle_time)
         if len(closed) < self.min_closed_candles:
-            self.state = "INELIGIBLE_WARMUP"
-            self.state_reason = "warmup_incomplete"
+            self._transition(
+                "qualification", "INELIGIBLE_WARMUP", "warmup_incomplete", tick
+            )
             return
         snapshot = self._indicator_provider(closed)
         if snapshot is None:
-            self.state = "INELIGIBLE_WARMUP"
-            self.state_reason = "indicator_unavailable"
+            self._transition(
+                "qualification", "INELIGIBLE_WARMUP", "indicator_unavailable", tick
+            )
             return
         self._snapshot = snapshot
 
@@ -177,26 +180,26 @@ class NexusSpeedStrategy(BaseStrategy):
         if opening > snapshot.ema_reference:
             direction = "CALL"
             if slope < -flat_tolerance - epsilon:
-                self._ineligible("ema_slope_against_setup")
+                self._ineligible("ema_slope_against_setup", tick)
                 return
         elif opening < snapshot.ema_reference:
             direction = "PUT"
             if slope > flat_tolerance + epsilon:
-                self._ineligible("ema_slope_against_setup")
+                self._ineligible("ema_slope_against_setup", tick)
                 return
         else:
-            self._ineligible("opening_on_ema")
+            self._ineligible("opening_on_ema", tick)
             return
 
         if snapshot.adx <= self.adx_threshold:
-            self._ineligible("adx_below_threshold")
+            self._ineligible("adx_below_threshold", tick)
             return
         if snapshot.atr <= 0:
-            self._ineligible("atr_invalid")
+            self._ineligible("atr_invalid", tick)
             return
         required_distance = self.min_distance_atr * snapshot.atr
         if abs(opening - snapshot.ema_reference) + epsilon < required_distance:
-            self._ineligible("opening_too_close")
+            self._ineligible("opening_too_close", tick)
             return
 
         touch_tolerance = max(
@@ -206,8 +209,9 @@ class NexusSpeedStrategy(BaseStrategy):
         self._lower_band = snapshot.ema_reference - touch_tolerance
         self._upper_band = snapshot.ema_reference + touch_tolerance
         self._direction = direction
-        self.state = f"ARMED_{direction}"
-        self.state_reason = "filters_passed"
+        self._transition(
+            "qualification", f"ARMED_{direction}", "filters_passed", tick
+        )
 
     def _process_tick(self, tick: dict) -> Optional[Signal]:
         if self.state in self.TERMINAL_STATES or self.state == "IDLE":
@@ -225,8 +229,9 @@ class NexusSpeedStrategy(BaseStrategy):
         segment_high = max(previous, current)
         if segment_low <= self._upper_band and segment_high >= self._lower_band:
             self._touch_tick = dict(tick)
-            self.state = "AWAITING_CONFIRMATION"
-            self.state_reason = "touch_detected"
+            self._transition(
+                "touch", "AWAITING_CONFIRMATION", "touch_detected", tick
+            )
         return None
 
     def _confirm(self, tick: dict) -> Optional[Signal]:
@@ -234,7 +239,7 @@ class NexusSpeedStrategy(BaseStrategy):
         confirmation_price = float(tick["quote"])
         direction = self._direction
         if confirmation_price == touch_price:
-            self._abort("confirmation_flat")
+            self._abort("confirmation_flat", tick)
             return None
 
         passed = (
@@ -247,11 +252,12 @@ class NexusSpeedStrategy(BaseStrategy):
             and confirmation_price <= self._upper_band
         )
         if not passed:
-            self._abort("confirmation_failed")
+            self._abort("confirmation_failed", tick)
             return None
 
-        self.state = "SIGNAL_EMITTED"
-        self.state_reason = "confirmation_passed"
+        self._transition(
+            "signal", "SIGNAL_EMITTED", "confirmation_passed", tick
+        )
         return Signal(
             action=direction,
             reason=f"Nexus Speed {direction}: toque EMA confirmado no tick seguinte",
@@ -261,10 +267,33 @@ class NexusSpeedStrategy(BaseStrategy):
             candle_time=self.current_candle_time,
         )
 
-    def _ineligible(self, reason: str) -> None:
-        self.state = "INELIGIBLE_FILTER"
-        self.state_reason = reason
+    def drain_transition_events(self) -> list[dict]:
+        events = [dict(event) for event in self._transition_events]
+        self._transition_events.clear()
+        return events
 
-    def _abort(self, reason: str) -> None:
-        self.state = "ABORTED"
-        self.state_reason = reason
+    def _transition(
+        self,
+        phase: str,
+        state: str,
+        reason_code: str,
+        tick: Optional[dict] = None,
+    ) -> None:
+        self.state = state
+        self.state_reason = reason_code
+        event = {
+            "phase": phase,
+            "state": state,
+            "reason_code": reason_code,
+        }
+        if self.current_candle_time is not None:
+            event["candle_time"] = self.current_candle_time
+        if tick is not None and tick.get("sequence") is not None:
+            event["tick_sequence"] = int(tick["sequence"])
+        self._transition_events.append(event)
+
+    def _ineligible(self, reason: str, tick: dict) -> None:
+        self._transition("qualification", "INELIGIBLE_FILTER", reason, tick)
+
+    def _abort(self, reason: str, tick: dict) -> None:
+        self._transition("confirmation", "ABORTED", reason, tick)

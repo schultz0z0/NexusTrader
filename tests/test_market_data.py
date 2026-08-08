@@ -4,15 +4,16 @@ from data.market_data import MarketDataHandler
 
 
 class FakeConnection:
-    def __init__(self):
+    def __init__(self, candles=None):
         self.sent = []
         self.subscriptions = {}
+        self.candles = candles
 
     async def send(self, request, timeout=30):
         self.sent.append(request)
         return {
             "msg_type": "history",
-            "candles": [
+            "candles": self.candles or [
                 {"epoch": 120, "open": 10, "high": 12, "low": 9, "close": 11},
                 {"epoch": 180, "open": 11, "high": 13, "low": 10, "close": 12},
             ],
@@ -126,6 +127,35 @@ class MarketDataHandlerTests(unittest.IsolatedAsyncioTestCase):
             tick["is_live"] is False and tick["sequence"] is None
             for tick in handler.get_tick_history()
         ))
+
+    async def test_nexus_ema_reference_stays_frozen_across_active_candle_ticks(self):
+        candles = [
+            {
+                "epoch": index * 60,
+                "open": float(index),
+                "high": float(index),
+                "low": float(index),
+                "close": float(index),
+            }
+            for index in range(1, 7)
+        ]
+        connection = FakeConnection(candles=candles)
+        publisher = FakePublisher()
+        handler = MarketDataHandler(
+            connection,
+            bot_id="bot-a",
+            publisher=publisher,
+            indicator_mode="ema",
+            ema_period=5,
+        )
+        await handler.start("R_100", timeframe_seconds=60)
+        _, callback = connection.subscriptions["ticks:bot-a:R_100"]
+
+        await callback({"tick": {"epoch": 361, "quote": 100.0, "symbol": "R_100"}})
+        await callback({"tick": {"epoch": 362, "quote": 200.0, "symbol": "R_100"}})
+
+        tick_events = [event for event in publisher.events if event["type"] == "market.tick"]
+        self.assertEqual([event["ema"] for event in tick_events], [3.0, 3.0])
 
     async def test_running_bot_periodically_republishes_full_history_for_api_restart(self):
         connection = FakeConnection()

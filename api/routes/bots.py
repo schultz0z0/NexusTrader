@@ -24,6 +24,7 @@ class BotPayload(BaseModel):
 
     @model_validator(mode="after")
     def demo_only(self):
+        submitted_strategy_config = dict(self.strategy_config)
         requested_adx_threshold = self.strategy_config.get("adx_threshold", 30)
         if self.strategy_id == "nexus_speed" and (
             type(requested_adx_threshold) is not int
@@ -53,16 +54,21 @@ class BotPayload(BaseModel):
         if self.strategy_id not in profiles:
             raise ValueError("Estrategia nao suportada")
         fixed_strategy = profiles[self.strategy_id]
-        allowed_strategy_config = (
-            {"adx_threshold": requested_adx_threshold}
-            if self.strategy_id == "nexus_speed"
-            else fixed_strategy
-        )
-        if (
-            self.strategy_config
-            and self.strategy_config != allowed_strategy_config
-            and self.strategy_config != fixed_strategy
-        ):
+        if self.strategy_id == "nexus_speed":
+            legacy_fixed_strategy = {
+                key: value
+                for key, value in fixed_strategy.items()
+                if key != "adx_threshold"
+            }
+            allowed_strategy_configs = (
+                {},
+                {"adx_threshold": requested_adx_threshold},
+                legacy_fixed_strategy,
+                fixed_strategy,
+            )
+        else:
+            allowed_strategy_configs = ({}, fixed_strategy)
+        if submitted_strategy_config not in allowed_strategy_configs:
             raise ValueError("Parametros da estrategia sao fixos")
         self.strategy_config = fixed_strategy
         if self.timeframe_seconds != 60:

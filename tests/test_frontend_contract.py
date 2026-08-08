@@ -7,6 +7,7 @@ class LandmarkParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.ids = set()
+        self.elements_by_id = {}
         self.scripts = []
         self.styles = []
 
@@ -14,6 +15,7 @@ class LandmarkParser(HTMLParser):
         attributes = dict(attrs)
         if attributes.get("id"):
             self.ids.add(attributes["id"])
+            self.elements_by_id[attributes["id"]] = attributes
         if tag == "script" and attributes.get("src"):
             self.scripts.append(attributes["src"])
         if tag == "link" and attributes.get("rel") == "stylesheet":
@@ -38,6 +40,9 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("/static/styles.css", parser.styles)
         self.assertIn("/static/js/app.js", parser.scripts)
         self.assertTrue(any("lightweight-charts" in item for item in parser.scripts))
+        touch_tolerance = parser.elements_by_id["nexus-touch-tolerance"]
+        self.assertIn("readonly", touch_tolerance)
+        self.assertEqual(touch_tolerance["value"], "1 ponto-base (0,01%)")
 
     def test_frontend_modules_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))

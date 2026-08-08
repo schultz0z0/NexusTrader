@@ -81,7 +81,7 @@ class BotSession:
         return NexusSpeedStrategy(
             money_manager=money,
             duration=int(self.bot.get("duration", 5)),
-            adx_threshold=int(strategy_config.get("adx_threshold", 30)),
+            adx_threshold=strategy_config.get("adx_threshold", 30),
             touch_tolerance_bps=float(
                 strategy_config.get("touch_tolerance_bps", 1.0)
             ),
@@ -236,6 +236,23 @@ class BotSession:
     async def _daily_totals(self):
         return await self.repository.get_bot_daily_stats(self.bot_id)
 
+    async def _publish_nexus_transitions(self, strategy):
+        if not isinstance(strategy, NexusSpeedStrategy):
+            return
+        for transition in strategy.drain_transition_events():
+            await self._publish("strategy.transition", **transition)
+
+    async def _publish_strategy_signal(self, signal):
+        await self._publish(
+            "strategy.signal",
+            action=signal.action,
+            reason=signal.reason,
+            price=signal.price,
+            signal_epoch=signal.timestamp,
+            tick_sequence=signal.tick_sequence,
+            candle_time=signal.candle_time,
+        )
+
     async def _trade_loop(self, strategy, risk, circuit_breaker, proposal_manager, ownership, monitor):
         symbol = self.bot.get("symbol", "R_100")
         risk_config = self.bot.get("risk_config") or {}
@@ -296,6 +313,7 @@ class BotSession:
                 self._market_data.get_tick_history(symbol),
                 candles=self._market_data.get_candle_history(symbol)
             )
+            await self._publish_nexus_transitions(strategy)
             if not signal:
                 await asyncio.sleep(0.2)
                 continue
@@ -308,13 +326,7 @@ class BotSession:
                 continue
             if self._stop_requested.is_set():
                 break
-            await self._publish(
-                "strategy.signal",
-                action=signal.action,
-                reason=signal.reason,
-                price=signal.price,
-                signal_epoch=signal.timestamp,
-            )
+            await self._publish_strategy_signal(signal)
             params = strategy.get_contract_params()
             proposal = await proposal_manager.request_proposal(
                 symbol,
