@@ -204,12 +204,6 @@ function applyEvent(event) {
   }
   if (event.type === "runtime.status") { 
     const bot = selectedBot(); if (bot) bot.runtime_state = event.status; renderBots(); renderHeader(); 
-    if (event.status === "STARTING") {
-      api.trades(event.bot_id).then((trades) => {
-        if (event.bot_id !== store.get().selectedId) return;
-        store.set({ trades }); renderTrades(trades);
-      }).catch(() => {});
-    }
   }
   if (event.type === "risk.blocked") {
     const detail = event.reason === "ownership_quarantine"

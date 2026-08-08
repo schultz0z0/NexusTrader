@@ -38,6 +38,7 @@ class BotSession:
         self._session_id = str(uuid.uuid4())
         self._connection = None
         self._market_data = None
+        self._last_trade_at = 0.0
 
     async def request_stop(self):
         """Stop opening positions immediately; existing contracts may settle safely."""
@@ -182,11 +183,25 @@ class BotSession:
 
     async def _trade_loop(self, strategy, risk, circuit_breaker, proposal_manager, ownership, monitor):
         symbol = self.bot.get("symbol", "R_100")
+        risk_config = self.bot.get("risk_config") or {}
+        cooldown_seconds = int(risk_config.get("cooldown_minutes", 0)) * 60
         while not self._stop_requested.is_set():
             await self.repository.touch_bot_heartbeat(self.bot_id)
             if self._active_contracts:
                 await asyncio.sleep(0.2)
                 continue
+            if cooldown_seconds > 0 and self._last_trade_at > 0:
+                elapsed = time.time() - self._last_trade_at
+                remaining = cooldown_seconds - elapsed
+                if remaining > 0:
+                    mins = int(remaining) // 60
+                    secs = int(remaining) % 60
+                    logger.info(f"Cooldown ativo: aguardando {mins}m{secs:02d}s antes da proxima analise.")
+                    await asyncio.sleep(min(remaining, 5.0))
+                    continue
+                else:
+                    self._last_trade_at = 0.0
+                    logger.info("Cooldown encerrado. Retomando analise de sinais.")
             if hasattr(self.repository, "list_unresolved_order_intents"):
                 unresolved = await self.repository.list_unresolved_order_intents(self.bot_id)
                 if unresolved:
@@ -333,6 +348,7 @@ class BotSession:
                 strategy.on_trade_result(poc)
                 circuit_breaker.record_result(float(poc.get("profit", 0) or 0) > 0)
             self._active_contracts.discard(contract_id)
+            self._last_trade_at = time.time()
             await self._publish("trade.closed", trade=trade)
 
         await monitor.monitor_contract(contract_id, on_settled, on_update)
