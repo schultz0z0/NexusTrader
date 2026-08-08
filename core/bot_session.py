@@ -176,6 +176,10 @@ class BotSession:
                 publisher=self.publisher,
                 bollinger_period=getattr(strategy, "period", 21),
                 bollinger_std_dev=getattr(strategy, "std_dev", None),
+                indicator_mode=(
+                    "ema" if isinstance(strategy, NexusSpeedStrategy) else "donchian"
+                ),
+                ema_period=getattr(strategy, "ema_period", 5),
             )
             await self._market_data.start(
                 self.bot.get("symbol", "R_100"),

@@ -30,3 +30,29 @@ test("account changes always migrate legacy strategy parameters to the fixed pro
   assert.equal(payload.account_id, "ROT100");
   assert.equal(payload.account_type, "real");
 });
+
+test("account changes preserve the fixed Nexus Speed ten-second profile", () => {
+  const payload = configuredBotPayload(
+    {
+      name: "Nexus Speed",
+      symbol: "R_100",
+      timeframe_seconds: 60,
+      strategy_id: "nexus_speed",
+      strategy_config: { min_profit_ratio: 0.87 },
+      duration: 10,
+      duration_unit: "s",
+      initial_stake: 1,
+      money_management: "fixed",
+      money_config: {},
+      risk_config: {},
+    },
+    { account_id: "VRTC100", account_type: "demo" },
+  );
+
+  assert.equal(payload.strategy_id, "nexus_speed");
+  assert.equal(payload.duration, 10);
+  assert.equal(payload.duration_unit, "s");
+  assert.equal(payload.strategy_config.ema_period, 5);
+  assert.equal(payload.strategy_config.min_profit_ratio, 0.87);
+  assert.equal(payload.account_type, "demo");
+});

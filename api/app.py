@@ -116,11 +116,18 @@ def create_app(repository=None, live_store=None, account_provider=None):
 
     @application.get("/api/v1/strategies", dependencies=[Depends(require_dashboard_key)])
     async def strategies():
-        return {"status": "success", "data": [{
-            "id": "donchian",
-            "name": "Donchian + ZigZag",
-            "description": "Estrategia baseada no Donchian Channel com filtro de ZigZag puro",
-        }]}
+        return {"status": "success", "data": [
+            {
+                "id": "donchian",
+                "name": "Donchian + ZigZag",
+                "description": "Donchian Channel com filtro de ZigZag puro",
+            },
+            {
+                "id": "nexus_speed",
+                "name": "Nexus Speed",
+                "description": "Pullback na EMA(5), ADX(10), ATR(14) e expiracao de 10s",
+            },
+        ]}
 
     @application.get("/api/v1/accounts", dependencies=[Depends(require_dashboard_key)])
     async def accounts():

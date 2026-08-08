@@ -1,4 +1,4 @@
-const COLORS = { grid: "#19222f", text: "#69768a", up: "#36d399", down: "#ff5364", line: "#20d4d0", band: "#8b5cf6", middle: "#4b87ff" };
+const COLORS = { grid: "#19222f", text: "#69768a", up: "#36d399", down: "#ff5364", line: "#20d4d0", band: "#8b5cf6", middle: "#4b87ff", ema: "#ff3b4f" };
 
 function uniqueOrderedPoints(values) {
   const byTime = new Map();
@@ -39,7 +39,7 @@ export class TradingChart {
 
   ensureMode(mode, force = false) {
     if (this.mode === mode && !force) return;
-    [this.primary, this.upper, this.middle, this.lower, this.zigzag].filter(Boolean).forEach((series) => this.chart.removeSeries(series));
+    [this.primary, this.upper, this.middle, this.lower, this.zigzag, this.ema].filter(Boolean).forEach((series) => this.chart.removeSeries(series));
     this.mode = mode; this.markers = []; this.markerMap.clear(); this.markerPrimitive = null; this.priceLine = null;
     this.primary = mode === "line"
       ? this.addSeries(LightweightCharts.LineSeries, { color: COLORS.line, lineWidth: 2, crosshairMarkerRadius: 3, priceLineVisible: true })
@@ -49,28 +49,36 @@ export class TradingChart {
     this.middle = this.addSeries(LightweightCharts.LineSeries, { ...bandOptions, color: COLORS.middle, lineStyle: 2 });
     this.lower = this.addSeries(LightweightCharts.LineSeries, { ...bandOptions, color: COLORS.band });
     this.zigzag = this.addSeries(LightweightCharts.LineSeries, { color: "#f4bd50", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+    this.ema = this.addSeries(LightweightCharts.LineSeries, { color: COLORS.ema, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
   }
 
   setHistory(market) {
     const mode = market?.mode || "candles";
-    const contextKey = `${market?.bot_id || ""}:${market?.symbol || ""}:${Number(market?.timeframe_seconds || 60)}:${mode}`;
+    const indicatorMode = market?.indicator_mode || "donchian";
+    const contextKey = `${market?.bot_id || ""}:${market?.symbol || ""}:${Number(market?.timeframe_seconds || 60)}:${mode}:${indicatorMode}`;
     const contextChanged = contextKey !== this.contextKey;
     this.ensureMode(mode, contextChanged);
     this.contextKey = contextKey;
     const points = (market?.points || []).filter((point) => Number.isFinite(point.time));
     this.primary.setData(points);
-    this.upper.setData(market?.donchian?.upper || []);
-    this.middle.setData(market?.donchian?.middle || []);
-    this.lower.setData(market?.donchian?.lower || []);
-    this.zigzag.setData(uniqueOrderedPoints(market?.zigzag));
+    const isEma = indicatorMode === "ema";
+    this.upper.setData(isEma ? [] : market?.donchian?.upper || []);
+    this.middle.setData(isEma ? [] : market?.donchian?.middle || []);
+    this.lower.setData(isEma ? [] : market?.donchian?.lower || []);
+    this.zigzag.setData(isEma ? [] : uniqueOrderedPoints(market?.zigzag));
+    this.ema.setData(isEma ? uniqueOrderedPoints(market?.ema) : []);
     this.chart.timeScale().fitContent();
   }
 
   updateTick(event) {
     const point = this.mode === "line" ? { time: event.epoch, value: event.price } : event.candle;
     if (point?.time) this.primary.update(point);
-    const bb = event.bollinger || {};
     const bandTime = point?.time || event.epoch;
+    if (event.indicator_mode === "ema") {
+      if (event.ema != null) this.ema.update({ time: bandTime, value: event.ema });
+      return;
+    }
+    const bb = event.bollinger || {};
     if (bb.upper != null) this.upper.update({ time: bandTime, value: bb.upper });
     if (bb.middle != null) this.middle.update({ time: bandTime, value: bb.middle });
     if (bb.lower != null) this.lower.update({ time: bandTime, value: bb.lower });

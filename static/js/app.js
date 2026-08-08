@@ -2,7 +2,7 @@ import { api, ApiError, setApiKey, websocketUrl } from "./api.js";
 import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 import { contractPresentation } from "./trade_state.js";
-import { configuredBotPayload } from "./bot_config.js";
+import { configuredBotPayload, strategyProfile } from "./bot_config.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
@@ -37,10 +37,11 @@ function renderHeader() {
   $("#timeframe-label").textContent = bot ? timeframe(bot.timeframe_seconds) : "—";
   $("#selected-bot-name").textContent = bot?.name || "Nenhum robô";
   const isDonchian = bot?.strategy_id === "donchian";
-  $("#selected-bot-strategy").textContent = bot ? (isDonchian ? "Donchian + ZigZag" : "Bollinger Mean Reversion") : "—";
-  $("#legend-upper").textContent = isDonchian ? "Donchian Upper" : "BB superior";
-  $("#legend-mid").textContent = isDonchian ? "Donchian Middle" : "Média";
-  $("#legend-lower").textContent = isDonchian ? "Donchian Lower" : "BB inferior";
+  const isNexusSpeed = bot?.strategy_id === "nexus_speed";
+  $("#selected-bot-strategy").textContent = bot ? (isNexusSpeed ? "Nexus Speed" : "Donchian + ZigZag") : "—";
+  $("#legend-upper").textContent = isDonchian ? "Donchian Upper" : "";
+  $("#legend-mid").textContent = isNexusSpeed ? "EMA(5)" : "Donchian Middle";
+  $("#legend-lower").textContent = isDonchian ? "Donchian Lower" : "";
   const running = bot?.desired_state === "RUNNING";
   const button = $("#toggle-bot"); button.disabled = !bot; button.textContent = running ? "PARAR ROBÔ" : "INICIAR ROBÔ"; button.classList.toggle("stop", running);
   const risk = bot?.risk_config || {};
@@ -268,7 +269,7 @@ function syncAccountSelection(persist = true) {
     : "Não foi possível consultar as contas autorizadas pelo token Deriv.";
   renderAccountMode();
 }
-function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, timeframe_seconds: 60, strategy_id: data.strategy_id, strategy_config: { period: 21, deviation: 1, depth: 15, backstep: 3 }, duration: 2, duration_unit: "m", initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
+function formPayload(form) { const data = Object.fromEntries(new FormData(form)); const account = activeAccount(); if (!account) throw new Error("Selecione uma conta global Deriv antes de salvar."); return { name: data.name, account_id: account.account_id, account_type: account.account_type, symbol: data.symbol, ...strategyProfile(data.strategy_id), initial_stake: Number(data.initial_stake), money_management: data.money_management, money_config: { multiplier: Number(data.multiplier), max_levels: Number(data.max_levels) }, risk_config: { take_profit_daily: Number(data.take_profit_daily), stop_loss_daily: Number(data.stop_loss_daily), max_daily_trades: Number(data.max_daily_trades), max_single_stake: Number(data.max_single_stake), max_consecutive_losses: Number(data.max_consecutive_losses), cooldown_minutes: Number(data.cooldown_minutes) } }; }
 
 async function changeGlobalAccount() {
   const select = $("#account-select");
@@ -314,7 +315,8 @@ $("#account-select").addEventListener("change", changeGlobalAccount);
 $("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(null));
 
 $("#strategy-select").addEventListener("change", (e) => {
-  if (e.target.value !== "donchian") e.target.value = "donchian";
+  $("#donchian-fixed-profile").hidden = e.target.value !== "donchian";
+  $("#nexus-speed-fixed-profile").hidden = e.target.value !== "nexus_speed";
 });
 $("#confirm-real-start").addEventListener("click", () => {
   const account = activeAccount(); const phrase = $("#real-confirm-phrase").value.trim(); const expected = `REAL ${account?.account_id || ""}`;

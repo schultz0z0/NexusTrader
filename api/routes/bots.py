@@ -23,21 +23,38 @@ class BotPayload(BaseModel):
 
     @model_validator(mode="after")
     def demo_only(self):
-        fixed_strategy = {
-            "period": 21,
-            "deviation": 1,
-            "depth": 15,
-            "backstep": 3,
+        profiles = {
+            "donchian": {
+                "period": 21,
+                "deviation": 1,
+                "depth": 15,
+                "backstep": 3,
+            },
+            "nexus_speed": {
+                "ema_period": 5,
+                "adx_period": 10,
+                "adx_threshold": 30,
+                "atr_period": 14,
+                "min_distance_atr": 0.30,
+                "touch_tolerance_bps": 1,
+                "ema_flat_tolerance_pips": 1,
+                "min_profit_ratio": 0.87,
+                "max_entry_delay_ticks": 1,
+                "min_closed_candles": 270,
+            },
         }
-        if self.strategy_id != "donchian":
-            raise ValueError("Somente a estrategia Donchian + ZigZag esta habilitada")
+        if self.strategy_id not in profiles:
+            raise ValueError("Estrategia nao suportada")
+        fixed_strategy = profiles[self.strategy_id]
         if self.strategy_config and self.strategy_config != fixed_strategy:
-            raise ValueError("Parametros Donchian/ZigZag sao fixos em 21/1/15/3")
+            raise ValueError("Parametros da estrategia sao fixos")
         self.strategy_config = fixed_strategy
         if self.timeframe_seconds != 60:
-            raise ValueError("Donchian + ZigZag opera somente em candles de 1 minuto")
-        if self.duration != 2 or self.duration_unit != "m":
-            raise ValueError("Donchian + ZigZag usa expiracao fixa de 2 minutos")
+            raise ValueError("As estrategias operam somente em candles de 1 minuto")
+        expected_duration = (2, "m") if self.strategy_id == "donchian" else (10, "s")
+        if (self.duration, self.duration_unit) != expected_duration:
+            description = "2 minutos" if self.strategy_id == "donchian" else "10 segundos"
+            raise ValueError(f"{self.strategy_id} usa expiracao fixa de {description}")
         self.account_type = self.account_type.lower()
         if self.account_type not in {"demo", "real"}:
             raise ValueError("Tipo de conta deve ser demo ou real")

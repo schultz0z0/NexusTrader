@@ -1,0 +1,152 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from api.live_store import LiveStore
+from api.routes.bots import BotPayload
+from data.market_data import MarketDataHandler
+from database.repository import DatabaseRepository
+
+
+class NexusSpeedPayloadTests(unittest.TestCase):
+    def test_api_normalizes_nexus_speed_to_the_approved_fixed_profile(self):
+        payload = BotPayload(
+            name="Nexus Speed",
+            strategy_id="nexus_speed",
+            symbol="R_100",
+            duration=10,
+            duration_unit="s",
+        )
+
+        self.assertEqual(payload.timeframe_seconds, 60)
+        self.assertEqual(payload.duration, 10)
+        self.assertEqual(payload.duration_unit, "s")
+        self.assertEqual(payload.strategy_config, {
+            "ema_period": 5,
+            "adx_period": 10,
+            "adx_threshold": 30,
+            "atr_period": 14,
+            "min_distance_atr": 0.30,
+            "touch_tolerance_bps": 1,
+            "ema_flat_tolerance_pips": 1,
+            "min_profit_ratio": 0.87,
+            "max_entry_delay_ticks": 1,
+            "min_closed_candles": 270,
+        })
+
+    def test_api_rejects_nexus_duration_other_than_ten_seconds(self):
+        for override in ({"duration": 5}, {"duration_unit": "t"}):
+            with self.subTest(override=override), self.assertRaises(ValidationError):
+                BotPayload(
+                    name="Nexus Speed",
+                    strategy_id="nexus_speed",
+                    duration=override.get("duration", 10),
+                    duration_unit=override.get("duration_unit", "s"),
+                )
+
+    def test_api_rejects_nexus_profile_drift(self):
+        with self.assertRaises(ValidationError):
+            BotPayload(
+                name="Nexus Speed",
+                strategy_id="nexus_speed",
+                duration=10,
+                duration_unit="s",
+                strategy_config={"min_profit_ratio": 0.86},
+            )
+
+
+class NexusSpeedPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repository_round_trips_nexus_speed_profile(self):
+        payload = BotPayload(
+            name="Nexus Speed",
+            strategy_id="nexus_speed",
+            account_id="VRTC100",
+            account_type="demo",
+            symbol="R_100",
+            duration=10,
+            duration_unit="s",
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            repository = DatabaseRepository(str(Path(tempdir) / "nexus.db"))
+            await repository.init_db()
+
+            created = await repository.create_bot(payload.model_dump())
+            stored = await repository.get_bot(created["id"])
+
+        self.assertEqual(stored["strategy_id"], "nexus_speed")
+        self.assertEqual(stored["strategy_config"], payload.strategy_config)
+        self.assertEqual(stored["duration"], 10)
+        self.assertEqual(stored["duration_unit"], "s")
+        self.assertEqual(stored["account_type"], "demo")
+
+
+class NexusSpeedMarketTelemetryTests(unittest.TestCase):
+    def test_ema_history_uses_period_five(self):
+        points = [
+            {
+                "time": index * 60,
+                "open": float(index),
+                "high": float(index),
+                "low": float(index),
+                "close": float(index),
+            }
+            for index in range(1, 7)
+        ]
+        handler = MarketDataHandler(
+            object(), indicator_mode="ema", ema_period=5
+        )
+
+        ema = handler._ema_history(points)
+
+        self.assertEqual(ema, [
+            {"time": 300, "value": 3.0},
+            {"time": 360, "value": 4.0},
+        ])
+
+    def test_live_store_keeps_ema_history_and_updates_same_candle(self):
+        store = LiveStore()
+        store.apply({
+            "event_id": "history",
+            "type": "market.history",
+            "bot_id": "bot-a",
+            "epoch": 300,
+            "symbol": "R_100",
+            "timeframe_seconds": 60,
+            "mode": "candles",
+            "indicator_mode": "ema",
+            "points": [],
+            "ema": [{"time": 300, "value": 100.0}],
+        })
+        store.apply({
+            "event_id": "tick-a",
+            "type": "market.tick",
+            "bot_id": "bot-a",
+            "epoch": 361,
+            "symbol": "R_100",
+            "timeframe_seconds": 60,
+            "price": 101.0,
+            "indicator_mode": "ema",
+            "candle": {"time": 360, "open": 101, "high": 101, "low": 101, "close": 101},
+            "ema": 100.5,
+        })
+        store.apply({
+            "event_id": "tick-b",
+            "type": "market.tick",
+            "bot_id": "bot-a",
+            "epoch": 362,
+            "symbol": "R_100",
+            "timeframe_seconds": 60,
+            "price": 102.0,
+            "indicator_mode": "ema",
+            "candle": {"time": 360, "open": 101, "high": 102, "low": 101, "close": 102},
+            "ema": 101.0,
+        })
+
+        market = store.snapshot("bot-a")["market"]
+        self.assertEqual(market["indicator_mode"], "ema")
+        self.assertEqual(market["ema"], [
+            {"time": 300, "value": 100.0},
+            {"time": 360, "value": 101.0},
+        ])

@@ -21,6 +21,8 @@ class MarketDataHandler:
         buffer_size=500,
         bollinger_period=20,
         bollinger_std_dev=2.0,
+        indicator_mode="donchian",
+        ema_period=5,
         history_resync_seconds=None,
     ):
         self.connection = connection
@@ -29,6 +31,8 @@ class MarketDataHandler:
         self._owns_publisher = publisher is None
         self.buffer_size = int(buffer_size)
         self.bollinger_period = int(bollinger_period)
+        self.indicator_mode = str(indicator_mode)
+        self.ema_period = int(ema_period)
         try:
             self.bollinger_std_dev = float(bollinger_std_dev)
         except (TypeError, ValueError):
@@ -57,6 +61,8 @@ class MarketDataHandler:
         await self._subscribe_live_ticks()
 
     def _calculate_history_indicators(self, points: list):
+        if self.indicator_mode == "ema":
+            return {}, []
         if self.bollinger_std_dev is not None or not points:
             return {}, []
             
@@ -81,6 +87,23 @@ class MarketDataHandler:
         zigzag = calculate_zigzag(points, depth=15, deviation=0.0, backstep=3)
 
         return donchian, zigzag
+
+    def _ema_history(self, points: list):
+        if len(points) < self.ema_period:
+            return []
+        closes = [float(point.get("close", point.get("value"))) for point in points]
+        seed_index = self.ema_period - 1
+        current = sum(closes[:self.ema_period]) / self.ema_period
+        result = [{"time": int(points[seed_index]["time"]), "value": current}]
+        multiplier = 2.0 / (self.ema_period + 1.0)
+        for index in range(seed_index + 1, len(points)):
+            current = (closes[index] - current) * multiplier + current
+            result.append({"time": int(points[index]["time"]), "value": current})
+        return result
+
+    def _current_ema(self):
+        history = self._ema_history(list(self._candles))
+        return history[-1]["value"] if history else None
 
     async def _load_and_publish_history(self):
         line_mode = self.timeframe_seconds <= 1
@@ -141,6 +164,7 @@ class MarketDataHandler:
 
     async def _publish_history(self, points, line_mode, epoch=None):
         donchian, zigzag = self._calculate_history_indicators(points)
+        ema = self._ema_history(points) if self.indicator_mode == "ema" else []
         await self.publisher.publish(runtime_event(
             "market.history",
             self.bot_id,
@@ -148,8 +172,10 @@ class MarketDataHandler:
             timeframe_seconds=self.timeframe_seconds,
             mode="line" if line_mode else "candles",
             points=points,
+            indicator_mode=self.indicator_mode,
             donchian=donchian,
             zigzag=zigzag,
+            ema=ema,
         ))
         if epoch is not None:
             self._last_history_publish_epoch = int(epoch)
@@ -195,8 +221,10 @@ class MarketDataHandler:
                 sequence=self._tick_sequence,
                 pip_size=self._pip_size,
                 candle=candle.as_dict(),
+                indicator_mode=self.indicator_mode,
                 bollinger=self._bollinger_values(),
                 zigzag=self._calculate_history_indicators(list(self._candles))[1],
+                ema=self._current_ema(),
             ))
             if epoch - self._last_history_publish_epoch >= self.history_resync_seconds:
                 if self.timeframe_seconds <= 1:
@@ -218,6 +246,8 @@ class MarketDataHandler:
         logger.info(f"Feed de ticks ativo para {self.symbol} no bot {self.bot_id}.")
 
     def _bollinger_values(self):
+        if self.indicator_mode == "ema":
+            return {"upper": None, "middle": None, "lower": None}
         is_donchian = self.bollinger_std_dev is None
 
         if self.timeframe_seconds > 1:

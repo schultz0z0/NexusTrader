@@ -92,3 +92,32 @@ test("mode rebuild removes the previous zigzag series", () => {
 
   assert.ok(removedSeries.includes(previousZigzag));
 });
+
+test("Nexus Speed history and ticks render only the EMA overlay", () => {
+  const chart = newChart();
+  chart.setHistory({
+    bot_id: "nexus-a",
+    symbol: "R_100",
+    timeframe_seconds: 60,
+    mode: "candles",
+    indicator_mode: "ema",
+    points: [{ time: 300, open: 99, high: 101, low: 98, close: 100 }],
+    ema: [{ time: 300, value: 99.5 }],
+  });
+
+  chart.updateTick({
+    epoch: 361,
+    candle: { time: 360, open: 100, high: 102, low: 100, close: 101 },
+    indicator_mode: "ema",
+    ema: 100.0,
+  });
+
+  assert.deepEqual(chart.ema.data, [
+    { time: 300, value: 99.5 },
+    { time: 360, value: 100.0 },
+  ]);
+  assert.deepEqual(chart.upper.data, []);
+  assert.deepEqual(chart.middle.data, []);
+  assert.deepEqual(chart.lower.data, []);
+  assert.deepEqual(chart.zigzag.data, []);
+});

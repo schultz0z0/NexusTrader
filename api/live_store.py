@@ -60,12 +60,15 @@ class LiveStore:
                 "mode": event.get("mode", "candles"),
                 "symbol": event.get("symbol"),
                 "timeframe_seconds": event.get("timeframe_seconds", 60),
+                "indicator_mode": event.get("indicator_mode", "donchian"),
                 "points": list(event.get("points", []))[-self.history_limit:],
             }
             if "donchian" in event:
                 state["market"]["donchian"] = deepcopy(event["donchian"])
             if "zigzag" in event:
                 state["market"]["zigzag"] = deepcopy(event["zigzag"])
+            if "ema" in event:
+                state["market"]["ema"] = deepcopy(event["ema"])
         elif event_type == "market.tick":
             state["last_tick"] = deepcopy(event)
             point = (
@@ -97,6 +100,17 @@ class LiveStore:
                         del series[:-self.history_limit]
             if "zigzag" in event:
                 state["market"]["zigzag"] = deepcopy(event["zigzag"])
+            if event.get("indicator_mode"):
+                state["market"]["indicator_mode"] = event["indicator_mode"]
+            if event.get("ema") is not None:
+                series = state["market"].setdefault("ema", [])
+                ema_time = point.get("time") if point else event.get("epoch")
+                ema_point = {"time": ema_time, "value": event["ema"]}
+                if series and series[-1].get("time") == ema_time:
+                    series[-1] = ema_point
+                else:
+                    series.append(ema_point)
+                    del series[:-self.history_limit]
         elif event_type in {"trade.opened", "trade.updated"}:
             state["active_trade"] = deepcopy(event.get("trade"))
         elif event_type == "trade.closed":

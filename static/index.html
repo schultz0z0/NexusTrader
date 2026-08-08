@@ -110,10 +110,15 @@
         <div class="form-row"><label>Ativo<select name="symbol"><option>R_10</option><option>R_25</option><option>R_50</option><option>R_75</option><option selected>R_100</option><option>1HZ10V</option><option>1HZ25V</option><option>1HZ50V</option><option>1HZ75V</option><option>1HZ100V</option></select></label><label>Gráfico<input value="Velas 1m (fixo)" readonly></label></div>
       </fieldset>
       <fieldset><legend>Estratégia</legend>
-        <label>Modelo<select name="strategy_id" id="strategy-select"><option value="donchian" selected>Donchian + ZigZag</option></select></label>
-        <div id="strategy-fixed-profile">
+        <label>Modelo<select name="strategy_id" id="strategy-select"><option value="donchian" selected>Donchian + ZigZag</option><option value="nexus_speed">Nexus Speed</option></select></label>
+        <div id="donchian-fixed-profile">
           <div class="form-row"><label>Donchian<input value="Período 21" readonly></label><label>ZigZag<input value="Desvio 1% · Profundidade 15" readonly></label></div>
           <div class="form-row"><label>Backstep<input value="3" readonly></label><label>Expiração<input value="2 minutos" readonly></label></div>
+        </div>
+        <div id="nexus-speed-fixed-profile" hidden>
+          <div class="form-row"><label>Indicadores<input value="EMA(5) · ADX(10) · ATR(14)" readonly></label><label>Filtro<input value="ADX > 30 · distância ≥ 0,30 ATR" readonly></label></div>
+          <div class="form-row"><label>Retorno mínimo<input value="87% líquido" readonly></label><label>Expiração<input value="10 segundos" readonly></label></div>
+          <div class="form-row"><label>Inclinação da EMA<input value="Reta ou a favor da retração" readonly></label><label>Confirmação<input value="Tick imediatamente seguinte" readonly></label></div>
         </div>
       </fieldset>
       <fieldset><legend>Gestão de stake</legend>
