@@ -45,7 +45,7 @@ class NexusSpeedStrategy(BaseStrategy):
         self,
         money_manager: Optional[MoneyManager] = None,
         *,
-        duration: int = 10,
+        duration: int = 5,
         touch_tolerance_bps: float = 1.0,
         ema_flat_tolerance_pips: float = 1.0,
         min_profit_ratio: float = 0.87,
@@ -54,10 +54,10 @@ class NexusSpeedStrategy(BaseStrategy):
         indicator_provider: IndicatorProvider = calculate_indicator_snapshot,
     ):
         super().__init__(money_manager)
-        if int(duration) != 10:
-            raise ValueError("Nexus Speed usa expiracao fixa de 10 segundos")
+        if int(duration) != 5:
+            raise ValueError("Nexus Speed usa expiracao fixa de 5 ticks")
         self.duration = int(duration)
-        self.duration_unit = "s"
+        self.duration_unit = "t"
         self.ema_period = 5
         self.adx_period = 10
         self.adx_threshold = 30.0

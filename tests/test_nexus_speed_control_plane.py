@@ -16,13 +16,13 @@ class NexusSpeedPayloadTests(unittest.TestCase):
             name="Nexus Speed",
             strategy_id="nexus_speed",
             symbol="R_100",
-            duration=10,
-            duration_unit="s",
+            duration=5,
+            duration_unit="t",
         )
 
         self.assertEqual(payload.timeframe_seconds, 60)
-        self.assertEqual(payload.duration, 10)
-        self.assertEqual(payload.duration_unit, "s")
+        self.assertEqual(payload.duration, 5)
+        self.assertEqual(payload.duration_unit, "t")
         self.assertEqual(payload.strategy_config, {
             "ema_period": 5,
             "adx_period": 10,
@@ -36,14 +36,14 @@ class NexusSpeedPayloadTests(unittest.TestCase):
             "min_closed_candles": 270,
         })
 
-    def test_api_rejects_nexus_duration_other_than_ten_seconds(self):
-        for override in ({"duration": 5}, {"duration_unit": "t"}):
+    def test_api_rejects_nexus_duration_other_than_five_ticks(self):
+        for override in ({"duration": 10}, {"duration_unit": "s"}):
             with self.subTest(override=override), self.assertRaises(ValidationError):
                 BotPayload(
                     name="Nexus Speed",
                     strategy_id="nexus_speed",
-                    duration=override.get("duration", 10),
-                    duration_unit=override.get("duration_unit", "s"),
+                    duration=override.get("duration", 5),
+                    duration_unit=override.get("duration_unit", "t"),
                 )
 
     def test_api_rejects_nexus_profile_drift(self):
@@ -51,8 +51,8 @@ class NexusSpeedPayloadTests(unittest.TestCase):
             BotPayload(
                 name="Nexus Speed",
                 strategy_id="nexus_speed",
-                duration=10,
-                duration_unit="s",
+                duration=5,
+                duration_unit="t",
                 strategy_config={"min_profit_ratio": 0.86},
             )
 
@@ -65,8 +65,8 @@ class NexusSpeedPersistenceTests(unittest.IsolatedAsyncioTestCase):
             account_id="VRTC100",
             account_type="demo",
             symbol="R_100",
-            duration=10,
-            duration_unit="s",
+            duration=5,
+            duration_unit="t",
         )
         with tempfile.TemporaryDirectory() as tempdir:
             repository = DatabaseRepository(str(Path(tempdir) / "nexus.db"))
@@ -77,8 +77,8 @@ class NexusSpeedPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stored["strategy_id"], "nexus_speed")
         self.assertEqual(stored["strategy_config"], payload.strategy_config)
-        self.assertEqual(stored["duration"], 10)
-        self.assertEqual(stored["duration_unit"], "s")
+        self.assertEqual(stored["duration"], 5)
+        self.assertEqual(stored["duration_unit"], "t")
         self.assertEqual(stored["account_type"], "demo")
 
 

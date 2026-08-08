@@ -24,8 +24,8 @@ export function strategyProfile(strategyId) {
       strategy_id: "nexus_speed",
       strategy_config: { ...NEXUS_SPEED_CONFIG },
       timeframe_seconds: 60,
-      duration: 10,
-      duration_unit: "s",
+      duration: 5,
+      duration_unit: "t",
     };
   }
   return {

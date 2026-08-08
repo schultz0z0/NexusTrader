@@ -56,7 +56,7 @@ class NexusSpeedStrategyTests(unittest.TestCase):
             "is_live": True,
         }
 
-    def _armed_strategy(self, snapshot, opening, duration=10):
+    def _armed_strategy(self, snapshot, opening, duration=5):
         strategy = NexusSpeedStrategy(
             duration=duration,
             min_closed_candles=3,
@@ -101,15 +101,15 @@ class NexusSpeedStrategyTests(unittest.TestCase):
 
         self.assertEqual(strategy.state, "ARMED_CALL")
 
-    def test_expiration_is_fixed_at_ten_seconds(self):
+    def test_expiration_is_fixed_at_five_ticks(self):
         strategy, _ = self._armed_strategy(self._snapshot(), opening=110.0)
 
         self.assertEqual(strategy.get_contract_params(), {
-            "duration": 10,
-            "duration_unit": "s",
+            "duration": 5,
+            "duration_unit": "t",
         })
         with self.assertRaises(ValueError):
-            NexusSpeedStrategy(duration=5, indicator_provider=lambda _: self._snapshot())
+            NexusSpeedStrategy(duration=10, indicator_provider=lambda _: self._snapshot())
 
     def test_put_accepts_descending_or_one_pip_flat_ema(self):
         descending, _ = self._armed_strategy(
@@ -169,8 +169,8 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         self.assertEqual(signal.candle_time, 180)
         self.assertEqual(strategy.state, "SIGNAL_EMITTED")
         self.assertEqual(strategy.get_contract_params(), {
-            "duration": 10,
-            "duration_unit": "s",
+            "duration": 5,
+            "duration_unit": "t",
         })
 
     def test_put_crossing_then_next_tick_rejection_emits_signal(self):
@@ -188,8 +188,8 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         self.assertEqual(signal.action, "PUT")
         self.assertEqual(signal.tick_sequence, 4)
         self.assertEqual(strategy.get_contract_params(), {
-            "duration": 10,
-            "duration_unit": "s",
+            "duration": 5,
+            "duration_unit": "t",
         })
 
     def test_flat_confirmation_aborts_the_candle(self):

@@ -29,7 +29,7 @@ class OneShotStrategy:
         self.results.append(contract)
 
 
-class TenSecondStrategy(OneShotStrategy):
+class FiveTickStrategy(OneShotStrategy):
     min_profit_ratio = 0.87
 
     def analyze(self, ticks, candles=None):
@@ -38,7 +38,7 @@ class TenSecondStrategy(OneShotStrategy):
             current = ticks[-1]
             return Signal(
                 "CALL",
-                "ten-second-fixture",
+                "five-tick-fixture",
                 current["quote"],
                 current["epoch"],
                 tick_sequence=current["sequence"],
@@ -47,7 +47,7 @@ class TenSecondStrategy(OneShotStrategy):
         return None
 
     def get_contract_params(self):
-        return {"duration": 10, "duration_unit": "s"}
+        return {"duration": 5, "duration_unit": "t"}
 
 
 class DeterministicReplayTests(unittest.TestCase):
@@ -87,23 +87,26 @@ class DeterministicReplayTests(unittest.TestCase):
                 {"epoch": 60, "quote": 100}, {"epoch": 30, "quote": 101},
             ])
 
-    def test_ten_second_replay_enters_on_next_tick_and_allows_equal_epochs(self):
-        result = ReplayEngine(strategy_factory=TenSecondStrategy).run([
+    def test_five_tick_replay_enters_next_tick_and_settles_on_fifth_tick(self):
+        result = ReplayEngine(strategy_factory=FiveTickStrategy).run([
             {"epoch": 0, "quote": 100.0, "payout_ratio": 0.90},
             {"epoch": 0, "quote": 101.0, "payout_ratio": 0.90},
-            {"epoch": 9, "quote": 100.5, "payout_ratio": 0.90},
-            {"epoch": 10, "quote": 102.0, "payout_ratio": 0.90},
+            {"epoch": 0, "quote": 100.5, "payout_ratio": 0.90},
+            {"epoch": 1, "quote": 100.7, "payout_ratio": 0.90},
+            {"epoch": 1, "quote": 100.8, "payout_ratio": 0.90},
+            {"epoch": 2, "quote": 100.9, "payout_ratio": 0.90},
+            {"epoch": 2, "quote": 102.0, "payout_ratio": 0.90},
         ])
 
         self.assertEqual(result["status"], "COMPLETE")
-        self.assertEqual(result["manifest"]["duration_seconds"], 10)
+        self.assertEqual(result["manifest"]["duration_ticks"], 5)
         self.assertEqual(result["trades"][0]["entry_epoch"], 0)
         self.assertEqual(result["trades"][0]["entry_spot"], 101.0)
-        self.assertEqual(result["trades"][0]["exit_epoch"], 10)
+        self.assertEqual(result["trades"][0]["exit_epoch"], 2)
         self.assertEqual(result["trades"][0]["profit"], 0.9)
 
-    def test_ten_second_replay_requires_payout_on_entry_tick(self):
-        result = ReplayEngine(strategy_factory=TenSecondStrategy).run([
+    def test_five_tick_replay_requires_payout_on_entry_tick(self):
+        result = ReplayEngine(strategy_factory=FiveTickStrategy).run([
             {"epoch": 0, "quote": 100.0, "payout_ratio": 0.90},
             {"epoch": 1, "quote": 101.0},
             {"epoch": 11, "quote": 102.0, "payout_ratio": 0.90},
@@ -115,8 +118,8 @@ class DeterministicReplayTests(unittest.TestCase):
             result["trades"][0]["invalid_reason"], "missing_payout_ratio"
         )
 
-    def test_ten_second_replay_rejects_entry_below_profit_floor(self):
-        result = ReplayEngine(strategy_factory=TenSecondStrategy).run([
+    def test_five_tick_replay_rejects_entry_below_profit_floor(self):
+        result = ReplayEngine(strategy_factory=FiveTickStrategy).run([
             {"epoch": 0, "quote": 100.0, "payout_ratio": 0.90},
             {"epoch": 1, "quote": 101.0, "payout_ratio": 0.86},
             {"epoch": 11, "quote": 102.0, "payout_ratio": 0.90},

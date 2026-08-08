@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implementar a estratégia Nexus Speed completa, com EMA(5), inclinação da EMA, ADX(10), ATR(14), confirmação tick a tick, contratos Rise/Fall com expiração fixa de 10 segundos, payout líquido mínimo de 87%, UI, replay e ambiente Docker local.
+**Goal:** Implementar a estratégia Nexus Speed completa, com EMA(5), inclinação da EMA, ADX(10), ATR(14), confirmação tick a tick, contratos Rise/Fall com expiração fixa de 5 ticks, payout líquido mínimo de 87%, UI, replay e ambiente Docker local.
 
 **Architecture:** Indicadores são calculados apenas em candles M1 fechados e congelados na abertura de cada vela. A estratégia mantém uma máquina de estados síncrona, processa ticks vivos por sequência monotônica e emite no máximo um sinal por vela; o BotSession valida payout, idade do sinal, risco e contrato antes da compra.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - `strategy_id` é `nexus_speed`; Donchian permanece compatível.
-- Timeframe é 60 segundos; duração é fixa em 10 segundos (`duration=10`, `duration_unit="s"`).
+- Timeframe é 60 segundos; duração é fixa em 5 ticks (`duration=5`, `duration_unit="t"`). A Deriv rejeitou 10 segundos nos sintéticos durante o smoke demo e o usuário aprovou 5 ticks.
 - Defaults fixos: EMA 5, ADX 10, ADX estritamente maior que 30, ATR 14, distância 0,30 ATR.
 - EMA plana tolera até 1 pip; PUT aceita EMA plana/descendente e CALL aceita EMA plana/ascendente.
 - Payout líquido mínimo é 0,87 e deve ser validado em toda proposal.
@@ -93,7 +93,7 @@
 - Produces: `ProposalManager.profit_ratio(proposal) -> float`.
 - BotSession builds `nexus_speed`, validates `profit_ratio >= 0.87` and `latest_sequence - signal.tick_sequence <= 1`.
 
-- [ ] Escrever testes RED para strategy factory e expiração fixa de 10 segundos.
+- [ ] Escrever testes RED para strategy factory e expiração fixa de 5 ticks.
 - [ ] Implementar criação da estratégia a partir de `strategy_config`.
 - [ ] Escrever testes RED para payout 86,99% bloqueado e 87% aceito.
 - [ ] Implementar cálculo `(payout - ask_price) / ask_price` e bloqueio antes do buy.
@@ -117,19 +117,19 @@
 - Test: `tests/js/chart.test.mjs`
 
 **Interfaces:**
-- API accepts `strategy_id=nexus_speed`, `duration=10`, `duration_unit="s"` and fixed strategy profile.
+- API accepts `strategy_id=nexus_speed`, `duration=5`, `duration_unit="t"` and fixed strategy profile.
 - UI serializes Nexus defaults and displays frozen EMA reference.
 
 - [ ] Escrever testes RED para payload válido/inválido da Nexus e preservação do perfil Donchian.
 - [ ] Implementar validação Pydantic discriminada por estratégia.
-- [ ] Escrever testes JS RED para seleção, serialização de 10 segundos e defaults 1 pip/87%.
+- [ ] Escrever testes JS RED para seleção, serialização de 5 ticks e defaults 1 pip/87%.
 - [ ] Implementar campos e payload da UI.
 - [ ] Escrever teste RED para série EMA criada/removida quando o contexto muda.
 - [ ] Implementar plotagem da EMA congelada e legenda Nexus.
 - [ ] Reexecutar testes Python e JS focados.
 - [ ] Commitar `feat: expose nexus speed configuration and chart`.
 
-### Task 6: Replay determinístico para contratos de 10 segundos
+### Task 6: Replay determinístico para contratos de 5 ticks
 
 **Files:**
 - Modify: `backtest/engine.py`
@@ -139,15 +139,15 @@
 - Test: `tests/test_nexus_speed_replay.py`
 
 **Interfaces:**
-- Replay accepts equal epochs, assigns strict sequence and settles on the first tick at or after `entry_epoch + 10`.
+- Replay accepts equal epochs, assigns strict sequence and settles when `sequence >= entry_sequence + 5`.
 - Production evaluation rejects trades without payout ratio.
 
-- [ ] Escrever testes RED para epochs iguais, entrada no tick seguinte e expiração no primeiro tick em/apos 10 segundos.
-- [ ] Implementar ordenação por sequência e settlement por relógio de 10 segundos.
+- [ ] Escrever testes RED para epochs iguais, entrada no tick seguinte e expiração no quinto tick.
+- [ ] Implementar ordenação por sequência e settlement por contagem de 5 ticks.
 - [ ] Escrever teste RED para payout ausente resultar em trade inválido.
 - [ ] Remover o default inventado de 0,8 na avaliação Nexus e preservar manifests determinísticos.
 - [ ] Executar replay duas vezes e exigir hash, trades e métricas idênticos.
-- [ ] Commitar `feat: add ten-second nexus replay`.
+- [ ] Commitar `feat: add five-tick nexus replay`.
 
 ### Task 7: Observabilidade, regressão e Docker local completo
 

@@ -125,7 +125,7 @@ def create_app(repository=None, live_store=None, account_provider=None):
             {
                 "id": "nexus_speed",
                 "name": "Nexus Speed",
-                "description": "Pullback na EMA(5), ADX(10), ATR(14) e expiracao de 10s",
+                "description": "Pullback na EMA(5), ADX(10), ATR(14) e expiracao de 5 ticks",
             },
         ]}
 

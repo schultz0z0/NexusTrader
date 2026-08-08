@@ -51,9 +51,9 @@ class BotPayload(BaseModel):
         self.strategy_config = fixed_strategy
         if self.timeframe_seconds != 60:
             raise ValueError("As estrategias operam somente em candles de 1 minuto")
-        expected_duration = (2, "m") if self.strategy_id == "donchian" else (10, "s")
+        expected_duration = (2, "m") if self.strategy_id == "donchian" else (5, "t")
         if (self.duration, self.duration_unit) != expected_duration:
-            description = "2 minutos" if self.strategy_id == "donchian" else "10 segundos"
+            description = "2 minutos" if self.strategy_id == "donchian" else "5 ticks"
             raise ValueError(f"{self.strategy_id} usa expiracao fixa de {description}")
         self.account_type = self.account_type.lower()
         if self.account_type not in {"demo", "real"}:

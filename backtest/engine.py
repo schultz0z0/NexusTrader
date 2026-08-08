@@ -17,12 +17,14 @@ class ReplayEngine:
         params = strategy.get_contract_params()
         if params == {"duration": 2, "duration_unit": "m"}:
             duration_seconds = 120
+            duration_ticks = None
             next_tick_entry = False
-        elif params == {"duration": 10, "duration_unit": "s"}:
-            duration_seconds = 10
+        elif params == {"duration": 5, "duration_unit": "t"}:
+            duration_seconds = None
+            duration_ticks = 5
             next_tick_entry = True
         else:
-            raise ValueError("Replay aceita somente os contratos fixos 2m ou 10s")
+            raise ValueError("Replay aceita somente os contratos fixos 2m ou 5 ticks")
 
         normalized = [
             self._normalize_tick(item, sequence=index)
@@ -45,17 +47,18 @@ class ReplayEngine:
             "sha256": hashlib.sha256(canonical).hexdigest(),
             "tick_count": len(normalized),
             "timeframe_seconds": 60,
-            "duration_seconds": duration_seconds,
             "duration_unit": params["duration_unit"],
             "contract_duration": params["duration"],
         }
         if next_tick_entry:
+            manifest["duration_ticks"] = duration_ticks
             manifest["strategy"] = "nexus_speed"
             manifest["indicators"] = {"ema": 5, "adx": 10, "atr": 14}
             manifest["min_profit_ratio"] = float(
                 getattr(strategy, "min_profit_ratio", 0.87)
             )
         else:
+            manifest["duration_seconds"] = duration_seconds
             manifest["strategy"] = "donchian"
             manifest["donchian_period"] = 21
             manifest["zigzag"] = {"deviation": 1, "depth": 15, "backstep": 3}
@@ -69,7 +72,12 @@ class ReplayEngine:
         rejected_signals = []
 
         for tick in normalized:
-            if active and tick["epoch"] >= active["expiry_epoch"]:
+            active_expired = active and (
+                tick["sequence"] >= active["expiry_sequence"]
+                if next_tick_entry
+                else tick["epoch"] >= active["expiry_epoch"]
+            )
+            if active_expired:
                 settled = self._settle(active, tick)
                 trades.append(settled)
                 strategy.on_trade_result(settled)
@@ -103,7 +111,8 @@ class ReplayEngine:
                     active = {
                         "contract_type": pending_signal.action,
                         "entry_epoch": tick["epoch"],
-                        "expiry_epoch": tick["epoch"] + duration_seconds,
+                        "entry_sequence": tick["sequence"],
+                        "expiry_sequence": tick["sequence"] + duration_ticks,
                         "entry_spot": tick["quote"],
                         "stake": float(strategy.get_stake()),
                         "payout_ratio": float(payout_ratio),

@@ -73,14 +73,14 @@ class BotSession:
             return DonchianZigZagStrategy(
                 money_manager=money,
             )
-        if self.bot.get("duration_unit", "s") != "s":
-            raise ValueError("Nexus Speed usa expiracao fixa de 10 segundos")
+        if self.bot.get("duration_unit", "t") != "t":
+            raise ValueError("Nexus Speed usa expiracao fixa de 5 ticks")
         min_profit_ratio = float(strategy_config.get("min_profit_ratio", 0.87))
         if min_profit_ratio < 0.87:
             raise ValueError("Nexus Speed exige min_profit_ratio >= 0.87")
         return NexusSpeedStrategy(
             money_manager=money,
-            duration=int(self.bot.get("duration", 10)),
+            duration=int(self.bot.get("duration", 5)),
             touch_tolerance_bps=float(
                 strategy_config.get("touch_tolerance_bps", 1.0)
             ),

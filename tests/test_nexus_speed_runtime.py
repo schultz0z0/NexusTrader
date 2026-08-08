@@ -23,24 +23,24 @@ class NexusSpeedRuntimeTests(unittest.TestCase):
             "strategy_id": "nexus_speed",
             "initial_stake": 1.0,
             "money_management": "fixed",
-            "duration": 10,
-            "duration_unit": "s",
+            "duration": 5,
+            "duration_unit": "t",
         }
         bot.update(overrides)
         return BotSession(object(), bot, publisher=object())
 
-    def test_builds_nexus_speed_with_fixed_ten_second_contract(self):
+    def test_builds_nexus_speed_with_fixed_five_tick_contract(self):
         strategy = self._session()._build_strategy()
 
         self.assertIsInstance(strategy, NexusSpeedStrategy)
         self.assertEqual(
             strategy.get_contract_params(),
-            {"duration": 10, "duration_unit": "s"},
+            {"duration": 5, "duration_unit": "t"},
         )
 
-    def test_rejects_non_ten_second_nexus_configuration(self):
-        with self.assertRaisesRegex(ValueError, "10 segundos"):
-            self._session(duration=5)._build_strategy()
+    def test_rejects_non_five_tick_nexus_configuration(self):
+        with self.assertRaisesRegex(ValueError, "5 ticks"):
+            self._session(duration=10)._build_strategy()
 
     def test_rejects_profit_floor_below_eighty_seven_percent(self):
         with self.assertRaisesRegex(ValueError, "0.87"):
@@ -134,7 +134,7 @@ class ProposalValidationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "PUT"):
             await manager.validate_contract_types("R_100", {"CALL", "PUT"})
 
-    async def test_duration_preflight_quotes_both_directions_at_ten_seconds(self):
+    async def test_duration_preflight_quotes_both_directions_at_five_ticks(self):
         connection = FakeConnection(
             {
                 "proposal": {
@@ -147,10 +147,10 @@ class ProposalValidationTests(unittest.IsolatedAsyncioTestCase):
         manager = ProposalManager(connection)
 
         result = await manager.validate_fixed_duration(
-            "R_100", {"CALL", "PUT"}, 1.0, 10, "s"
+            "R_100", {"CALL", "PUT"}, 1.0, 5, "t"
         )
 
         self.assertTrue(result)
         self.assertEqual({item["contract_type"] for item in connection.requests}, {"CALL", "PUT"})
-        self.assertTrue(all(item["duration"] == 10 for item in connection.requests))
-        self.assertTrue(all(item["duration_unit"] == "s" for item in connection.requests))
+        self.assertTrue(all(item["duration"] == 5 for item in connection.requests))
+        self.assertTrue(all(item["duration_unit"] == "t" for item in connection.requests))
