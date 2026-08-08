@@ -11,6 +11,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertGreaterEqual(compose.count("INTERNAL_API_TOKEN:"), 2)
         self.assertGreaterEqual(compose.count("DASHBOARD_API_KEY:"), 2)
         self.assertGreaterEqual(compose.count("ALLOW_REAL_TRADING:"), 2)
+        self.assertGreaterEqual(compose.count("DERIV_ACCOUNT_TYPE:"), 2)
         self.assertIn("API_BASE_URL: http://nexus-api:8000", compose)
         self.assertIn("trade.solucoes-nexus.tech", compose)
         self.assertGreaterEqual(compose.count("REAL_MAX_STAKE_USD:"), 2)
