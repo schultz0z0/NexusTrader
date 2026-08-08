@@ -45,6 +45,8 @@ class MarketDataHandler:
             else settings.MARKET_HISTORY_RESYNC_SECONDS
         )
         self._last_history_publish_epoch = 0
+        self._tick_sequence = 0
+        self._pip_size = None
 
     async def start(self, symbol: str, timeframe_seconds: int = 60):
         self.symbol = symbol
@@ -107,6 +109,9 @@ class MarketDataHandler:
                     "quote": point["value"],
                     "epoch": point["time"],
                     "symbol": self.symbol,
+                    "sequence": None,
+                    "pip_size": None,
+                    "is_live": False,
                 })
         else:
             points = [
@@ -124,6 +129,9 @@ class MarketDataHandler:
                     "quote": point["close"],
                     "epoch": point["time"],
                     "symbol": self.symbol,
+                    "sequence": None,
+                    "pip_size": None,
+                    "is_live": False,
                 })
                 self._candles.append(point)
             if points:
@@ -158,7 +166,18 @@ class MarketDataHandler:
             epoch = int(tick["epoch"])
             price = float(tick["quote"])
             symbol = tick.get("symbol", self.symbol)
-            self._ticks.append({"quote": price, "epoch": epoch, "symbol": symbol})
+            self._tick_sequence += 1
+            if tick.get("pip_size") is not None:
+                self._pip_size = int(tick["pip_size"])
+            normalized_tick = {
+                "quote": price,
+                "epoch": epoch,
+                "symbol": symbol,
+                "sequence": self._tick_sequence,
+                "pip_size": self._pip_size,
+                "is_live": True,
+            }
+            self._ticks.append(normalized_tick)
             candle = self._aggregator.update(epoch, price)
             
             if len(self._candles) > 0 and self._candles[-1]["time"] == candle.time:
@@ -173,6 +192,8 @@ class MarketDataHandler:
                 symbol=symbol,
                 timeframe_seconds=self.timeframe_seconds,
                 price=price,
+                sequence=self._tick_sequence,
+                pip_size=self._pip_size,
                 candle=candle.as_dict(),
                 bollinger=self._bollinger_values(),
                 zigzag=self._calculate_history_indicators(list(self._candles))[1],

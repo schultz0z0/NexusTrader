@@ -7,10 +7,17 @@ from pydantic import ValidationError
 from api.routes.bots import BotPayload
 from database.repository import DatabaseRepository
 from strategies.donchian_zigzag import DonchianZigZagStrategy
+from strategies.base import Signal
 from utils.indicators import calculate_zigzag
 
 
 class DonchianProfileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_signal_construction_keeps_tick_metadata_optional(self):
+        signal = Signal("CALL", "fixture", 100.0, 123)
+
+        self.assertIsNone(signal.tick_sequence)
+        self.assertIsNone(signal.candle_time)
+
     async def test_fresh_database_uses_the_only_supported_strategy(self):
         with tempfile.TemporaryDirectory() as tempdir:
             repository = DatabaseRepository(str(Path(tempdir) / "fresh.db"))

@@ -11,6 +11,8 @@ class Signal:
     reason: str
     price: float
     timestamp: int
+    tick_sequence: Optional[int] = None
+    candle_time: Optional[int] = None
 
 class MoneyManager:
     """

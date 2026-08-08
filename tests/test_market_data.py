@@ -82,6 +82,51 @@ class MarketDataHandlerTests(unittest.IsolatedAsyncioTestCase):
             "close": 12.5,
         })
 
+    async def test_live_ticks_receive_monotonic_sequence_even_in_same_second(self):
+        connection = FakeConnection()
+        publisher = FakePublisher()
+        handler = MarketDataHandler(connection, bot_id="bot-a", publisher=publisher)
+        await handler.start("R_100", timeframe_seconds=60)
+        _, callback = connection.subscriptions["ticks:bot-a:R_100"]
+
+        await callback({
+            "tick": {
+                "epoch": 181,
+                "quote": 12.5,
+                "symbol": "R_100",
+                "pip_size": 2,
+            }
+        })
+        await callback({
+            "tick": {
+                "epoch": 181,
+                "quote": 12.6,
+                "symbol": "R_100",
+                "pip_size": 2,
+            }
+        })
+
+        live_ticks = [tick for tick in handler.get_tick_history() if tick["is_live"]]
+        self.assertEqual([tick["sequence"] for tick in live_ticks], [1, 2])
+        self.assertEqual([tick["epoch"] for tick in live_ticks], [181, 181])
+        self.assertTrue(all(tick["pip_size"] == 2 for tick in live_ticks))
+
+    async def test_bootstrap_candle_closes_are_never_marked_as_live_ticks(self):
+        connection = FakeConnection()
+        handler = MarketDataHandler(
+            connection,
+            bot_id="bot-a",
+            publisher=FakePublisher(),
+        )
+
+        await handler.start("R_100", timeframe_seconds=60)
+
+        self.assertTrue(handler.get_tick_history())
+        self.assertTrue(all(
+            tick["is_live"] is False and tick["sequence"] is None
+            for tick in handler.get_tick_history()
+        ))
+
     async def test_running_bot_periodically_republishes_full_history_for_api_restart(self):
         connection = FakeConnection()
         publisher = FakePublisher()
