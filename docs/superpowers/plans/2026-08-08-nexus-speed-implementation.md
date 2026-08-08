@@ -12,7 +12,7 @@
 
 - `strategy_id` é `nexus_speed`; Donchian permanece compatível.
 - Timeframe é 60 segundos; duração é fixa em 5 ticks (`duration=5`, `duration_unit="t"`). A Deriv rejeitou 10 segundos nos sintéticos durante o smoke demo e o usuário aprovou 5 ticks.
-- Defaults fixos: EMA 5, ADX 10, ADX estritamente maior que 30, ATR 14, distância 0,30 ATR.
+- Defaults fixos: EMA 5, ADX 10, ATR 14 e distância 0,30 ATR; ADX mínimo selecionável em 20, 25 ou 30, com padrão 30 e regra estrita `ADX > limiar`. O valor salvo passa a valer somente após iniciar o bot.
 - EMA plana tolera até 1 pip; PUT aceita EMA plana/descendente e CALL aceita EMA plana/ascendente.
 - Payout líquido mínimo é 0,87 e deve ser validado em toda proposal.
 - Um único evento terminal por candle e nenhuma nova tentativa após confirmação, reprovação ou aborto.
