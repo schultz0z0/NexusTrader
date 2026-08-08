@@ -81,6 +81,7 @@ class BotSession:
         return NexusSpeedStrategy(
             money_manager=money,
             duration=int(self.bot.get("duration", 5)),
+            adx_threshold=int(strategy_config.get("adx_threshold", 30)),
             touch_tolerance_bps=float(
                 strategy_config.get("touch_tolerance_bps", 1.0)
             ),

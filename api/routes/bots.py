@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from config.settings import settings
+from strategies.nexus_speed import ALLOWED_ADX_THRESHOLDS
 
 router = APIRouter(prefix="/api/v1/bots", tags=["Bots"])
 
@@ -23,6 +24,12 @@ class BotPayload(BaseModel):
 
     @model_validator(mode="after")
     def demo_only(self):
+        requested_adx_threshold = self.strategy_config.get("adx_threshold", 30)
+        if self.strategy_id == "nexus_speed" and (
+            type(requested_adx_threshold) is not int
+            or requested_adx_threshold not in ALLOWED_ADX_THRESHOLDS
+        ):
+            raise ValueError("Nexus Speed aceita ADX mínimo 20, 25 ou 30")
         profiles = {
             "donchian": {
                 "period": 21,
@@ -33,7 +40,7 @@ class BotPayload(BaseModel):
             "nexus_speed": {
                 "ema_period": 5,
                 "adx_period": 10,
-                "adx_threshold": 30,
+                "adx_threshold": requested_adx_threshold,
                 "atr_period": 14,
                 "min_distance_atr": 0.30,
                 "touch_tolerance_bps": 1,
@@ -46,7 +53,16 @@ class BotPayload(BaseModel):
         if self.strategy_id not in profiles:
             raise ValueError("Estrategia nao suportada")
         fixed_strategy = profiles[self.strategy_id]
-        if self.strategy_config and self.strategy_config != fixed_strategy:
+        allowed_strategy_config = (
+            {"adx_threshold": requested_adx_threshold}
+            if self.strategy_id == "nexus_speed"
+            else fixed_strategy
+        )
+        if (
+            self.strategy_config
+            and self.strategy_config != allowed_strategy_config
+            and self.strategy_config != fixed_strategy
+        ):
             raise ValueError("Parametros da estrategia sao fixos")
         self.strategy_config = fixed_strategy
         if self.timeframe_seconds != 60:

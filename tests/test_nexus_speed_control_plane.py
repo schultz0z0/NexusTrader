@@ -56,6 +56,28 @@ class NexusSpeedPayloadTests(unittest.TestCase):
                 strategy_config={"min_profit_ratio": 0.86},
             )
 
+    def test_api_normalizes_an_approved_adx_threshold(self):
+        payload = BotPayload(
+            name="Nexus Speed",
+            strategy_id="nexus_speed",
+            duration=5,
+            duration_unit="t",
+            strategy_config={"adx_threshold": 25},
+        )
+
+        self.assertEqual(payload.strategy_config["adx_threshold"], 25)
+        self.assertEqual(payload.strategy_config["min_profit_ratio"], 0.87)
+
+    def test_api_rejects_unapproved_adx_threshold(self):
+        with self.assertRaises(ValidationError):
+            BotPayload(
+                name="Nexus Speed",
+                strategy_id="nexus_speed",
+                duration=5,
+                duration_unit="t",
+                strategy_config={"adx_threshold": 21},
+            )
+
 
 class NexusSpeedPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_repository_round_trips_nexus_speed_profile(self):

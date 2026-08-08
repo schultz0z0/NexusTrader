@@ -14,6 +14,7 @@ class IndicatorSnapshot:
 
 
 IndicatorProvider = Callable[[list[dict]], Optional[IndicatorSnapshot]]
+ALLOWED_ADX_THRESHOLDS = frozenset({20, 25, 30})
 
 
 def calculate_indicator_snapshot(candles: list[dict]) -> Optional[IndicatorSnapshot]:
@@ -46,6 +47,7 @@ class NexusSpeedStrategy(BaseStrategy):
         money_manager: Optional[MoneyManager] = None,
         *,
         duration: int = 5,
+        adx_threshold: int = 30,
         touch_tolerance_bps: float = 1.0,
         ema_flat_tolerance_pips: float = 1.0,
         min_profit_ratio: float = 0.87,
@@ -56,11 +58,16 @@ class NexusSpeedStrategy(BaseStrategy):
         super().__init__(money_manager)
         if int(duration) != 5:
             raise ValueError("Nexus Speed usa expiracao fixa de 5 ticks")
+        if (
+            type(adx_threshold) is not int
+            or adx_threshold not in ALLOWED_ADX_THRESHOLDS
+        ):
+            raise ValueError("Nexus Speed aceita ADX mínimo 20, 25 ou 30")
         self.duration = int(duration)
         self.duration_unit = "t"
         self.ema_period = 5
         self.adx_period = 10
-        self.adx_threshold = 30.0
+        self.adx_threshold = float(adx_threshold)
         self.atr_period = 14
         self.min_distance_atr = 0.30
         self.touch_tolerance_bps = float(touch_tolerance_bps)

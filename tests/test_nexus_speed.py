@@ -56,9 +56,10 @@ class NexusSpeedStrategyTests(unittest.TestCase):
             "is_live": True,
         }
 
-    def _armed_strategy(self, snapshot, opening, duration=5):
+    def _armed_strategy(self, snapshot, opening, duration=5, adx_threshold=30):
         strategy = NexusSpeedStrategy(
             duration=duration,
+            adx_threshold=adx_threshold,
             min_closed_candles=3,
             indicator_provider=lambda _: snapshot,
         )
@@ -92,6 +93,30 @@ class NexusSpeedStrategyTests(unittest.TestCase):
 
         self.assertEqual(strategy.state, "INELIGIBLE_FILTER")
         self.assertEqual(strategy.state_reason, "adx_below_threshold")
+
+    def test_custom_adx_threshold_is_strict(self):
+        strategy, _ = self._armed_strategy(
+            self._snapshot(adx=25.0), opening=110.0, adx_threshold=25
+        )
+
+        self.assertEqual(strategy.state, "INELIGIBLE_FILTER")
+        self.assertEqual(strategy.state_reason, "adx_below_threshold")
+
+    def test_custom_adx_threshold_accepts_higher_adx(self):
+        strategy, _ = self._armed_strategy(
+            self._snapshot(adx=25.1), opening=110.0, adx_threshold=25
+        )
+
+        self.assertEqual(strategy.state, "ARMED_CALL")
+
+    def test_adx_threshold_accepts_only_approved_values(self):
+        for threshold in (20, 25, 30):
+            with self.subTest(threshold=threshold):
+                strategy = NexusSpeedStrategy(adx_threshold=threshold)
+                self.assertEqual(strategy.adx_threshold, float(threshold))
+
+        with self.assertRaisesRegex(ValueError, "20, 25 ou 30"):
+            NexusSpeedStrategy(adx_threshold=21)
 
     def test_distance_equal_to_thirty_percent_atr_is_eligible(self):
         strategy, _ = self._armed_strategy(

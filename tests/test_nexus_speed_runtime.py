@@ -38,6 +38,13 @@ class NexusSpeedRuntimeTests(unittest.TestCase):
             {"duration": 5, "duration_unit": "t"},
         )
 
+    def test_runtime_uses_persisted_adx_threshold(self):
+        strategy = self._session(
+            strategy_config={"adx_threshold": 25}
+        )._build_strategy()
+
+        self.assertEqual(strategy.adx_threshold, 25.0)
+
     def test_rejects_non_five_tick_nexus_configuration(self):
         with self.assertRaisesRegex(ValueError, "5 ticks"):
             self._session(duration=10)._build_strategy()
