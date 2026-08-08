@@ -48,7 +48,7 @@ class NexusSpeedStrategy(BaseStrategy):
         *,
         duration: int = 5,
         adx_threshold: int = 30,
-        touch_tolerance_bps: float = 1.0,
+        touch_tolerance_bps: float = 0.0,
         ema_flat_tolerance_pips: float = 1.0,
         min_profit_ratio: float = 0.87,
         max_entry_delay_ticks: int = 1,
@@ -70,11 +70,15 @@ class NexusSpeedStrategy(BaseStrategy):
         self.adx_threshold = float(adx_threshold)
         self.atr_period = 14
         self.min_distance_atr = 0.30
-        self.touch_tolerance_bps = float(touch_tolerance_bps)
+        # Kept for persisted legacy profiles; proximity bands are no longer valid.
+        self.touch_tolerance_bps = 0.0
         self.ema_flat_tolerance_pips = float(ema_flat_tolerance_pips)
         self.min_profit_ratio = float(min_profit_ratio)
         self.max_entry_delay_ticks = int(max_entry_delay_ticks)
         self.min_closed_candles = int(min_closed_candles)
+        self.touch_window_start_second = 1
+        self.touch_window_end_second = 30
+        self.blocked_m5_candle_positions = (1, 5)
         self._indicator_provider = indicator_provider
 
         self.state = "IDLE"
@@ -118,7 +122,11 @@ class NexusSpeedStrategy(BaseStrategy):
                 self.last_processed_sequence > 0
                 and sequence != self.last_processed_sequence + 1
             )
-            if has_gap and self.state == "AWAITING_CONFIRMATION":
+            if has_gap and self.state in {
+                "ARMED_CALL",
+                "ARMED_PUT",
+                "AWAITING_CONFIRMATION",
+            }:
                 self._abort("tick_sequence_gap", tick)
 
             if self.current_candle_time is None:
@@ -130,6 +138,10 @@ class NexusSpeedStrategy(BaseStrategy):
                 continue
 
             if candle_time != self.current_candle_time:
+                if self.state in {"ARMED_CALL", "ARMED_PUT"}:
+                    self._transition(
+                        "timing", "ABORTED", "entry_window_expired", tick
+                    )
                 self._begin_candle(candle_time, candles, tick)
 
             signal = self._process_tick(tick)
@@ -147,6 +159,16 @@ class NexusSpeedStrategy(BaseStrategy):
         self._direction = None
         self._lower_band = None
         self._upper_band = None
+
+        m5_position = (self.current_candle_time // 60) % 5 + 1
+        if m5_position in self.blocked_m5_candle_positions:
+            self._ineligible("m5_boundary_minute", tick)
+            return
+
+        elapsed_second = int(tick["epoch"]) - self.current_candle_time
+        if elapsed_second > self.touch_window_end_second:
+            self._ineligible("entry_window_expired", tick)
+            return
 
         closed = closed_candles(candles, self.current_candle_time)
         if len(closed) < self.min_closed_candles:
@@ -202,12 +224,8 @@ class NexusSpeedStrategy(BaseStrategy):
             self._ineligible("opening_too_close", tick)
             return
 
-        touch_tolerance = max(
-            abs(snapshot.ema_reference) * self.touch_tolerance_bps / 10_000,
-            pip,
-        )
-        self._lower_band = snapshot.ema_reference - touch_tolerance
-        self._upper_band = snapshot.ema_reference + touch_tolerance
+        self._lower_band = snapshot.ema_reference
+        self._upper_band = snapshot.ema_reference
         self._direction = direction
         self._transition(
             "qualification", f"ARMED_{direction}", "filters_passed", tick
@@ -220,6 +238,15 @@ class NexusSpeedStrategy(BaseStrategy):
             return self._confirm(tick)
         if self.state not in {"ARMED_CALL", "ARMED_PUT"}:
             return None
+
+        elapsed_second = int(tick["epoch"]) - self.current_candle_time
+        if elapsed_second > self.touch_window_end_second:
+            self._transition(
+                "timing", "ABORTED", "entry_window_expired", tick
+            )
+            return None
+        if elapsed_second < self.touch_window_start_second:
+            return None
         if self._previous_live_tick is None:
             return None
 
@@ -227,7 +254,13 @@ class NexusSpeedStrategy(BaseStrategy):
         current = float(tick["quote"])
         segment_low = min(previous, current)
         segment_high = max(previous, current)
-        if segment_low <= self._upper_band and segment_high >= self._lower_band:
+        ema_reference = self._snapshot.ema_reference
+        approaching = (
+            self._direction == "CALL" and current < previous
+        ) or (
+            self._direction == "PUT" and current > previous
+        )
+        if approaching and segment_low <= ema_reference <= segment_high:
             self._touch_tick = dict(tick)
             self._transition(
                 "touch", "AWAITING_CONFIRMATION", "touch_detected", tick
@@ -245,11 +278,11 @@ class NexusSpeedStrategy(BaseStrategy):
         passed = (
             direction == "CALL"
             and confirmation_price > touch_price
-            and confirmation_price >= self._lower_band
+            and confirmation_price >= self._snapshot.ema_reference
         ) or (
             direction == "PUT"
             and confirmation_price < touch_price
-            and confirmation_price <= self._upper_band
+            and confirmation_price <= self._snapshot.ema_reference
         )
         if not passed:
             self._abort("confirmation_failed", tick)

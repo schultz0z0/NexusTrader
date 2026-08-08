@@ -83,7 +83,7 @@ class BotSession:
             duration=int(self.bot.get("duration", 5)),
             adx_threshold=strategy_config.get("adx_threshold", 30),
             touch_tolerance_bps=float(
-                strategy_config.get("touch_tolerance_bps", 1.0)
+                strategy_config.get("touch_tolerance_bps", 0.0)
             ),
             ema_flat_tolerance_pips=float(
                 strategy_config.get("ema_flat_tolerance_pips", 1.0)

@@ -1,11 +1,15 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from api.app import create_app
 from api.live_store import LiveStore
 from api.routes.bots import BotPayload
+from config.settings import settings
 from data.market_data import MarketDataHandler
 from database.repository import DatabaseRepository
 
@@ -29,11 +33,14 @@ class NexusSpeedPayloadTests(unittest.TestCase):
             "adx_threshold": 30,
             "atr_period": 14,
             "min_distance_atr": 0.30,
-            "touch_tolerance_bps": 1,
+            "touch_tolerance_bps": 0,
             "ema_flat_tolerance_pips": 1,
             "min_profit_ratio": 0.87,
             "max_entry_delay_ticks": 1,
             "min_closed_candles": 270,
+            "touch_window_start_second": 1,
+            "touch_window_end_second": 30,
+            "blocked_m5_candle_positions": [1, 5],
         })
 
     def test_api_rejects_nexus_duration_other_than_five_ticks(self):
@@ -88,6 +95,10 @@ class NexusSpeedPayloadTests(unittest.TestCase):
         )
 
         self.assertEqual(payload.strategy_config["adx_threshold"], 30)
+        self.assertEqual(payload.strategy_config["touch_tolerance_bps"], 0)
+        self.assertEqual(payload.strategy_config["touch_window_start_second"], 1)
+        self.assertEqual(payload.strategy_config["touch_window_end_second"], 30)
+        self.assertEqual(payload.strategy_config["blocked_m5_candle_positions"], [1, 5])
         self.assertIs(type(payload.strategy_config["adx_threshold"]), int)
 
     def test_api_rejects_unapproved_adx_threshold(self):
@@ -124,6 +135,68 @@ class NexusSpeedPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["duration"], 5)
         self.assertEqual(stored["duration_unit"], "t")
         self.assertEqual(stored["account_type"], "demo")
+
+
+class NexusSpeedApiResponseTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.repository = DatabaseRepository(str(Path(self.tempdir.name) / "nexus.db"))
+        asyncio.run(self.repository.init_db())
+        payload = BotPayload(
+            name="Legacy Nexus Speed",
+            strategy_id="nexus_speed",
+            account_id="VRTC100",
+            account_type="demo",
+            symbol="R_10",
+            duration=5,
+            duration_unit="t",
+        ).model_dump()
+        payload["strategy_config"]["touch_tolerance_bps"] = 1
+        payload["strategy_config"].pop("touch_window_start_second")
+        payload["strategy_config"].pop("touch_window_end_second")
+        payload["strategy_config"].pop("blocked_m5_candle_positions")
+        self.stored = asyncio.run(self.repository.create_bot(payload))
+        headers = {
+            "X-API-Key": settings.DASHBOARD_API_KEY
+        } if settings.DASHBOARD_API_KEY else {}
+        self.client_context = TestClient(
+            create_app(self.repository, LiveStore()),
+            headers=headers,
+        )
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self):
+        self.client_context.__exit__(None, None, None)
+        self.tempdir.cleanup()
+
+    def test_list_and_get_normalize_legacy_touch_without_rewriting_storage(self):
+        listed = self.client.get("/api/v1/bots")
+        fetched = self.client.get(f"/api/v1/bots/{self.stored['id']}")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        listed_bot = next(
+            bot for bot in listed.json()["data"] if bot["id"] == self.stored["id"]
+        )
+        self.assertEqual(
+            listed_bot["strategy_config"]["touch_tolerance_bps"],
+            0,
+        )
+        self.assertEqual(
+            fetched.json()["data"]["strategy_config"]["touch_tolerance_bps"],
+            0,
+        )
+        self.assertEqual(
+            listed_bot["strategy_config"]["touch_window_end_second"],
+            30,
+        )
+        self.assertEqual(
+            fetched.json()["data"]["strategy_config"]["blocked_m5_candle_positions"],
+            [1, 5],
+        )
+        persisted = asyncio.run(self.repository.get_bot(self.stored["id"]))
+        self.assertEqual(persisted["strategy_config"]["touch_tolerance_bps"], 1)
+        self.assertNotIn("touch_window_end_second", persisted["strategy_config"])
 
 
 class NexusSpeedMarketTelemetryTests(unittest.TestCase):

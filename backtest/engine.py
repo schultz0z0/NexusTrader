@@ -61,16 +61,33 @@ class ReplayEngine:
                 getattr(strategy, "adx_threshold", 30.0)
             )
             manifest["strategy_config"] = {
-                "ema_period": strategy.ema_period,
-                "adx_period": strategy.adx_period,
-                "adx_threshold": strategy.adx_threshold,
-                "atr_period": strategy.atr_period,
-                "min_distance_atr": strategy.min_distance_atr,
-                "touch_tolerance_bps": strategy.touch_tolerance_bps,
-                "ema_flat_tolerance_pips": strategy.ema_flat_tolerance_pips,
-                "min_profit_ratio": strategy.min_profit_ratio,
-                "max_entry_delay_ticks": strategy.max_entry_delay_ticks,
-                "min_closed_candles": strategy.min_closed_candles,
+                "ema_period": getattr(strategy, "ema_period", 5),
+                "adx_period": getattr(strategy, "adx_period", 10),
+                "adx_threshold": getattr(strategy, "adx_threshold", 30.0),
+                "atr_period": getattr(strategy, "atr_period", 14),
+                "min_distance_atr": getattr(strategy, "min_distance_atr", 0.30),
+                "touch_tolerance_bps": getattr(
+                    strategy, "touch_tolerance_bps", 0.0
+                ),
+                "ema_flat_tolerance_pips": getattr(
+                    strategy, "ema_flat_tolerance_pips", 1.0
+                ),
+                "min_profit_ratio": getattr(strategy, "min_profit_ratio", 0.87),
+                "max_entry_delay_ticks": getattr(
+                    strategy, "max_entry_delay_ticks", 1
+                ),
+                "min_closed_candles": getattr(
+                    strategy, "min_closed_candles", 270
+                ),
+                "touch_window_start_second": getattr(
+                    strategy, "touch_window_start_second", 1
+                ),
+                "touch_window_end_second": getattr(
+                    strategy, "touch_window_end_second", 30
+                ),
+                "blocked_m5_candle_positions": list(
+                    getattr(strategy, "blocked_m5_candle_positions", (1, 5))
+                ),
                 "duration": params["duration"],
                 "duration_unit": params["duration_unit"],
             }

@@ -4,7 +4,12 @@ import test from "node:test";
 import { configuredBotPayload, strategyProfile } from "../../static/js/bot_config.js";
 
 test("Nexus defaults to ADX 30", () => {
-  assert.equal(strategyProfile("nexus_speed").strategy_config.adx_threshold, 30);
+  const config = strategyProfile("nexus_speed").strategy_config;
+  assert.equal(config.adx_threshold, 30);
+  assert.equal(config.touch_tolerance_bps, 0);
+  assert.equal(config.touch_window_start_second, 1);
+  assert.equal(config.touch_window_end_second, 30);
+  assert.deepEqual(config.blocked_m5_candle_positions, [1, 5]);
 });
 
 test("Nexus preserves selected ADX threshold", () => {

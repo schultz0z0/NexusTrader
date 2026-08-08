@@ -44,27 +44,58 @@ class BotPayload(BaseModel):
                 "adx_threshold": requested_adx_threshold,
                 "atr_period": 14,
                 "min_distance_atr": 0.30,
-                "touch_tolerance_bps": 1,
+                "touch_tolerance_bps": 0,
                 "ema_flat_tolerance_pips": 1,
                 "min_profit_ratio": 0.87,
                 "max_entry_delay_ticks": 1,
                 "min_closed_candles": 270,
+                "touch_window_start_second": 1,
+                "touch_window_end_second": 30,
+                "blocked_m5_candle_positions": [1, 5],
             },
         }
         if self.strategy_id not in profiles:
             raise ValueError("Estrategia nao suportada")
         fixed_strategy = profiles[self.strategy_id]
         if self.strategy_id == "nexus_speed":
+            time_filter_keys = {
+                "touch_window_start_second",
+                "touch_window_end_second",
+                "blocked_m5_candle_positions",
+            }
+            current_without_adx = {
+                key: value
+                for key, value in fixed_strategy.items()
+                if key != "adx_threshold"
+            }
             legacy_fixed_strategy = {
                 key: value
                 for key, value in fixed_strategy.items()
+                if key not in time_filter_keys
+            }
+            legacy_fixed_without_adx = {
+                key: value
+                for key, value in legacy_fixed_strategy.items()
+                if key != "adx_threshold"
+            }
+            legacy_banded_strategy = {
+                **legacy_fixed_strategy,
+                "touch_tolerance_bps": 1,
+            }
+            legacy_banded_without_adx = {
+                key: value
+                for key, value in legacy_banded_strategy.items()
                 if key != "adx_threshold"
             }
             allowed_strategy_configs = (
                 {},
                 {"adx_threshold": requested_adx_threshold},
-                legacy_fixed_strategy,
+                current_without_adx,
                 fixed_strategy,
+                legacy_fixed_without_adx,
+                legacy_fixed_strategy,
+                legacy_banded_without_adx,
+                legacy_banded_strategy,
             )
         else:
             allowed_strategy_configs = ({}, fixed_strategy)
@@ -97,14 +128,30 @@ def _repo(request):
     return request.app.state.repository
 
 
+def _for_response(bot):
+    if bot is None or bot.get("strategy_id") != "nexus_speed":
+        return bot
+    normalized = dict(bot)
+    normalized["strategy_config"] = {
+        **dict(bot.get("strategy_config") or {}),
+        "touch_tolerance_bps": 0,
+        "touch_window_start_second": 1,
+        "touch_window_end_second": 30,
+        "blocked_m5_candle_positions": [1, 5],
+    }
+    return normalized
+
+
 @router.get("")
 async def list_bots(request: Request):
-    return {"status": "success", "data": await _repo(request).list_bots()}
+    bots = await _repo(request).list_bots()
+    return {"status": "success", "data": [_for_response(bot) for bot in bots]}
 
 
 @router.post("", status_code=201)
 async def create_bot(payload: BotPayload, request: Request):
-    return {"status": "success", "data": await _repo(request).create_bot(payload.model_dump())}
+    created = await _repo(request).create_bot(payload.model_dump())
+    return {"status": "success", "data": _for_response(created)}
 
 
 @router.post("/stop-all")
@@ -119,14 +166,15 @@ async def get_bot(bot_id: str, request: Request):
     bot = await _repo(request).get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "Robo nao encontrado")
-    return {"status": "success", "data": bot}
+    return {"status": "success", "data": _for_response(bot)}
 
 
 @router.put("/{bot_id}")
 async def update_bot(bot_id: str, payload: BotPayload, request: Request):
     if not await _repo(request).get_bot(bot_id):
         raise HTTPException(404, "Robo nao encontrado")
-    return {"status": "success", "data": await _repo(request).update_bot(bot_id, payload.model_dump())}
+    updated = await _repo(request).update_bot(bot_id, payload.model_dump())
+    return {"status": "success", "data": _for_response(updated)}
 
 
 @router.delete("/{bot_id}", status_code=204)
@@ -182,14 +230,16 @@ async def start_bot(bot_id: str, request: Request, payload: StartPayload = None)
             raise HTTPException(403, "Confirmacao REAL ausente, expirada ou invalida")
     if not bot.get("account_id"):
         raise HTTPException(422, "Configure uma conta Deriv antes de iniciar")
-    return {"status": "success", "data": await _repo(request).set_desired_state(bot_id, "RUNNING")}
+    updated = await _repo(request).set_desired_state(bot_id, "RUNNING")
+    return {"status": "success", "data": _for_response(updated)}
 
 
 @router.post("/{bot_id}/stop")
 async def stop_bot(bot_id: str, request: Request):
     if not await _repo(request).get_bot(bot_id):
         raise HTTPException(404, "Robo nao encontrado")
-    return {"status": "success", "data": await _repo(request).set_desired_state(bot_id, "STOPPED")}
+    updated = await _repo(request).set_desired_state(bot_id, "STOPPED")
+    return {"status": "success", "data": _for_response(updated)}
 
 
 @router.get("/{bot_id}/trades")

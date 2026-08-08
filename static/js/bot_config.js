@@ -11,11 +11,14 @@ const NEXUS_SPEED_CONFIG = Object.freeze({
   adx_threshold: 30,
   atr_period: 14,
   min_distance_atr: 0.30,
-  touch_tolerance_bps: 1,
+  touch_tolerance_bps: 0,
   ema_flat_tolerance_pips: 1,
   min_profit_ratio: 0.87,
   max_entry_delay_ticks: 1,
   min_closed_candles: 270,
+  touch_window_start_second: 1,
+  touch_window_end_second: 30,
+  blocked_m5_candle_positions: Object.freeze([1, 5]),
 });
 
 export function strategyProfile(strategyId, overrides = {}) {

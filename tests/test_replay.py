@@ -40,6 +40,9 @@ class FiveTickStrategy(OneShotStrategy):
     ema_flat_tolerance_pips = 1.0
     max_entry_delay_ticks = 1
     min_closed_candles = 270
+    touch_window_start_second = 1
+    touch_window_end_second = 30
+    blocked_m5_candle_positions = (1, 5)
 
     def analyze(self, ticks, candles=None):
         if not self.sent:
@@ -59,6 +62,27 @@ class FiveTickStrategy(OneShotStrategy):
         return {"duration": 5, "duration_unit": "t"}
 
 
+class BareFiveTickStrategy(OneShotStrategy):
+    min_profit_ratio = 0.87
+
+    def analyze(self, ticks, candles=None):
+        if not self.sent:
+            self.sent = True
+            current = ticks[-1]
+            return Signal(
+                "CALL",
+                "bare-five-tick-fixture",
+                current["quote"],
+                current["epoch"],
+                tick_sequence=current["sequence"],
+                candle_time=current["epoch"] // 60 * 60,
+            )
+        return None
+
+    def get_contract_params(self):
+        return {"duration": 5, "duration_unit": "t"}
+
+
 class DeterministicReplayTests(unittest.TestCase):
     def test_replay_factory_configures_selected_nexus_adx_threshold(self):
         factory = strategy_factory("nexus_speed", adx_threshold=25)
@@ -66,6 +90,7 @@ class DeterministicReplayTests(unittest.TestCase):
 
         self.assertIsInstance(strategy, NexusSpeedStrategy)
         self.assertEqual(strategy.adx_threshold, 25.0)
+        self.assertEqual(strategy.touch_tolerance_bps, 0.0)
 
     def test_replay_is_deterministic_and_uses_first_tick_at_or_after_expiry(self):
         ticks = [
@@ -125,6 +150,9 @@ class DeterministicReplayTests(unittest.TestCase):
             "min_profit_ratio": 0.87,
             "max_entry_delay_ticks": 1,
             "min_closed_candles": 270,
+            "touch_window_start_second": 1,
+            "touch_window_end_second": 30,
+            "blocked_m5_candle_positions": [1, 5],
             "duration": 5,
             "duration_unit": "t",
         })
@@ -132,6 +160,24 @@ class DeterministicReplayTests(unittest.TestCase):
         self.assertEqual(result["trades"][0]["entry_spot"], 101.0)
         self.assertEqual(result["trades"][0]["exit_epoch"], 2)
         self.assertEqual(result["trades"][0]["profit"], 0.9)
+
+    def test_five_tick_replay_manifest_is_backward_compatible_with_bare_factory(self):
+        result = ReplayEngine(strategy_factory=BareFiveTickStrategy).run([
+            {"epoch": 0, "quote": 100.0, "payout_ratio": 0.90},
+            {"epoch": 1, "quote": 101.0, "payout_ratio": 0.90},
+            {"epoch": 2, "quote": 101.1, "payout_ratio": 0.90},
+            {"epoch": 3, "quote": 101.2, "payout_ratio": 0.90},
+            {"epoch": 4, "quote": 101.3, "payout_ratio": 0.90},
+            {"epoch": 5, "quote": 101.4, "payout_ratio": 0.90},
+            {"epoch": 6, "quote": 102.0, "payout_ratio": 0.90},
+        ])
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["manifest"]["strategy_config"]["ema_period"], 5)
+        self.assertEqual(
+            result["manifest"]["strategy_config"]["blocked_m5_candle_positions"],
+            [1, 5],
+        )
 
     def test_five_tick_replay_requires_payout_on_entry_tick(self):
         result = ReplayEngine(strategy_factory=FiveTickStrategy).run([

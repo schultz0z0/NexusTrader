@@ -27,17 +27,9 @@ class NexusSpeedStrategyTests(unittest.TestCase):
             {"time": 60, "open": 98, "high": 100, "low": 97, "close": 99},
             {"time": 120, "open": 99, "high": 101, "low": 98, "close": 100},
         ]
-        if active_time >= 180:
+        for candle_time in range(180, active_time + 1, 60):
             candles.append({
-                "time": 180,
-                "open": opening,
-                "high": opening,
-                "low": opening,
-                "close": opening,
-            })
-        if active_time >= 240:
-            candles.append({
-                "time": 240,
+                "time": candle_time,
                 "open": opening,
                 "high": opening,
                 "low": opening,
@@ -68,6 +60,21 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         opening_tick = self._tick(2, 181, opening)
         ticks = [startup_tick, opening_tick]
         strategy.analyze(ticks, self._candles(180, opening))
+        return strategy, ticks
+
+    def _strategy_entering_candle(self, active_time, snapshot, opening):
+        strategy = NexusSpeedStrategy(
+            min_closed_candles=3,
+            indicator_provider=lambda _: snapshot,
+        )
+        startup_tick = self._tick(1, active_time - 59, opening)
+        strategy.analyze(
+            [startup_tick],
+            self._candles(active_time - 60, opening),
+        )
+        opening_tick = self._tick(2, active_time + 1, opening)
+        ticks = [startup_tick, opening_tick]
+        strategy.analyze(ticks, self._candles(active_time, opening))
         return strategy, ticks
 
     def test_starting_mid_candle_waits_for_the_next_candle(self):
@@ -125,6 +132,115 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         )
 
         self.assertEqual(strategy.state, "ARMED_CALL")
+
+    def test_first_and_fifth_m1_candles_of_each_m5_block_are_ineligible(self):
+        for active_time in (240, 300):
+            with self.subTest(active_time=active_time):
+                strategy, _ = self._strategy_entering_candle(
+                    active_time,
+                    self._snapshot(),
+                    opening=110.0,
+                )
+
+                self.assertEqual(strategy.state, "INELIGIBLE_FILTER")
+                self.assertEqual(strategy.state_reason, "m5_boundary_minute")
+
+    def test_second_through_fourth_m1_candles_of_m5_remain_eligible(self):
+        for active_time in (360, 420, 480):
+            with self.subTest(active_time=active_time):
+                strategy, _ = self._strategy_entering_candle(
+                    active_time,
+                    self._snapshot(),
+                    opening=110.0,
+                )
+
+                self.assertEqual(strategy.state, "ARMED_CALL")
+
+    def test_touch_at_second_thirty_can_confirm_at_second_thirty_one(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+        ticks.extend([
+            self._tick(3, 210, 100.0),
+            self._tick(4, 211, 100.02),
+        ])
+
+        signal = strategy.analyze(ticks, self._candles(180, 110.0))
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.action, "CALL")
+        self.assertEqual(signal.timestamp, 211)
+        self.assertEqual(strategy.state, "SIGNAL_EMITTED")
+
+    def test_second_zero_cannot_register_a_touch(self):
+        strategy = NexusSpeedStrategy(
+            min_closed_candles=3,
+            indicator_provider=lambda _: self._snapshot(),
+        )
+        startup_tick = self._tick(1, 121, 110.0)
+        strategy.analyze([startup_tick], self._candles(120, 110.0))
+        opening_tick = self._tick(2, 180, 110.0)
+        same_second_cross = self._tick(3, 180, 100.0)
+
+        signal = strategy.analyze(
+            [startup_tick, opening_tick, same_second_cross],
+            self._candles(180, 110.0),
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "ARMED_CALL")
+        self.assertEqual(strategy.state_reason, "filters_passed")
+
+    def test_armed_candle_without_touch_expires_at_second_thirty_one(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+        ticks.append(self._tick(3, 211, 105.0))
+
+        signal = strategy.analyze(ticks, self._candles(180, 110.0))
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "ABORTED")
+        self.assertEqual(strategy.state_reason, "entry_window_expired")
+
+    def test_late_first_tick_makes_allowed_m1_candle_ineligible(self):
+        strategy = NexusSpeedStrategy(
+            min_closed_candles=3,
+            indicator_provider=lambda _: self._snapshot(),
+        )
+        startup_tick = self._tick(1, 121, 110.0)
+        strategy.analyze([startup_tick], self._candles(120, 110.0))
+        late_tick = self._tick(2, 211, 105.0)
+
+        signal = strategy.analyze(
+            [startup_tick, late_tick],
+            self._candles(180, 110.0),
+        )
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "INELIGIBLE_FILTER")
+        self.assertEqual(strategy.state_reason, "entry_window_expired")
+
+    def test_armed_candle_expires_before_next_candle_is_qualified(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+        strategy.drain_transition_events()
+        ticks.append(self._tick(3, 240, 105.0))
+
+        signal = strategy.analyze(ticks, self._candles(240, 105.0))
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.drain_transition_events(), [
+            {
+                "phase": "timing",
+                "state": "ABORTED",
+                "reason_code": "entry_window_expired",
+                "candle_time": 180,
+                "tick_sequence": 3,
+            },
+            {
+                "phase": "qualification",
+                "state": "INELIGIBLE_FILTER",
+                "reason_code": "m5_boundary_minute",
+                "candle_time": 240,
+                "tick_sequence": 3,
+            },
+        ])
 
     def test_expiration_is_fixed_at_five_ticks(self):
         strategy, _ = self._armed_strategy(self._snapshot(), opening=110.0)
@@ -217,6 +333,34 @@ class NexusSpeedStrategyTests(unittest.TestCase):
             "duration_unit": "t",
         })
 
+    def test_put_proximity_without_reaching_ema_does_not_count_as_touch(self):
+        snapshot = self._snapshot(
+            ema=4839.1039564078355,
+            previous=4839.3199346117535,
+            adx=48.73789467325892,
+            atr=0.9332971346859056,
+        )
+        strategy = NexusSpeedStrategy(
+            adx_threshold=25,
+            min_closed_candles=3,
+            indicator_provider=lambda _: snapshot,
+        )
+        ticks = [self._tick(1, 121, 4838.672, pip_size=3)]
+        strategy.analyze(ticks, self._candles(120, 4838.75))
+        ticks.append(self._tick(2, 180, 4838.75, pip_size=3))
+        strategy.analyze(ticks, self._candles(180, 4838.75))
+        strategy.drain_transition_events()
+        ticks.extend([
+            self._tick(3, 182, 4838.638, pip_size=3),
+            self._tick(4, 184, 4838.601, pip_size=3),
+        ])
+
+        signal = strategy.analyze(ticks, self._candles(180, 4838.75))
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "ARMED_PUT")
+        self.assertEqual(strategy.drain_transition_events(), [])
+
     def test_flat_confirmation_aborts_the_candle(self):
         strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
         ticks.extend([
@@ -237,6 +381,29 @@ class NexusSpeedStrategyTests(unittest.TestCase):
         ticks.append(self._tick(5, 191, 100.02))
 
         signal = strategy.analyze(ticks, self._candles(180, 110.0))
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "ABORTED")
+        self.assertEqual(strategy.state_reason, "tick_sequence_gap")
+
+    def test_sequence_gap_before_call_touch_aborts_the_candle(self):
+        strategy, ticks = self._armed_strategy(self._snapshot(), opening=110.0)
+        ticks.append(self._tick(4, 190, 99.99))
+
+        signal = strategy.analyze(ticks, self._candles(180, 110.0))
+
+        self.assertIsNone(signal)
+        self.assertEqual(strategy.state, "ABORTED")
+        self.assertEqual(strategy.state_reason, "tick_sequence_gap")
+
+    def test_sequence_gap_before_put_touch_aborts_the_candle(self):
+        strategy, ticks = self._armed_strategy(
+            self._snapshot(ema=100.0, previous=101.0),
+            opening=90.0,
+        )
+        ticks.append(self._tick(4, 190, 100.01))
+
+        signal = strategy.analyze(ticks, self._candles(180, 90.0))
 
         self.assertIsNone(signal)
         self.assertEqual(strategy.state, "ABORTED")

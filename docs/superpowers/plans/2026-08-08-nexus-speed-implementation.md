@@ -12,10 +12,12 @@
 
 - `strategy_id` é `nexus_speed`; Donchian permanece compatível.
 - Timeframe é 60 segundos; duração é fixa em 5 ticks (`duration=5`, `duration_unit="t"`). A Deriv rejeitou 10 segundos nos sintéticos durante o smoke demo e o usuário aprovou 5 ticks.
-- Defaults fixos: EMA 5, ADX 10, ATR 14 e distância 0,30 ATR; ADX mínimo selecionável em 20, 25 ou 30, com padrão 30 e regra estrita `ADX > limiar`. O valor salvo passa a valer somente após iniciar o bot.
+- Defaults fixos: EMA 5, ADX 10, ATR 14 e distância 0,30 ATR; ADX mínimo selecionável em 20, 25 ou 30, com padrão 30 e regra estrita `ADX > limiar`. O contato exige alcançar ou cruzar a EMA, sem faixa de aproximação. O valor salvo passa a valer somente após iniciar o bot.
+- Somente a 2ª, 3ª e 4ª vela M1 de cada bloco M5 alinhado ao relógio podem operar; a 1ª e a 5ª são inelegíveis.
+- O contato deve ocorrer entre os segundos 01 e 30 do candle M1. Um contato no segundo 30 pode ser confirmado pelo tick imediatamente seguinte no segundo 31 ou depois; sem contato até 30, a oportunidade é abortada.
 - EMA plana tolera até 1 pip; PUT aceita EMA plana/descendente e CALL aceita EMA plana/ascendente.
 - Payout líquido mínimo é 0,87 e deve ser validado em toda proposal.
-- Um único evento terminal por candle e nenhuma nova tentativa após confirmação, reprovação ou aborto.
+- Um único evento terminal por candle e nenhuma nova tentativa após confirmação, reprovação, aborto ou salto na sequência dos ticks.
 - Nenhuma conta real será habilitada por esta implementação.
 - Todos os testes, smoke tests e operações locais usarão exclusivamente `DERIV_ACCOUNT_TYPE=demo` e `ALLOW_REAL_TRADING=false`.
 - É proibido selecionar, autorizar ou enviar ordens para uma conta real durante esta execução.
@@ -75,8 +77,10 @@
 - [ ] Implementar snapshot por candle e estados inelegíveis/armados mínimos.
 - [ ] Escrever testes RED para inclinação: PUT descendente/plana aceito e ascendente rejeitado; CALL espelhado; tolerância exata de 1 pip.
 - [ ] Implementar `ema_slope`, `flat_tolerance` e filtro congelado.
-- [ ] Escrever testes RED para contato por interseção de banda, confirmação, tick plano, sequência quebrada, troca de vela e múltiplos ticks em lote.
+- [ ] Escrever testes RED para contato exato com a EMA, rejeição de aproximação, confirmação, tick plano, sequência quebrada, troca de vela e múltiplos ticks em lote.
+- [ ] Escrever testes RED para posições 1/5 bloqueadas no M5, posições 2/3/4 habilitadas, expiração sem contato após 30 e confirmação após contato no segundo 30.
 - [ ] Implementar consumo sequencial dos ticks e estados `AWAITING_CONFIRMATION`, `SIGNAL_EMITTED` e `ABORTED`.
+- [ ] Implementar `m5_boundary_minute` e `entry_window_expired` sem expirar um estado `AWAITING_CONFIRMATION` válido.
 - [ ] Reexecutar `python -m pytest tests/test_nexus_speed.py -q` após cada ciclo e confirmar sucesso final.
 - [ ] Commitar `feat: implement nexus speed state machine`.
 

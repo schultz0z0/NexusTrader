@@ -42,7 +42,11 @@ class FrontendContractTests(unittest.TestCase):
         self.assertTrue(any("lightweight-charts" in item for item in parser.scripts))
         touch_tolerance = parser.elements_by_id["nexus-touch-tolerance"]
         self.assertIn("readonly", touch_tolerance)
-        self.assertEqual(touch_tolerance["value"], "1 ponto-base (0,01%)")
+        self.assertEqual(touch_tolerance["value"], "Cruzamento exato da EMA")
+        touch_window = parser.elements_by_id["nexus-touch-window"]
+        self.assertEqual(touch_window["value"], "Toque entre 01s e 30s")
+        m5_filter = parser.elements_by_id["nexus-m5-filter"]
+        self.assertEqual(m5_filter["value"], "Bloqueia 1ª e 5ª velas")
 
     def test_frontend_modules_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))
