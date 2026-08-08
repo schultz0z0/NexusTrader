@@ -65,8 +65,16 @@ function renderAccountMode() {
 
 function renderSnapshot() {
   const { snapshot } = store.get();
-  if (!snapshot) return;
   const bot = selectedBot();
+  if (!snapshot) {
+    if (bot) {
+      chart.setHistory({ bot_id: bot.id, symbol: bot.symbol, timeframe_seconds: bot.timeframe_seconds, mode: Number(bot.timeframe_seconds) <= 1 ? "line" : "candles", points: [] });
+      showChartState("Trocando mercado", `Aguardando o histórico de ${bot.symbol} · ${timeframe(bot.timeframe_seconds)}.`);
+    }
+    renderActiveTrade(null);
+    renderTrades([]);
+    return;
+  }
   if (marketMatchesBot(snapshot.market, bot)) {
     chart.setHistory(snapshot.market);
     $("#chart-state").hidden = Boolean(snapshot.market?.points?.length);
@@ -118,11 +126,19 @@ function updateActiveTradePresentation(trade) {
 }
 
 function renderTrades(trades = []) {
-  const rows = trades.filter((item) => item.status !== "open"); const wins = rows.filter((item) => Number(item.profit) > 0).length; const pnl = rows.reduce((sum, item) => sum + Number(item.profit || 0), 0);
+  const today = new Date();
+  const rows = trades.filter((item) => {
+    if (item.status === "open") return false;
+    const epoch = item.expiry_time || item.purchase_time;
+    if (!epoch) return true;
+    const d = new Date(epoch * 1000);
+    return d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear();
+  });
+  const wins = rows.filter((item) => Number(item.profit) > 0).length; const pnl = rows.reduce((sum, item) => sum + Number(item.profit || 0), 0);
   $("#trade-count").textContent = `${rows.length} operações`; $("#win-count").textContent = `${wins} wins`; $("#loss-count").textContent = `${rows.length - wins} losses`;
   $("#metric-pnl").textContent = money.format(pnl); $("#metric-pnl").className = pnl >= 0 ? "positive" : "negative"; $("#metric-winrate").textContent = rows.length ? `${Math.round(wins / rows.length * 100)}%` : "0%";
   const target = Number(selectedBot()?.risk_config?.take_profit_daily || 0); const progress = target ? Math.max(0, Math.min(100, pnl / target * 100)) : 0; $("#risk-progress-bar").style.width = `${progress}%`; $("#risk-progress-text").textContent = `${Math.round(progress)}% da meta`;
-  $("#trade-history").innerHTML = rows.length ? rows.map((item) => `<tr><td>${formatTime(item.expiry_time || item.created_at)}</td><td>${escapeHtml(item.symbol || "—")}</td><td><span class="direction ${String(item.contract_type).toLowerCase()}">${escapeHtml(item.contract_type || "—")}</span></td><td>${price(item.entry_spot)}</td><td>${price(item.exit_spot)}</td><td>${money.format(Number(item.stake || 0))}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${Number(item.profit) >= 0 ? "WIN" : "LOSS"}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${money.format(Number(item.profit || 0))}</td></tr>`).join("") : `<tr class="empty-row"><td colspan="8">As operações encerradas aparecerão aqui em tempo real.</td></tr>`;
+  $("#trade-history").innerHTML = rows.length ? rows.map((item) => `<tr><td>${formatTime(item.expiry_time || item.created_at)}</td><td>${escapeHtml(item.symbol || "—")}</td><td><span class="direction ${String(item.contract_type).toLowerCase()}">${escapeHtml(item.contract_type || "—")}</span></td><td>${price(item.entry_spot)}</td><td>${price(item.exit_spot)}</td><td>${money.format(Number(item.stake || 0))}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${Number(item.profit) >= 0 ? "WIN" : "LOSS"}</td><td class="${Number(item.profit) >= 0 ? "positive" : "negative"}">${money.format(Number(item.profit || 0))}</td></tr>`).join("") : `<tr class="empty-row"><td colspan="8">As operações de hoje aparecerão aqui.</td></tr>`;
 }
 
 async function load(preferredId = null) {
@@ -151,7 +167,7 @@ async function refreshAccounts() {
 
 async function selectBot(id) {
   const token = ++socketToken; if (socket) socket.close(); clearTimeout(reconnectTimer);
-  store.set({ selectedId: id, connected: false }); renderBots(); renderHeader(); setConnection(false, "Conectando");
+  store.set({ selectedId: id, connected: false, snapshot: null, trades: [] }); renderBots(); renderHeader(); renderSnapshot(); setConnection(false, "Conectando");
   connectLive(id, token);
   try {
     const [fetchedSnapshot, fetchedTrades] = await Promise.all([api.snapshot(id), api.trades(id)]);
@@ -306,7 +322,7 @@ $("#confirm-real-start").addEventListener("click", () => {
   closeRealConfirmation(phrase);
 });
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
-$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; snapshot.recent_trades = []; store.set({ trades: [], snapshot }); chart.clearMarkers(); renderActiveTrade(null); renderTrades([]); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } let realTicket = ""; if (starting && account.account_type === "real") { const phrase = await confirmRealStart(bot, account); if (!phrase) return; realTicket = (await api.realConfirmation(bot.id, phrase)).ticket; } const updated = starting ? await api.startBot(bot.id, realTicket) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
+$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; store.set({ snapshot }); renderActiveTrade(null); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } let realTicket = ""; if (starting && account.account_type === "real") { const phrase = await confirmRealStart(bot, account); if (!phrase) return; realTicket = (await api.realConfirmation(bot.id, phrase)).ticket; } const updated = starting ? await api.startBot(bot.id, realTicket) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
 $("#stop-all").addEventListener("click", async () => { try { const result = await api.stopAll(); await load(); toast(`${result.stopped} robô(s) receberam parada segura.`); } catch (error) { handleError(error); } });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });
 
