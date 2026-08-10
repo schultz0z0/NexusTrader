@@ -1,0 +1,249 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from api.app import create_app
+from api.live_store import LiveStore
+from config.settings import settings
+from database.repository import DatabaseRepository
+from core.events import is_critical_event
+from nexus_trade.domain import Lane
+
+
+class NexusTradeApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.repository = DatabaseRepository(
+            str(Path(self.tempdir.name) / "nexus-control.db"),
+        )
+        self.live_store = LiveStore()
+        self.headers = {"X-API-Key": settings.DASHBOARD_API_KEY}
+        self.client_context = TestClient(
+            create_app(self.repository, self.live_store),
+            headers=self.headers,
+        )
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self):
+        self.client_context.__exit__(None, None, None)
+        self.tempdir.cleanup()
+
+    def test_nexus_control_plane_requires_dashboard_authentication(self):
+        response = self.client.get(
+            "/api/v1/nexus-trade",
+            headers={"X-API-Key": "wrong-key"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_initial_snapshot_is_versioned_and_contains_both_lanes(self):
+        response = self.client.get("/api/v1/nexus-trade")
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = response.json()["data"]
+        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertGreaterEqual(snapshot["snapshot_version"], 1)
+        self.assertEqual(snapshot["bot_id"], "nexus-trade")
+        self.assertEqual(snapshot["runtime"]["champion_enabled"], 0)
+        self.assertFalse(snapshot["emergency_stop"])
+        self.assertEqual(
+            {item["lane"] for item in snapshot["lanes"]},
+            {Lane.CHAMPION.value, Lane.TRIAL.value},
+        )
+        self.assertEqual(snapshot["lanes"][0]["version"]["status"], "CHAMPION")
+        self.assertTrue(snapshot["active_campaigns"])
+        self.assertEqual(snapshot["decisions"], [])
+        self.assertEqual(snapshot["trades"], [])
+
+    def test_mode_persists_off_demo_and_on_demo_for_runtime_refresh(self):
+        off = self.client.post(
+            "/api/v1/nexus-trade/mode",
+            json={
+                "enabled": False,
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+            },
+        )
+        on = self.client.post(
+            "/api/v1/nexus-trade/mode",
+            json={
+                "enabled": True,
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+            },
+        )
+
+        self.assertEqual(off.status_code, 200)
+        self.assertEqual(off.json()["data"]["runtime"]["champion_enabled"], 0)
+        self.assertEqual(on.status_code, 200)
+        runtime = on.json()["data"]["runtime"]
+        self.assertEqual(runtime["champion_enabled"], 1)
+        self.assertEqual(runtime["champion_account_id"], "DOT-DEMO")
+        self.assertEqual(runtime["champion_account_type"], "demo")
+        persisted = self.client.get("/api/v1/nexus-trade").json()["data"]
+        self.assertEqual(persisted["runtime"], runtime)
+        self.assertEqual(
+            self.live_store.snapshot("nexus-trade")["last_nexus_event"]["type"],
+            "nexus.runtime",
+        )
+
+    def test_real_mode_remains_fail_closed_without_server_flag_or_ticket(self):
+        previous_allow = settings.ALLOW_REAL_TRADING
+        previous_cap = settings.REAL_MAX_STAKE_USD
+        settings.ALLOW_REAL_TRADING = False
+        settings.REAL_MAX_STAKE_USD = 0.0
+        try:
+            response = self.client.post(
+                "/api/v1/nexus-trade/mode",
+                json={
+                    "enabled": True,
+                    "account_id": "ROT-REAL",
+                    "account_type": "real",
+                    "real_ticket": "untrusted-client-value",
+                },
+            )
+        finally:
+            settings.ALLOW_REAL_TRADING = previous_allow
+            settings.REAL_MAX_STAKE_USD = previous_cap
+
+        self.assertEqual(response.status_code, 403)
+        runtime = self.client.get("/api/v1/nexus-trade").json()["data"]["runtime"]
+        self.assertEqual(runtime["champion_enabled"], 0)
+        self.assertEqual(runtime["champion_account_type"], "demo")
+
+    def test_emergency_stop_is_durable_and_published_to_the_snapshot(self):
+        stopped = self.client.post(
+            "/api/v1/nexus-trade/emergency-stop",
+            json={"enabled": True},
+        )
+
+        self.assertEqual(stopped.status_code, 200)
+        snapshot = stopped.json()["data"]
+        self.assertTrue(snapshot["emergency_stop"])
+        self.assertTrue(snapshot["runtime"]["emergency_stop"])
+        self.assertEqual(snapshot["last_nexus_event"]["type"], "nexus.runtime")
+        persisted = self.client.get("/api/v1/nexus-trade").json()["data"]
+        self.assertTrue(persisted["emergency_stop"])
+
+    def test_websocket_snapshot_contains_durable_nexus_state_without_tickets(self):
+        self.client.post(
+            "/api/v1/nexus-trade/mode",
+            json={
+                "enabled": True,
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+            },
+        )
+        issued = self.client.post("/api/v1/ws-tickets/nexus-trade")
+        ticket = issued.json()["data"]["ticket"]
+
+        with self.client.websocket_connect(
+            f"/api/v1/ws/bots/nexus-trade?ticket={ticket}",
+        ) as websocket:
+            message = websocket.receive_json()
+
+        snapshot = message["data"]
+        self.assertEqual(message["type"], "snapshot")
+        self.assertEqual(snapshot["runtime"]["champion_enabled"], 1)
+        self.assertEqual(len(snapshot["lanes"]), 2)
+        serialized = json.dumps(snapshot).lower()
+        self.assertNotIn("real_ticket", serialized)
+        self.assertNotIn("ws-ticket", serialized)
+        self.assertNotIn(ticket.lower(), serialized)
+
+    def test_future_read_endpoints_return_only_persisted_data(self):
+        expected_nonempty = {
+            "versions": True,
+            "campaigns": True,
+            "reports": False,
+            "proposals": False,
+            "exports": False,
+        }
+
+        for endpoint, should_have_rows in expected_nonempty.items():
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(f"/api/v1/nexus-trade/{endpoint}")
+                self.assertEqual(response.status_code, 200)
+                data = response.json()["data"]
+                self.assertIsInstance(data, list)
+                self.assertEqual(bool(data), should_have_rows)
+                self.assertNotIn("path", json.dumps(data).lower())
+
+
+class NexusLiveStoreTests(unittest.TestCase):
+    def test_all_nexus_events_are_idempotent_versioned_and_sanitized(self):
+        store = LiveStore()
+        event_types = (
+            "nexus.runtime",
+            "nexus.decision",
+            "nexus.trade",
+            "nexus.campaign",
+            "nexus.report",
+            "nexus.trial_changed",
+            "nexus.proposal",
+            "nexus.version_changed",
+        )
+
+        for revision, event_type in enumerate(event_types, start=1):
+            event = {
+                "event_id": f"nexus-event-{revision}",
+                "schema_version": 1,
+                "snapshot_version": revision,
+                "type": event_type,
+                "bot_id": "nexus-trade",
+                "epoch": 100 + revision,
+                "payload": {
+                    "id": f"payload-{revision}",
+                    "lane": Lane.TRIAL.value,
+                    "token": "must-not-leak",
+                    "real_ticket": "must-not-leak-either",
+                },
+            }
+            sanitized = store.sanitize_event(event)
+            self.assertTrue(store.apply(sanitized))
+            self.assertFalse(store.apply(sanitized))
+
+        snapshot = store.snapshot("nexus-trade")
+        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["snapshot_version"], len(event_types))
+        self.assertEqual(len(snapshot["nexus_events"]), len(event_types))
+        self.assertEqual(
+            {event["type"] for event in snapshot["nexus_events"]},
+            set(event_types),
+        )
+        serialized = json.dumps(snapshot).lower()
+        self.assertNotIn("must-not-leak", serialized)
+        self.assertNotIn("real_ticket", serialized)
+        self.assertNotIn('"token"', serialized)
+
+        stale = {
+            "event_id": "stale-runtime",
+            "schema_version": 1,
+            "snapshot_version": 1,
+            "type": "nexus.runtime",
+            "bot_id": "nexus-trade",
+            "payload": {"runtime": {"champion_enabled": 1}},
+        }
+        self.assertFalse(store.apply(stale))
+        self.assertEqual(store.snapshot("nexus-trade")["snapshot_version"], len(event_types))
+
+    def test_nexus_events_are_critical_control_plane_events(self):
+        for event_type in (
+            "nexus.runtime",
+            "nexus.decision",
+            "nexus.trade",
+            "nexus.campaign",
+            "nexus.report",
+            "nexus.trial_changed",
+            "nexus.proposal",
+            "nexus.version_changed",
+        ):
+            with self.subTest(event_type=event_type):
+                self.assertTrue(is_critical_event({"type": event_type}))
+
+
+if __name__ == "__main__":
+    unittest.main()

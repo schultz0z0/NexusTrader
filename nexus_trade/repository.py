@@ -195,3 +195,148 @@ class NexusTradeRepository:
     async def get_runtime_snapshot(self) -> dict:
         async with self._connection() as db:
             return await self._snapshot_from_connection(db)
+
+    async def set_champion_mode(
+        self, *, enabled: bool, account_id: str, account_type: str,
+    ) -> dict:
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be boolean")
+        normalized_account_id = str(account_id or "").strip()
+        normalized_account_type = str(account_type or "").lower()
+        if normalized_account_type not in {"demo", "real"}:
+            raise ValueError("Champion account type must be demo or real")
+        if enabled and not normalized_account_id:
+            raise ValueError("Champion ON requires a selected account")
+        if not enabled and normalized_account_type != "demo":
+            raise ValueError("Champion OFF must remain on DEMO")
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    """
+                    UPDATE nexus_runtime
+                    SET champion_enabled = ?, champion_account_id = ?,
+                        champion_account_type = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE bot_id = ?
+                    """,
+                    (
+                        int(enabled),
+                        normalized_account_id,
+                        normalized_account_type,
+                        NEXUS_TRADE_BOT_ID,
+                    ),
+                )
+                await self._advance_snapshot_version(db)
+                snapshot = await self._snapshot_from_connection(db)
+                await db.commit()
+                return snapshot
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def set_emergency_stop(self, enabled: bool) -> dict:
+        if type(enabled) is not bool:
+            raise TypeError("emergency_stop must be boolean")
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    """
+                    UPDATE nexus_runtime
+                    SET emergency_stop = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE bot_id = ?
+                    """,
+                    (int(enabled), NEXUS_TRADE_BOT_ID),
+                )
+                await self._advance_snapshot_version(db)
+                snapshot = await self._snapshot_from_connection(db)
+                await db.commit()
+                return snapshot
+            except Exception:
+                await db.rollback()
+                raise
+
+    @staticmethod
+    async def _advance_snapshot_version(db: aiosqlite.Connection) -> None:
+        cursor = await db.execute(
+            """
+            UPDATE bot_instances
+            SET config_revision = config_revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND strategy_id = 'nexus_trade'
+            """,
+            (NEXUS_TRADE_BOT_ID,),
+        )
+        if cursor.rowcount != 1:
+            raise NexusTradeSingletonError("NexusTrade singleton is unavailable")
+
+    async def get_control_snapshot(self) -> dict:
+        durable = await self.get_runtime_snapshot()
+        decisions = await self._list_json_rows(
+            """
+            SELECT * FROM nexus_decisions
+            ORDER BY created_at DESC, id DESC LIMIT 100
+            """,
+            json_fields=("payload",),
+        )
+        trades = await self._list_json_rows(
+            """
+            SELECT * FROM trades WHERE bot_id = ?
+            ORDER BY id DESC LIMIT 100
+            """,
+            params=(NEXUS_TRADE_BOT_ID,),
+            json_fields=("metadata",),
+        )
+        runtime = durable["runtime"]
+        return {
+            "schema_version": 1,
+            "snapshot_version": int(durable["bot"].get("config_revision") or 1),
+            "bot_id": NEXUS_TRADE_BOT_ID,
+            "runtime": runtime,
+            "emergency_stop": bool(runtime.get("emergency_stop", 0)),
+            "lanes": durable["lanes"],
+            "active_campaigns": durable["active_campaigns"],
+            "decisions": decisions,
+            "trades": trades,
+            "reports": await self.list_reports(),
+            "proposals": await self.list_proposals(),
+        }
+
+    async def list_versions(self) -> list:
+        return await self._list_json_rows(
+            "SELECT * FROM nexus_versions ORDER BY created_at, id",
+            json_fields=("snapshot",),
+        )
+
+    async def list_campaigns(self) -> list:
+        return await self._list_json_rows(
+            "SELECT * FROM nexus_campaigns ORDER BY started_at, id",
+        )
+
+    async def list_reports(self) -> list:
+        return await self._list_json_rows(
+            "SELECT * FROM nexus_reports ORDER BY created_at DESC, id DESC",
+            json_fields=("snapshot",),
+        )
+
+    async def list_proposals(self) -> list:
+        return await self._list_json_rows(
+            "SELECT * FROM nexus_proposals ORDER BY created_at DESC, id DESC",
+            json_fields=("payload",),
+        )
+
+    async def _list_json_rows(
+        self, query: str, *, params=(), json_fields=(),
+    ) -> list:
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cursor:
+                rows = [dict(row) for row in await cursor.fetchall()]
+        for row in rows:
+            for field in json_fields:
+                raw_value = row.get(field)
+                if raw_value is not None:
+                    row[field] = json.loads(raw_value)
+        return rows

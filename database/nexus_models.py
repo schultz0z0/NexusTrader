@@ -35,6 +35,7 @@ class NexusModels:
             champion_enabled INTEGER NOT NULL DEFAULT 0 CHECK (champion_enabled IN (0, 1)),
             champion_account_id TEXT NOT NULL DEFAULT '',
             champion_account_type TEXT NOT NULL DEFAULT 'demo' CHECK (champion_account_type IN ('demo', 'real')),
+            emergency_stop INTEGER NOT NULL DEFAULT 0 CHECK (emergency_stop IN (0, 1)),
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(bot_id) REFERENCES bot_instances(id),
             FOREIGN KEY(champion_version_id) REFERENCES nexus_versions(id),
@@ -174,11 +175,13 @@ class NexusModels:
         CREATE TRIGGER IF NOT EXISTS trg_nexus_runtime_values_insert
         BEFORE INSERT ON nexus_runtime
         WHEN NEW.bot_id != 'nexus-trade' OR NEW.champion_enabled NOT IN (0, 1)
+          OR NEW.emergency_stop NOT IN (0, 1)
           OR NEW.champion_account_type NOT IN ('demo', 'real')
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus runtime values'); END;
         CREATE TRIGGER IF NOT EXISTS trg_nexus_runtime_values_update
-        BEFORE UPDATE OF bot_id, champion_enabled, champion_account_type ON nexus_runtime
+        BEFORE UPDATE OF bot_id, champion_enabled, champion_account_type, emergency_stop ON nexus_runtime
         WHEN NEW.bot_id != 'nexus-trade' OR NEW.champion_enabled NOT IN (0, 1)
+          OR NEW.emergency_stop NOT IN (0, 1)
           OR NEW.champion_account_type NOT IN ('demo', 'real')
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus runtime values'); END;
 

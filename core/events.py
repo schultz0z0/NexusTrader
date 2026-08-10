@@ -9,6 +9,14 @@ CRITICAL_EVENT_TYPES = {
     "trade.closed",
     "risk.blocked",
     "system.error",
+    "nexus.runtime",
+    "nexus.decision",
+    "nexus.trade",
+    "nexus.campaign",
+    "nexus.report",
+    "nexus.trial_changed",
+    "nexus.proposal",
+    "nexus.version_changed",
 }
 
 

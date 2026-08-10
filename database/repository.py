@@ -41,6 +41,7 @@ class DatabaseRepository:
             await db.executescript(DatabaseModels.create_tables_sql())
             await self._migrate_trade_columns(db)
             await self._migrate_nexus_tick_segments(db)
+            await self._migrate_nexus_runtime(db)
             await db.executescript(NexusModels.create_tables_sql())
             await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
@@ -281,6 +282,23 @@ class DatabaseRepository:
             await db.execute("ROLLBACK TO SAVEPOINT rebuild_nexus_tick_segments")
             await db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
             raise
+
+    @staticmethod
+    async def _migrate_nexus_runtime(db):
+        """Add Task 6 control state without replacing an existing runtime row."""
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nexus_runtime'",
+        ) as cursor:
+            if await cursor.fetchone() is None:
+                return
+        async with db.execute("PRAGMA table_info(nexus_runtime)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "emergency_stop" not in columns:
+            await db.execute(
+                "ALTER TABLE nexus_runtime ADD COLUMN emergency_stop INTEGER NOT NULL DEFAULT 0 CHECK (emergency_stop IN (0, 1))",
+            )
+        await db.execute("DROP TRIGGER IF EXISTS trg_nexus_runtime_values_insert")
+        await db.execute("DROP TRIGGER IF EXISTS trg_nexus_runtime_values_update")
 
     async def _ensure_default_bot(self, db):
         async with db.execute("SELECT COUNT(*) FROM bot_instances") as cursor:
@@ -1146,6 +1164,36 @@ class DatabaseRepository:
 
     async def get_nexus_runtime_snapshot(self) -> dict:
         return await NexusTradeRepository(self.db_path).get_runtime_snapshot()
+
+    async def set_nexus_champion_mode(
+        self, *, enabled: bool, account_id: str, account_type: str,
+    ) -> dict:
+        return await NexusTradeRepository(self.db_path).set_champion_mode(
+            enabled=enabled,
+            account_id=account_id,
+            account_type=account_type,
+        )
+
+    async def set_nexus_emergency_stop(self, enabled: bool) -> dict:
+        return await NexusTradeRepository(self.db_path).set_emergency_stop(enabled)
+
+    async def get_nexus_control_snapshot(self) -> dict:
+        return await NexusTradeRepository(self.db_path).get_control_snapshot()
+
+    async def list_nexus_versions(self) -> list:
+        return await NexusTradeRepository(self.db_path).list_versions()
+
+    async def list_nexus_campaigns(self) -> list:
+        return await NexusTradeRepository(self.db_path).list_campaigns()
+
+    async def list_nexus_reports(self) -> list:
+        return await NexusTradeRepository(self.db_path).list_reports()
+
+    async def list_nexus_proposals(self) -> list:
+        return await NexusTradeRepository(self.db_path).list_proposals()
+
+    async def list_nexus_exports(self) -> list:
+        return []
 
     async def get_order_intent(self, intent_id: str):
         async with self._connection() as db:

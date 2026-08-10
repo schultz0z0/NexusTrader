@@ -1336,6 +1336,29 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.shared.emergency_stop)
         self.assertTrue(self.separate.emergency_stop)
 
+    def test_persisted_emergency_stop_is_applied_before_a_mode_change_can_defer(self):
+        runtime = self.runtime(restored_lane_states={
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="in-flight",
+                contract_id=701,
+            ).to_dict(),
+        })
+        stopped_snapshot = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "emergency_stop": 1,
+            },
+        }
+
+        applied = runtime.apply_champion_mode(stopped_snapshot)
+
+        self.assertFalse(applied)
+        self.assertTrue(self.shared.emergency_stop)
+        self.assertTrue(self.separate.emergency_stop)
+
     async def test_default_bootstrap_uses_one_r100_m1_stream_and_demo_dispatcher(self):
         connections = []
         markets = []

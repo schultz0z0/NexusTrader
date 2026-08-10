@@ -113,6 +113,34 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started.json()["data"]["desired_state"], "RUNNING")
         self.assertEqual(stopped.json()["data"]["desired_state"], "STOPPED")
 
+    def test_nexus_trade_singleton_is_excluded_from_common_crud(self):
+        payload = {
+            "name": "Reserved",
+            "account_id": "DOT100",
+            "account_type": "demo",
+            "strategy_id": "nexus_trade",
+            "symbol": "R_100",
+        }
+
+        created = self.client.post("/api/v1/bots", json=payload)
+        updated = self.client.put(
+            "/api/v1/bots/nexus-trade",
+            json={
+                "name": "Mutated singleton",
+                "account_id": "DOT100",
+                "account_type": "demo",
+                "strategy_id": "donchian",
+                "symbol": "R_75",
+            },
+        )
+        deleted = self.client.delete("/api/v1/bots/nexus-trade")
+        strategies = self.client.get("/api/v1/strategies").json()["data"]
+
+        self.assertEqual(created.status_code, 422)
+        self.assertEqual(updated.status_code, 409)
+        self.assertEqual(deleted.status_code, 409)
+        self.assertNotIn("nexus_trade", {item["id"] for item in strategies})
+
     def test_server_side_stop_all_persists_emergency_stop_for_every_bot(self):
         first = self.client.post("/api/v1/bots", json={
             "name": "First", "account_id": "DOT100", "account_type": "demo",

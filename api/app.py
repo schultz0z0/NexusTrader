@@ -14,6 +14,7 @@ from api.routes.bots import router as bots_router
 from api.routes.bot_control import router as legacy_bot_router
 from api.routes.config import router as legacy_config_router
 from api.routes.internal import router as internal_router
+from api.routes.nexus_trade import router as nexus_trade_router
 from api.routes.trades import router as legacy_trades_router
 from api.websocket_manager import ws_manager
 from api.ws_tickets import WebSocketTicketStore
@@ -44,6 +45,8 @@ def create_app(repository=None, live_store=None, account_provider=None):
     @asynccontextmanager
     async def lifespan(application):
         await repository.init_db()
+        nexus_snapshot = await repository.get_nexus_control_snapshot()
+        live_store.hydrate_nexus(nexus_snapshot)
         yield
 
     application = FastAPI(
@@ -83,6 +86,7 @@ def create_app(repository=None, live_store=None, account_provider=None):
     application.include_router(legacy_bot_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_config_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(legacy_trades_router, dependencies=[Depends(require_dashboard_key)])
+    application.include_router(nexus_trade_router, dependencies=[Depends(require_dashboard_key)])
     application.include_router(internal_router, include_in_schema=False)
 
     @application.get("/api/v1/health/live", include_in_schema=False)
@@ -145,6 +149,8 @@ def create_app(repository=None, live_store=None, account_provider=None):
         if not ticket_store.consume(ticket, bot_id):
             await websocket.close(code=4401)
             return
+        if bot_id == "nexus-trade":
+            live_store.hydrate_nexus(await repository.get_nexus_control_snapshot())
         await ws_manager.connect(bot_id, websocket, live_store.snapshot(bot_id))
         try:
             while True:

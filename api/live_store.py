@@ -11,10 +11,13 @@ class LiveStore:
         self._bots = {}
         self._event_order = deque(maxlen=event_limit)
         self._event_ids = set()
+        self.nexus_event_limit = min(int(event_limit), 1000)
 
     def _state(self, bot_id):
         return self._bots.setdefault(bot_id, {
             "bot_id": bot_id,
+            "schema_version": 1,
+            "snapshot_version": 0,
             "runtime": {"status": "STOPPED", "error": None},
             "market": {"mode": "candles", "symbol": None, "timeframe_seconds": 60, "points": []},
             "last_tick": None,
@@ -23,7 +26,61 @@ class LiveStore:
             "last_event_epoch": None,
         })
 
+    @classmethod
+    def sanitize_event(cls, event):
+        return cls._redact(deepcopy(event))
+
+    @classmethod
+    def _redact(cls, value):
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, item in value.items():
+                normalized = str(key).lower()
+                sensitive = (
+                    normalized in {
+                        "token", "api_key", "password", "authorization",
+                        "credential", "credentials", "otp", "path",
+                        "file_path", "local_path", "real_ticket", "ticket",
+                    }
+                    or "ticket" in normalized
+                    or "secret" in normalized
+                    or normalized.endswith("_token")
+                    or normalized.endswith("_path")
+                )
+                if not sensitive:
+                    sanitized[key] = cls._redact(item)
+            return sanitized
+        if isinstance(value, list):
+            return [cls._redact(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._redact(item) for item in value]
+        return value
+
+    def hydrate_nexus(self, durable_snapshot):
+        durable = self._redact(deepcopy(durable_snapshot or {}))
+        state = self._state("nexus-trade")
+        state["schema_version"] = int(durable.get("schema_version", 1))
+        state["snapshot_version"] = max(
+            int(state.get("snapshot_version", 0)),
+            int(durable.get("snapshot_version", 0)),
+        )
+        for key in (
+            "runtime", "lanes", "active_campaigns", "decisions", "trades",
+            "reports", "proposals",
+        ):
+            if key in durable:
+                state[key] = deepcopy(durable[key])
+        state["emergency_stop"] = bool(
+            durable.get(
+                "emergency_stop",
+                (durable.get("runtime") or {}).get("emergency_stop", False),
+            ),
+        )
+        state.setdefault("nexus_events", [])
+        return self.snapshot("nexus-trade")
+
     def apply(self, event):
+        event = self.sanitize_event(event)
         event_id = event.get("event_id")
         if event_id and event_id in self._event_ids:
             return False
@@ -35,6 +92,17 @@ class LiveStore:
 
         state = self._state(event["bot_id"])
         event_type = event.get("type")
+        if event_type in {
+            "nexus.runtime",
+            "nexus.decision",
+            "nexus.trade",
+            "nexus.campaign",
+            "nexus.report",
+            "nexus.trial_changed",
+            "nexus.proposal",
+            "nexus.version_changed",
+        }:
+            return self._apply_nexus_event(state, event)
         if event_type == "market.tick":
             market = state["market"]
             event_symbol = event.get("symbol")
@@ -124,5 +192,71 @@ class LiveStore:
                 del state["recent_trades"][self.trade_limit:]
         return True
 
+    def _apply_nexus_event(self, state, event):
+        event_revision = int(
+            event.get("snapshot_version", state.get("snapshot_version", 0) + 1),
+        )
+        if event_revision < int(state.get("snapshot_version", 0)):
+            return False
+        state["schema_version"] = int(event.get("schema_version", 1))
+        state["snapshot_version"] = max(
+            event_revision,
+            int(state.get("snapshot_version", 0)),
+        )
+        state["last_event_epoch"] = event.get("epoch")
+        state["last_nexus_event"] = deepcopy(event)
+        events = state.setdefault("nexus_events", [])
+        events.append(deepcopy(event))
+        del events[:-self.nexus_event_limit]
+
+        payload = deepcopy(event.get("payload") or {})
+        event_type = event["type"]
+        if event_type == "nexus.runtime":
+            runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else payload
+            state.setdefault("runtime", {}).update(runtime)
+            emergency = payload.get(
+                "emergency_stop",
+                state["runtime"].get("emergency_stop", state.get("emergency_stop", False)),
+            )
+            state["emergency_stop"] = bool(emergency)
+            state["runtime"]["emergency_stop"] = int(bool(emergency))
+        elif event_type == "nexus.decision":
+            self._upsert(state.setdefault("decisions", []), payload, ("id", "decision_id"))
+        elif event_type == "nexus.trade":
+            self._upsert(state.setdefault("trades", []), payload, ("id", "contract_id"))
+        elif event_type == "nexus.campaign":
+            self._upsert(state.setdefault("campaigns", []), payload, ("id",))
+            active = state.setdefault("active_campaigns", [])
+            if payload.get("status") == "ACTIVE":
+                self._upsert(active, payload, ("id",))
+            elif payload.get("id") is not None:
+                active[:] = [item for item in active if item.get("id") != payload["id"]]
+        elif event_type == "nexus.report":
+            self._upsert(state.setdefault("reports", []), payload, ("id",))
+        elif event_type == "nexus.proposal":
+            self._upsert(state.setdefault("proposals", []), payload, ("id",))
+        elif event_type == "nexus.trial_changed":
+            state["trial_change"] = payload
+        elif event_type == "nexus.version_changed":
+            state["version_change"] = payload
+            if isinstance(payload.get("lanes"), list):
+                state["lanes"] = payload["lanes"]
+            elif payload.get("lane") and isinstance(payload.get("version"), dict):
+                self._upsert(state.setdefault("lanes", []), payload, ("lane",))
+        return True
+
+    @staticmethod
+    def _upsert(items, payload, identity_keys):
+        identity_key = next(
+            (key for key in identity_keys if payload.get(key) is not None),
+            None,
+        )
+        if identity_key is None:
+            items.append(payload)
+            return
+        identity = payload[identity_key]
+        items[:] = [item for item in items if item.get(identity_key) != identity]
+        items.insert(0, payload)
+
     def snapshot(self, bot_id):
-        return deepcopy(self._state(bot_id))
+        return self._redact(deepcopy(self._state(bot_id)))

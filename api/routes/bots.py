@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from config.settings import settings
+from nexus_trade.constants import NEXUS_TRADE_BOT_ID
 from strategies.nexus_speed import ALLOWED_ADX_THRESHOLDS
 
 router = APIRouter(prefix="/api/v1/bots", tags=["Bots"])
@@ -171,6 +172,8 @@ async def get_bot(bot_id: str, request: Request):
 
 @router.put("/{bot_id}")
 async def update_bot(bot_id: str, payload: BotPayload, request: Request):
+    if bot_id == NEXUS_TRADE_BOT_ID:
+        raise HTTPException(409, "NexusTrade e gerenciado somente pelo control plane dedicado")
     if not await _repo(request).get_bot(bot_id):
         raise HTTPException(404, "Robo nao encontrado")
     updated = await _repo(request).update_bot(bot_id, payload.model_dump())
@@ -179,6 +182,8 @@ async def update_bot(bot_id: str, payload: BotPayload, request: Request):
 
 @router.delete("/{bot_id}", status_code=204)
 async def delete_bot(bot_id: str, request: Request):
+    if bot_id == NEXUS_TRADE_BOT_ID:
+        raise HTTPException(409, "NexusTrade e um singleton protegido")
     bot = await _repo(request).get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "Robo nao encontrado")
@@ -193,6 +198,8 @@ async def confirm_real_bot(
     payload: RealConfirmationPayload,
     request: Request,
 ):
+    if bot_id == NEXUS_TRADE_BOT_ID:
+        raise HTTPException(409, "Use a confirmacao REAL dedicada do NexusTrade")
     bot = await _repo(request).get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "Robo nao encontrado")
@@ -213,6 +220,8 @@ async def confirm_real_bot(
 
 @router.post("/{bot_id}/start")
 async def start_bot(bot_id: str, request: Request, payload: StartPayload = None):
+    if bot_id == NEXUS_TRADE_BOT_ID:
+        raise HTTPException(409, "Use o modo dedicado do NexusTrade")
     bot = await _repo(request).get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "Robo nao encontrado")
@@ -236,6 +245,8 @@ async def start_bot(bot_id: str, request: Request, payload: StartPayload = None)
 
 @router.post("/{bot_id}/stop")
 async def stop_bot(bot_id: str, request: Request):
+    if bot_id == NEXUS_TRADE_BOT_ID:
+        raise HTTPException(409, "Use o modo dedicado do NexusTrade")
     if not await _repo(request).get_bot(bot_id):
         raise HTTPException(404, "Robo nao encontrado")
     updated = await _repo(request).set_desired_state(bot_id, "STOPPED")

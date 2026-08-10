@@ -371,6 +371,11 @@ class NexusTradeRuntime:
 
     def apply_champion_mode(self, snapshot: dict) -> bool:
         runtime = snapshot.get("runtime") or {}
+        if "emergency_stop" in runtime:
+            emergency_stop = runtime["emergency_stop"]
+            if emergency_stop not in {0, 1, False, True}:
+                raise ValueError("emergency_stop must be boolean")
+            self.set_emergency_stop(bool(emergency_stop))
         lanes = snapshot.get("lanes") or []
         next_versions = {
             Lane(item["lane"]): (item.get("version") or {}).get("id")
@@ -428,6 +433,7 @@ class NexusTradeRuntime:
                 raise ValueError(
                     "Champion dispatcher identity mismatch for current configuration",
                 )
+            desired_dispatcher.set_emergency_stop(self._emergency_stop)
             self._champion_dispatchers[desired_identity] = desired_dispatcher
 
         route_changes = (
