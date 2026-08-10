@@ -12,6 +12,23 @@ from trading.ownership import (
 )
 
 
+async def provision_order_test_bots(repository):
+    for bot_id in ("bot-a", "bot-b"):
+        await repository.create_bot({
+            "id": bot_id,
+            "name": f"Order ownership {bot_id}",
+            "strategy_id": "donchian",
+            "account_id": "DOT100",
+            "account_type": "demo",
+            "symbol": "R_75",
+            "timeframe_seconds": 60,
+            "duration": 2,
+            "duration_unit": "m",
+            "initial_stake": 1.0,
+            "money_management": "fixed",
+        })
+
+
 class FakeConnection:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -27,6 +44,7 @@ class OrderIntentRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.repository = DatabaseRepository(str(Path(self.tempdir.name) / "orders.db"))
         await self.repository.init_db()
+        await provision_order_test_bots(self.repository)
 
     async def asyncTearDown(self):
         self.tempdir.cleanup()
@@ -114,6 +132,7 @@ class OrderReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.repository = DatabaseRepository(str(Path(self.tempdir.name) / "reconcile.db"))
         await self.repository.init_db()
+        await provision_order_test_bots(self.repository)
         self.intent = await self.repository.create_order_intent(
             OrderIntentRepositoryTests.payload()
         )

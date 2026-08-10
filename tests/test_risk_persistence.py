@@ -23,6 +23,7 @@ class PersistentRiskStateTests(unittest.IsolatedAsyncioTestCase):
             "money_config": {"multiplier": 2.0, "max_levels": 3},
             "risk_config": {"max_consecutive_losses": 3, "cooldown_minutes": 15},
         })
+        await self.repository.create_session("session-a")
 
     async def asyncTearDown(self):
         self.tempdir.cleanup()
