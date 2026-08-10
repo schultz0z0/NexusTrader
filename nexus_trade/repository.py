@@ -1,5 +1,6 @@
 import hashlib
 import json
+from contextlib import asynccontextmanager
 
 import aiosqlite
 
@@ -23,6 +24,12 @@ class NexusTradeRepository:
     def __init__(self, db_path: str):
         self.db_path = db_path
 
+    @asynccontextmanager
+    async def _connection(self):
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            yield db
+
     @staticmethod
     def champion_v1_snapshot() -> dict:
         return {
@@ -36,16 +43,17 @@ class NexusTradeRepository:
     @classmethod
     async def ensure_singleton_in_transaction(cls, db: aiosqlite.Connection) -> dict:
         db.row_factory = aiosqlite.Row
-        await db.executescript(NexusModels.create_tables_sql())
         async with db.execute(
-            "SELECT id, strategy_id FROM bot_instances WHERE id = ? OR strategy_id = 'nexus_trade'",
+            "SELECT * FROM bot_instances WHERE id = ? OR strategy_id = 'nexus_trade'",
             (NEXUS_TRADE_BOT_ID,),
         ) as cursor:
             existing_bots = await cursor.fetchall()
         if any(row["id"] != NEXUS_TRADE_BOT_ID or row["strategy_id"] != "nexus_trade" for row in existing_bots):
             raise NexusTradeSingletonError("NexusTrade must use the protected nexus-trade identity")
+        if existing_bots:
+            cls._validate_canonical_bot(existing_bots[0])
 
-        await db.execute(
+        cursor = await db.execute(
             """
             INSERT INTO bot_instances (
                 id, name, strategy_id, strategy_config, account_id, account_type,
@@ -57,12 +65,11 @@ class NexusTradeRepository:
             (NEXUS_TRADE_BOT_ID, NEXUS_SYMBOL, NEXUS_TIMEFRAME_SECONDS,
              NEXUS_DURATION_SECONDS, NEXUS_DURATION_UNIT, NEXUS_DEMO_STAKE),
         )
-
         snapshot = cls.champion_v1_snapshot()
         encoded_snapshot = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         version_hash = hashlib.sha256(encoded_snapshot.encode("utf-8")).hexdigest()
         version_id = f"nexus-v1-{version_hash[:12]}"
-        await db.execute(
+        cursor = await db.execute(
             """
             INSERT INTO nexus_versions (id, name, status, version_hash, snapshot)
             VALUES (?, 'Champion V1', ?, ?, ?)
@@ -70,6 +77,16 @@ class NexusTradeRepository:
             """,
             (version_id, VersionStatus.CHAMPION.value, version_hash, encoded_snapshot),
         )
+        if cursor.rowcount == 0:
+            async with db.execute("SELECT * FROM nexus_versions WHERE version_hash = ?", (version_hash,)) as version_cursor:
+                existing_version = await version_cursor.fetchone()
+            if existing_version is None or (
+                existing_version["id"] != version_id
+                or existing_version["name"] != "Champion V1"
+                or existing_version["status"] != VersionStatus.CHAMPION.value
+                or existing_version["snapshot"] != encoded_snapshot
+            ):
+                raise NexusTradeSingletonError("Champion V1 snapshot is corrupted")
         async with db.execute("SELECT id FROM nexus_versions WHERE version_hash = ?", (version_hash,)) as cursor:
             version_id = (await cursor.fetchone())["id"]
 
@@ -95,8 +112,9 @@ class NexusTradeRepository:
         return await cls._snapshot_from_connection(db)
 
     async def ensure_singleton(self) -> dict:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
+            await db.executescript(NexusModels.create_tables_sql())
             await db.execute("BEGIN IMMEDIATE")
             try:
                 snapshot = await self.ensure_singleton_in_transaction(db)
@@ -105,6 +123,30 @@ class NexusTradeRepository:
             except Exception:
                 await db.rollback()
                 raise
+
+    @staticmethod
+    def _validate_canonical_bot(bot: aiosqlite.Row) -> None:
+        expected = {
+            "id": NEXUS_TRADE_BOT_ID,
+            "name": "NexusTrade",
+            "strategy_id": "nexus_trade",
+            "strategy_config": "{}",
+            "account_id": "",
+            "account_type": "demo",
+            "symbol": NEXUS_SYMBOL,
+            "timeframe_seconds": NEXUS_TIMEFRAME_SECONDS,
+            "duration": NEXUS_DURATION_SECONDS,
+            "duration_unit": NEXUS_DURATION_UNIT,
+            "initial_stake": NEXUS_DEMO_STAKE,
+            "money_management": "fixed",
+            "money_config": "{}",
+            "risk_config": "{}",
+        }
+        mismatches = [key for key, value in expected.items() if bot[key] != value]
+        if mismatches:
+            raise NexusTradeSingletonError(
+                f"NexusTrade singleton has incompatible fields: {', '.join(mismatches)}"
+            )
 
     @classmethod
     async def _snapshot_from_connection(cls, db: aiosqlite.Connection) -> dict:
@@ -134,5 +176,5 @@ class NexusTradeRepository:
         return {"bot": dict(bot), "runtime": dict(runtime), "lanes": lanes, "active_campaigns": active_campaigns}
 
     async def get_runtime_snapshot(self) -> dict:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             return await self._snapshot_from_connection(db)

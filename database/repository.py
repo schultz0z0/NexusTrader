@@ -2,6 +2,7 @@ import aiosqlite
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from config.settings import settings
@@ -25,26 +26,36 @@ class DatabaseRepository:
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
 
-    async def init_db(self):
+    @asynccontextmanager
+    async def _connection(self):
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            yield db
+
+    async def init_db(self):
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA busy_timeout=30000;")
             await db.executescript(DatabaseModels.create_tables_sql())
             await self._migrate_trade_columns(db)
             await db.executescript(NexusModels.create_tables_sql())
-            
-            # Insere configuracao inicial de risco se tabela estiver vazia
-            async with db.execute("SELECT COUNT(*) FROM risk_configs") as cursor:
-                count = (await cursor.fetchone())[0]
-                if count == 0:
-                    await db.execute("""
-                        INSERT INTO risk_configs (initial_stake, stop_loss_daily, take_profit_daily, max_daily_trades, max_single_stake, max_consecutive_losses, cooldown_minutes)
-                        VALUES (1.0, 50.0, 100.0, 50, 20.0, 3, 15)
-                    """)
-            await self._ensure_default_bot(db)
-            await self._backfill_risk_states(db)
-            await NexusTradeRepository.ensure_singleton_in_transaction(db)
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # Insere configuracao inicial de risco se tabela estiver vazia
+                async with db.execute("SELECT COUNT(*) FROM risk_configs") as cursor:
+                    count = (await cursor.fetchone())[0]
+                    if count == 0:
+                        await db.execute("""
+                            INSERT INTO risk_configs (initial_stake, stop_loss_daily, take_profit_daily, max_daily_trades, max_single_stake, max_consecutive_losses, cooldown_minutes)
+                            VALUES (1.0, 50.0, 100.0, 50, 20.0, 3, 15)
+                        """)
+                await self._ensure_default_bot(db)
+                await self._backfill_risk_states(db)
+                await NexusTradeRepository.ensure_singleton_in_transaction(db)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
 
     async def _migrate_trade_columns(self, db):
@@ -184,7 +195,7 @@ class DatabaseRepository:
         return data
 
     async def get_risk_config(self) -> dict:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM risk_configs ORDER BY id DESC LIMIT 1") as cursor:
@@ -202,7 +213,7 @@ class DatabaseRepository:
                 }
 
     async def update_risk_config(self, config: dict):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO risk_configs (initial_stake, stop_loss_daily, take_profit_daily, max_daily_trades, max_single_stake, max_consecutive_losses, cooldown_minutes)
@@ -220,7 +231,7 @@ class DatabaseRepository:
             logger.info("Configuracao de risco atualizada dinamicamente no BD.")
 
     async def get_bot_settings(self) -> dict:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM bot_settings ORDER BY id DESC LIMIT 1") as cursor:
@@ -235,7 +246,7 @@ class DatabaseRepository:
                 }
 
     async def update_bot_settings(self, settings: dict):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO bot_settings (account_id, account_type, symbol, strategy)
@@ -250,7 +261,7 @@ class DatabaseRepository:
             logger.info("Configuracao do robo atualizada dinamicamente no BD.")
 
     async def create_session(self, session_id: str):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute(
                 "INSERT INTO sessions (id) VALUES (?)",
@@ -259,7 +270,7 @@ class DatabaseRepository:
             await db.commit()
 
     async def close_session(self, session_id: str, status: str = "closed"):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute(
                 "UPDATE sessions SET end_time = CURRENT_TIMESTAMP, status = ? WHERE id = ?",
                 (status, session_id),
@@ -267,7 +278,7 @@ class DatabaseRepository:
             await db.commit()
 
     async def save_trade(self, trade_data: dict):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("""
                 INSERT INTO trades (session_id, strategy_name, symbol, contract_type, contract_id, stake, payout, profit, result)
@@ -286,24 +297,24 @@ class DatabaseRepository:
             await db.commit()
 
     async def list_bots(self) -> list:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM bot_instances ORDER BY created_at, name") as cursor:
                 return [self._decode_bot(row) for row in await cursor.fetchall()]
 
     async def get_bot(self, bot_id: str):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM bot_instances WHERE id = ?", (bot_id,)) as cursor:
                 return self._decode_bot(await cursor.fetchone())
 
     async def delete_bot(self, bot_id: str):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("DELETE FROM bot_instances WHERE id = ?", (bot_id,))
             await db.commit()
 
     async def get_default_bot(self):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM bot_instances ORDER BY created_at LIMIT 1") as cursor:
                 return self._decode_bot(await cursor.fetchone())
@@ -328,7 +339,7 @@ class DatabaseRepository:
             data.get("desired_state", "STOPPED"),
             data.get("runtime_state", "STOPPED"),
         )
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
             await db.execute("""
                 INSERT INTO bot_instances (
@@ -357,7 +368,7 @@ class DatabaseRepository:
             return await self.get_bot(bot_id)
         assignments.extend(["config_revision = config_revision + 1", "updated_at = CURRENT_TIMESTAMP"])
         values.append(bot_id)
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute(
                 f"UPDATE bot_instances SET {', '.join(assignments)} WHERE id = ?",
                 values,
@@ -369,7 +380,7 @@ class DatabaseRepository:
         return await self.update_bot(bot_id, {"desired_state": state})
 
     async def stop_all_bots(self) -> int:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             cursor = await db.execute("""
                 UPDATE bot_instances
                 SET desired_state = 'STOPPED', config_revision = config_revision + 1,
@@ -380,7 +391,7 @@ class DatabaseRepository:
             return max(0, int(cursor.rowcount))
 
     async def set_runtime_state(self, bot_id: str, state: str, error: str = None):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("""
                 UPDATE bot_instances
                 SET runtime_state = ?, last_error = ?, heartbeat_at = CURRENT_TIMESTAMP,
@@ -391,7 +402,7 @@ class DatabaseRepository:
         return await self.get_bot(bot_id)
 
     async def touch_bot_heartbeat(self, bot_id: str):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute(
                 "UPDATE bot_instances SET heartbeat_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (bot_id,),
@@ -405,7 +416,7 @@ class DatabaseRepository:
             "entry_spot", "exit_spot", "purchase_time", "expiry_time",
         )
         values = [trade_data.get(column) for column in columns]
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
             updated = 0
             if trade_data.get("bot_id") and trade_data.get("contract_id") is not None:
@@ -443,7 +454,7 @@ class DatabaseRepository:
             params.append(bot_id)
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
@@ -455,7 +466,7 @@ class DatabaseRepository:
         end_local = start_local + timedelta(days=1)
         start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
         end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             async with db.execute(
                 """
                 SELECT COALESCE(SUM(profit), 0.0), COUNT(*)
@@ -470,7 +481,7 @@ class DatabaseRepository:
 
     async def get_daily_stats(self) -> dict:
         """Calcula PnL e quantidade de trades do dia atual."""
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA journal_mode=WAL;")
             async with db.execute("""
                 SELECT 
@@ -511,7 +522,7 @@ class DatabaseRepository:
             int(data.get("signal_epoch") or 0),
             json.dumps(data.get("metadata") or {}),
         )
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
             try:
                 await db.execute("BEGIN IMMEDIATE")
@@ -533,7 +544,7 @@ class DatabaseRepository:
         return await self.get_order_intent(intent_id)
 
     async def get_order_intent(self, intent_id: str):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM order_intents WHERE id = ?", (intent_id,)
@@ -555,13 +566,13 @@ class DatabaseRepository:
             query += " AND account_id = ?"
             params.append(account_id)
         query += " ORDER BY created_at"
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 return [self._decode_order_intent(row) for row in await cursor.fetchall()]
 
     async def list_owned_intents_without_trade(self, bot_id: str) -> list:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT intent.*
@@ -579,7 +590,7 @@ class DatabaseRepository:
 
     async def list_order_intents(self, bot_id: str, limit=100) -> list:
         limit = max(1, min(int(limit), 1000))
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT * FROM order_intents
@@ -598,7 +609,7 @@ class DatabaseRepository:
         metadata: dict = None,
     ) -> dict:
         terminal = state in {"owned", "rejected", "cancelled"}
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("""
                 UPDATE order_intents
                 SET state = ?, error = ?,
@@ -619,7 +630,7 @@ class DatabaseRepository:
     async def mark_order_intent_owned(self, intent_id: str, contract: dict) -> dict:
         contract_id = int(contract["contract_id"])
         transaction_id = contract.get("transaction_id")
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("""
                 UPDATE order_intents
                 SET state = 'owned', contract_id = ?, transaction_id = ?, error = NULL,
@@ -650,7 +661,7 @@ class DatabaseRepository:
         }
 
     async def get_risk_state(self, bot_id: str, initial_stake=1.0) -> dict:
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM risk_states WHERE bot_id = ?", (bot_id,)
@@ -674,7 +685,7 @@ class DatabaseRepository:
             "contract_id", "stake", "payout", "profit", "result", "status",
             "entry_spot", "exit_spot", "purchase_time", "expiry_time",
         )
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
@@ -766,7 +777,7 @@ class DatabaseRepository:
         publisher_healthy: bool,
         market_epoch: int = None,
     ):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("""
                 INSERT INTO runtime_health (
                     bot_id, deriv_connected, publisher_healthy, market_epoch, updated_at
@@ -785,7 +796,7 @@ class DatabaseRepository:
             await db.commit()
 
     async def record_service_heartbeat(self, service_name: str, details=None):
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             await db.execute("""
                 INSERT INTO service_heartbeats (service_name, details, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -801,7 +812,7 @@ class DatabaseRepository:
             int(settings.MARKET_STALE_AFTER_SECONDS),
             int(settings.RUNTIME_HEARTBEAT_SECONDS) * 3,
         )
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+        async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT id, runtime_state,

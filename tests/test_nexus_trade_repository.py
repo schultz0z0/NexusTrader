@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,9 +6,10 @@ from pathlib import Path
 import aiosqlite
 
 from database.repository import DatabaseRepository
+from database.models import DatabaseModels
 from nexus_trade.constants import NEXUS_TRADE_BOT_ID
 from nexus_trade.domain import CampaignStatus, Lane, VersionStatus
-from nexus_trade.repository import NexusTradeRepository
+from nexus_trade.repository import NexusTradeRepository, NexusTradeSingletonError
 
 
 class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -77,6 +79,103 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         expected = {"lane", "nexus_version_id", "campaign_id", "decision_id", "entry_delay_ms"}
         self.assertTrue(expected.issubset(trade_columns))
         self.assertTrue(expected.issubset(intent_columns))
+
+    async def test_provisioning_rolls_back_the_bot_when_version_creation_fails(self):
+        await self.repo.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute("DELETE FROM nexus_campaigns")
+            await db.execute("DELETE FROM nexus_runtime")
+            await db.execute("DELETE FROM nexus_versions")
+            await db.execute("DELETE FROM bot_instances WHERE id = ?", (NEXUS_TRADE_BOT_ID,))
+            await db.execute(
+                """
+                CREATE TRIGGER fail_nexus_version_creation
+                BEFORE INSERT ON nexus_versions
+                BEGIN SELECT RAISE(ABORT, 'forced version failure'); END;
+                """
+            )
+            await db.commit()
+
+        with self.assertRaises(aiosqlite.IntegrityError):
+            await self.nexus.ensure_singleton()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            bots = await (await db.execute(
+                "SELECT id FROM bot_instances WHERE strategy_id = 'nexus_trade'"
+            )).fetchall()
+        self.assertEqual(bots, [])
+
+    async def test_concurrent_provisioning_keeps_one_consistent_singleton(self):
+        await self.repo.init_db()
+
+        snapshots = await asyncio.gather(
+            self.nexus.ensure_singleton(), self.nexus.ensure_singleton(), self.nexus.ensure_singleton(),
+        )
+
+        self.assertTrue(all(snapshot["bot"]["id"] == "nexus-trade" for snapshot in snapshots))
+        snapshot = await self.nexus.get_runtime_snapshot()
+        self.assertEqual(len(snapshot["lanes"]), 2)
+        self.assertEqual(len(snapshot["active_campaigns"]), 1)
+
+    async def test_existing_corrupted_singleton_fails_fast_instead_of_being_accepted(self):
+        await self.repo.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE bot_instances SET symbol = 'R_75', strategy_config = '{\"period\": 9}' WHERE id = ?",
+                (NEXUS_TRADE_BOT_ID,),
+            )
+            await db.commit()
+
+        with self.assertRaises(NexusTradeSingletonError):
+            await self.repo.init_db()
+
+    async def test_schema_reserves_nexus_identity_for_insert_and_update(self):
+        await self.repo.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "INSERT INTO bot_instances (id, name, strategy_id, account_id) VALUES ('nexus-trade', 'Other', 'donchian', '')"
+                )
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "UPDATE bot_instances SET strategy_id = 'donchian' WHERE id = 'nexus-trade'"
+                )
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "UPDATE bot_instances SET strategy_id = 'nexus_trade' WHERE id != 'nexus-trade'"
+                )
+
+    async def test_nexus_foreign_keys_and_lane_checks_reject_invalid_references(self):
+        await self.repo.init_db()
+        version_id = (await self.nexus.get_runtime_snapshot())["lanes"][0]["version"]["id"]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "INSERT INTO nexus_runtime (bot_id, champion_version_id) VALUES ('missing', 'missing')"
+                )
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "INSERT INTO nexus_campaigns (id, lane, nexus_version_id, status) VALUES ('bad', 'invalid', ?, 'ACTIVE')",
+                    (version_id,),
+                )
+
+    async def test_existing_database_upgrades_to_the_protected_nexus_schema(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executescript(DatabaseModels.create_tables_sql())
+            await db.commit()
+
+        await self.repo.init_db()
+
+        snapshot = await self.nexus.get_runtime_snapshot()
+        self.assertEqual(snapshot["bot"]["id"], "nexus-trade")
+        async with aiosqlite.connect(self.db_path) as db:
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    "INSERT INTO bot_instances (id, name, strategy_id, account_id) VALUES ('nexus-trade', 'Other', 'donchian', '')"
+                )
 
 
 if __name__ == "__main__":
