@@ -239,6 +239,29 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 ("r75-late", "R_75", 30, 31, 2, 22, "/legacy/r75-late", 2),
             ],
         )
+        async with aiosqlite.connect(self.db_path) as db:
+            indexes = await (await db.execute("PRAGMA index_list(nexus_tick_segments)")).fetchall()
+            sequence_index = next(row for row in indexes if row[1] == "ux_nexus_tick_segments_symbol_sequence")
+            sequence_columns = await (await db.execute(
+                "PRAGMA index_info(ux_nexus_tick_segments_symbol_sequence)"
+            )).fetchall()
+            self.assertEqual(sequence_index[2], 1)
+            self.assertEqual([row[2] for row in sequence_columns], ["symbol", "segment_sequence"])
+            conflicts = [
+                ("duplicate-sha", "R_100", 50, 51, 2, 25, "b" * 64, "/legacy/new-sha", 3),
+                ("duplicate-path", "R_100", 50, 51, 2, 25, "e" * 64, "/legacy/r100-early", 3),
+                ("duplicate-sequence", "R_100", 50, 51, 2, 25, "f" * 64, "/legacy/new-sequence", 1),
+            ]
+            for conflict in conflicts:
+                with self.subTest(conflict=conflict[0]), self.assertRaises(aiosqlite.IntegrityError):
+                    await db.execute(
+                        """
+                        INSERT INTO nexus_tick_segments
+                            (id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, segment_sequence)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        conflict,
+                    )
 
     async def test_corrupted_champion_identity_fails_with_domain_error(self):
         await self.repo.init_db()

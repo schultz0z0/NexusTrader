@@ -2,7 +2,10 @@ import hashlib
 import math
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -17,6 +20,54 @@ class TickArchiveTests(unittest.TestCase):
 
     def tearDown(self):
         self.tempdir.cleanup()
+
+    def _child(self, program: str) -> list[str]:
+        return [sys.executable, "-c", textwrap.dedent(program), str(self.root), str(self.db_path)]
+
+    def _start_lock_holder(self, *, context_manager: bool) -> subprocess.Popen:
+        constructor = (
+            "with TickArchive(root, db_path):\n"
+            "    print('LOCKED', flush=True)\n"
+            "    sys.stdin.readline()"
+            if context_manager else
+            "archive = TickArchive(root, db_path)\n"
+            "print('LOCKED', flush=True)\n"
+            "sys.stdin.readline()\n"
+            "archive.close()"
+        )
+        program = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from nexus_trade.tick_archive import TickArchive\n"
+            "root, db_path = Path(sys.argv[1]), Path(sys.argv[2])\n"
+            f"{constructor}\n"
+        )
+        process = subprocess.Popen(
+            self._child(program),
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(process.stdout.readline().strip(), "LOCKED")
+        return process
+
+    def _assert_child_can_acquire_writer(self):
+        result = subprocess.run(
+            self._child("""
+                import sys
+                from pathlib import Path
+                from nexus_trade.tick_archive import TickArchive
+                archive = TickArchive(Path(sys.argv[1]), Path(sys.argv[2]))
+                archive.close()
+            """),
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_closing_daily_segments_records_hash_manifest_and_replays_ticks_in_append_order(self):
         archive = TickArchive(self.root, self.db_path)
@@ -232,6 +283,74 @@ class TickArchiveTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             TickArchive(self.root, self.db_path)
+
+    def test_os_lock_rejects_a_real_second_process_without_creating_tick_artifacts(self):
+        holder = self._start_lock_holder(context_manager=False)
+        try:
+            contender = subprocess.run(
+                self._child("""
+                    import sys
+                    from pathlib import Path
+                    from nexus_trade.tick_archive import TickArchive
+                    try:
+                        TickArchive(Path(sys.argv[1]), Path(sys.argv[2]))
+                    except RuntimeError:
+                        sys.exit(0)
+                    sys.exit(1)
+                """),
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(contender.returncode, 0, contender.stderr)
+            self.assertEqual(list(self.root.rglob("*.partial")), [])
+            self.assertEqual(list(self.root.rglob("*.jsonl.gz")), [])
+            db = sqlite3.connect(self.db_path)
+            try:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM nexus_tick_segments").fetchone()[0], 0)
+            finally:
+                db.close()
+        finally:
+            stdout, stderr = holder.communicate("\n", timeout=5)
+            self.assertEqual(holder.returncode, 0, f"{stdout}\n{stderr}")
+
+    def test_context_manager_releases_the_os_lock_for_a_later_process(self):
+        holder = self._start_lock_holder(context_manager=True)
+        stdout, stderr = holder.communicate("\n", timeout=5)
+        self.assertEqual(holder.returncode, 0, f"{stdout}\n{stderr}")
+
+        self._assert_child_can_acquire_writer()
+
+    def test_initialization_error_releases_the_os_lock_for_a_later_process(self):
+        directory = self.root / "R_100" / "1970" / "01" / "01"
+        directory.mkdir(parents=True)
+        first = directory / "legacy-a.jsonl.gz"
+        second = directory / "legacy-b.jsonl.gz"
+        TickArchive._append_member(first, {"epoch": 100, "quote": 1.0})
+        TickArchive._append_member(second, {"epoch": 101, "quote": 1.1})
+        result = subprocess.run(
+            self._child("""
+                import sys
+                from pathlib import Path
+                from nexus_trade.tick_archive import TickArchive
+                try:
+                    TickArchive(Path(sys.argv[1]), Path(sys.argv[2]))
+                except ValueError:
+                    sys.exit(0)
+                sys.exit(1)
+            """),
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self.root.rglob("*.partial")), [])
+        first.unlink()
+        second.unlink()
+
+        self._assert_child_can_acquire_writer()
 
 
 if __name__ == "__main__":
