@@ -132,8 +132,11 @@ class NexusModels:
             byte_count INTEGER NOT NULL,
             sha256 TEXT NOT NULL UNIQUE,
             path TEXT NOT NULL UNIQUE,
+            segment_sequence INTEGER NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_tick_segments_symbol_sequence
+        ON nexus_tick_segments(symbol, segment_sequence);
 
         CREATE TRIGGER IF NOT EXISTS trg_nexus_versions_values_insert
         BEFORE INSERT ON nexus_versions

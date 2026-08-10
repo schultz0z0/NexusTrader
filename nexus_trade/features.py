@@ -16,9 +16,20 @@ class FeatureBuilder:
     def __init__(self, indicator_engine: IndicatorEngine | None = None):
         self.indicator_engine = indicator_engine or IndicatorEngine()
 
-    def build(self, candles: Iterable[dict]) -> list[IndicatorFrame]:
-        completed = closed_candles(candles)
-        base_frames = self.indicator_engine.calculate(completed)
+    def build(
+        self,
+        candles: Iterable[dict],
+        *,
+        decision_epoch: int | None = None,
+        active_candle_time: int | None = None,
+    ) -> list[IndicatorFrame]:
+        source = list(candles)
+        completed = closed_candles(
+            source, decision_epoch=decision_epoch, active_candle_time=active_candle_time,
+        )
+        base_frames = self.indicator_engine.calculate(
+            source, decision_epoch=decision_epoch, active_candle_time=active_candle_time,
+        )
         if not completed:
             return []
         quotes = candles_to_quotes(completed)

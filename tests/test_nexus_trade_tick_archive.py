@@ -1,3 +1,6 @@
+import hashlib
+import math
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -29,6 +32,10 @@ class TickArchiveTests(unittest.TestCase):
 
         self.assertEqual(list(archive.replay(86_399, 86_401)), ticks)
         self.assertTrue(manifest["sha256"])
+        self.assertEqual(
+            manifest["sha256"],
+            hashlib.sha256(Path(manifest["path"]).read_bytes()).hexdigest(),
+        )
         self.assertEqual(manifest["tick_count"], 2)
         self.assertEqual(manifest["start_epoch"], 86_400)
         self.assertEqual(manifest["end_epoch"], 86_401)
@@ -39,14 +46,15 @@ class TickArchiveTests(unittest.TestCase):
         db = sqlite3.connect(self.db_path)
         try:
             rows = db.execute(
-                "SELECT symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path "
+                "SELECT symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, segment_sequence "
                 "FROM nexus_tick_segments ORDER BY start_epoch"
             ).fetchall()
         finally:
             db.close()
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1][:4], ("R_100", 86_400, 86_401, 2))
-        self.assertEqual(rows[-1][4:], (manifest["byte_count"], manifest["sha256"], manifest["path"]))
+        self.assertEqual(rows[-1][4:7], (manifest["byte_count"], manifest["sha256"], manifest["path"]))
+        self.assertEqual([row[-1] for row in rows], [1, 2])
 
     def test_restart_recovers_partial_segment_without_reordering_or_duplicating_ticks(self):
         first = TickArchive(self.root, self.db_path)
@@ -88,6 +96,100 @@ class TickArchiveTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             archive.append({"epoch": 100, "quote": 1.0})
+
+    def test_replay_uses_persisted_sequence_when_same_day_names_sort_in_reverse_order(self):
+        archive = TickArchive(self.root, self.db_path)
+        first_tick = {"epoch": 100, "quote": 1.0}
+        second_tick = {"epoch": 101, "quote": 1.1}
+        archive.append(first_tick)
+        first = archive.close_segment()
+        archive.append(second_tick)
+        second = archive.close_segment()
+
+        first_path = Path(first["path"])
+        second_path = Path(second["path"])
+        renamed_first = first_path.with_name("z-first.jsonl.gz")
+        renamed_second = second_path.with_name("a-second.jsonl.gz")
+        os.replace(first_path, renamed_first)
+        os.replace(second_path, renamed_second)
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("UPDATE nexus_tick_segments SET path = ? WHERE sha256 = ?", (str(renamed_first), first["sha256"]))
+            db.execute("UPDATE nexus_tick_segments SET path = ? WHERE sha256 = ?", (str(renamed_second), second["sha256"]))
+            db.commit()
+        finally:
+            db.close()
+
+        recovered = TickArchive(self.root, self.db_path)
+
+        self.assertEqual(list(recovered.replay(100, 101)), [first_tick, second_tick])
+
+    def test_restart_rebuilds_global_tail_for_retry_deduplication_and_backdating_rejection(self):
+        archived = TickArchive(self.root, self.db_path)
+        tick = {"epoch": 100, "quote": 1.0}
+        archived.append(tick)
+        archived.close_segment()
+
+        recovered = TickArchive(self.root, self.db_path)
+        recovered.append(tick)
+        with self.assertRaises(ValueError):
+            recovered.append({"epoch": 99, "quote": 0.9})
+        recovered.append({"epoch": 101, "quote": 1.1})
+        recovered.close_segment()
+
+        self.assertEqual(list(recovered.replay(0, 200)), [tick, {"epoch": 101, "quote": 1.1}])
+
+    def test_restart_keeps_complete_gzip_members_when_a_partial_tail_is_truncated(self):
+        archive = TickArchive(self.root, self.db_path)
+        archive.append({"epoch": 100, "quote": 1.0})
+        with Path(archive._partial_path).open("ab") as stream:
+            stream.write(b"\x1f\x8b\x08\x00")
+
+        recovered = TickArchive(self.root, self.db_path)
+        recovered.append({"epoch": 101, "quote": 1.1})
+        recovered.close_segment()
+
+        self.assertEqual(
+            list(recovered.replay(100, 101)),
+            [{"epoch": 100, "quote": 1.0}, {"epoch": 101, "quote": 1.1}],
+        )
+
+    def test_reconciliation_fails_closed_for_a_tampered_manifest(self):
+        archive = TickArchive(self.root, self.db_path)
+        archive.append({"epoch": 100, "quote": 1.0})
+        manifest = archive.close_segment()
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("UPDATE nexus_tick_segments SET byte_count = 0 WHERE sha256 = ?", (manifest["sha256"],))
+            db.commit()
+        finally:
+            db.close()
+
+        with self.assertRaises(ValueError):
+            TickArchive(self.root, self.db_path)
+
+    def test_append_rejects_invalid_epochs_quotes_and_other_symbols(self):
+        archive = TickArchive(self.root, self.db_path)
+        invalid_ticks = [
+            {"epoch": True, "quote": 1.0},
+            {"epoch": 1.5, "quote": 1.0},
+            {"epoch": "100", "quote": 1.0},
+            {"epoch": 100, "quote": math.inf},
+            {"epoch": 100, "quote": math.nan},
+            {"epoch": 100, "quote": 1.0, "symbol": "R_75"},
+        ]
+
+        for tick in invalid_ticks:
+            with self.subTest(tick=tick), self.assertRaises(ValueError):
+                archive.append(tick)
+
+    def test_replay_bounds_are_inclusive_and_exclude_outside_ticks(self):
+        archive = TickArchive(self.root, self.db_path)
+        for tick in ({"epoch": 100, "quote": 1.0}, {"epoch": 101, "quote": 1.1}, {"epoch": 102, "quote": 1.2}):
+            archive.append(tick)
+        archive.close_segment()
+
+        self.assertEqual(list(archive.replay(101, 101)), [{"epoch": 101, "quote": 1.1}])
 
 
 if __name__ == "__main__":
