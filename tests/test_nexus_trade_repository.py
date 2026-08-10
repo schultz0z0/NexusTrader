@@ -190,6 +190,56 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     "INSERT INTO bot_instances (id, name, strategy_id, account_id) VALUES ('nexus-trade', 'Other', 'donchian', '')"
                 )
 
+    async def test_populated_legacy_tick_manifest_rebuilds_contiguous_not_null_sequences_per_symbol(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executescript(DatabaseModels.create_tables_sql())
+            await db.execute(
+                """
+                CREATE TABLE nexus_tick_segments (
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, start_epoch INTEGER NOT NULL,
+                    end_epoch INTEGER NOT NULL, tick_count INTEGER NOT NULL,
+                    byte_count INTEGER NOT NULL, sha256 TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.executemany(
+                """
+                INSERT INTO nexus_tick_segments
+                    (id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("r75-early", "R_75", 10, 11, 2, 20, "a" * 64, "/legacy/r75-early", "2026-01-01 00:00:00"),
+                    ("r100-early", "R_100", 20, 21, 2, 21, "b" * 64, "/legacy/r100-early", "2026-01-01 00:00:01"),
+                    ("r75-late", "R_75", 30, 31, 2, 22, "c" * 64, "/legacy/r75-late", "2026-01-01 00:00:02"),
+                    ("r100-late", "R_100", 40, 41, 2, 23, "d" * 64, "/legacy/r100-late", "2026-01-01 00:00:03"),
+                ],
+            )
+            await db.commit()
+
+        await self.repo.init_db()
+        await self.repo.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            columns = await (await db.execute("PRAGMA table_info(nexus_tick_segments)")).fetchall()
+            sequence_column = next(row for row in columns if row[1] == "segment_sequence")
+            rows = await (await db.execute(
+                "SELECT id, symbol, start_epoch, end_epoch, tick_count, byte_count, path, segment_sequence "
+                "FROM nexus_tick_segments ORDER BY symbol, segment_sequence"
+            )).fetchall()
+        self.assertEqual(sequence_column[2:4], ("INTEGER", 1))
+        self.assertEqual(
+            rows,
+            [
+                ("r100-early", "R_100", 20, 21, 2, 21, "/legacy/r100-early", 1),
+                ("r100-late", "R_100", 40, 41, 2, 23, "/legacy/r100-late", 2),
+                ("r75-early", "R_75", 10, 11, 2, 20, "/legacy/r75-early", 1),
+                ("r75-late", "R_75", 30, 31, 2, 22, "/legacy/r75-late", 2),
+            ],
+        )
+
     async def test_corrupted_champion_identity_fails_with_domain_error(self):
         await self.repo.init_db()
         version = (await self.nexus.get_runtime_snapshot())["lanes"][0]["version"]

@@ -59,6 +59,7 @@ class TickArchiveTests(unittest.TestCase):
     def test_restart_recovers_partial_segment_without_reordering_or_duplicating_ticks(self):
         first = TickArchive(self.root, self.db_path)
         first.append({"epoch": 100, "quote": 1.0})
+        first.close()
 
         recovered = TickArchive(self.root, self.db_path)
         recovered.append({"epoch": 100, "quote": 1.0})
@@ -74,6 +75,7 @@ class TickArchiveTests(unittest.TestCase):
         archive = TickArchive(self.root, self.db_path)
         archive.append({"epoch": 100, "quote": 1.0})
         archive.close_segment()
+        archive.close()
         db = sqlite3.connect(self.db_path)
         try:
             db.execute("DELETE FROM nexus_tick_segments")
@@ -81,7 +83,7 @@ class TickArchiveTests(unittest.TestCase):
         finally:
             db.close()
 
-        TickArchive(self.root, self.db_path)
+        recovered = TickArchive(self.root, self.db_path)
 
         db = sqlite3.connect(self.db_path)
         try:
@@ -89,6 +91,7 @@ class TickArchiveTests(unittest.TestCase):
         finally:
             db.close()
         self.assertEqual(count, 1)
+        recovered.close()
 
     def test_append_rejects_a_tick_that_would_break_causal_order(self):
         archive = TickArchive(self.root, self.db_path)
@@ -105,6 +108,7 @@ class TickArchiveTests(unittest.TestCase):
         first = archive.close_segment()
         archive.append(second_tick)
         second = archive.close_segment()
+        archive.close()
 
         first_path = Path(first["path"])
         second_path = Path(second["path"])
@@ -129,6 +133,7 @@ class TickArchiveTests(unittest.TestCase):
         tick = {"epoch": 100, "quote": 1.0}
         archived.append(tick)
         archived.close_segment()
+        archived.close()
 
         recovered = TickArchive(self.root, self.db_path)
         recovered.append(tick)
@@ -144,6 +149,7 @@ class TickArchiveTests(unittest.TestCase):
         archive.append({"epoch": 100, "quote": 1.0})
         with Path(archive._partial_path).open("ab") as stream:
             stream.write(b"\x1f\x8b\x08\x00")
+        archive.close()
 
         recovered = TickArchive(self.root, self.db_path)
         recovered.append({"epoch": 101, "quote": 1.1})
@@ -158,6 +164,7 @@ class TickArchiveTests(unittest.TestCase):
         archive = TickArchive(self.root, self.db_path)
         archive.append({"epoch": 100, "quote": 1.0})
         manifest = archive.close_segment()
+        archive.close()
         db = sqlite3.connect(self.db_path)
         try:
             db.execute("UPDATE nexus_tick_segments SET byte_count = 0 WHERE sha256 = ?", (manifest["sha256"],))
@@ -190,6 +197,41 @@ class TickArchiveTests(unittest.TestCase):
         archive.close_segment()
 
         self.assertEqual(list(archive.replay(101, 101)), [{"epoch": 101, "quote": 1.1}])
+
+    def test_second_writer_fails_until_the_first_writer_explicitly_releases_its_lock(self):
+        first = TickArchive(self.root, self.db_path)
+
+        with self.assertRaises(RuntimeError):
+            TickArchive(self.root, self.db_path)
+
+        first.close()
+        second = TickArchive(self.root, self.db_path)
+        second.close()
+
+    def test_legacy_uuid_orphan_after_manifest_tail_gets_the_next_causal_sequence(self):
+        archive = TickArchive(self.root, self.db_path)
+        archive.append({"epoch": 100, "quote": 1.0})
+        archive.close_segment()
+        archive.close()
+        orphan = self.root / "R_100" / "1970" / "01" / "01" / "legacy-uuid.jsonl.gz"
+        TickArchive._append_member(orphan, {"epoch": 101, "quote": 1.1})
+
+        recovered = TickArchive(self.root, self.db_path)
+
+        self.assertEqual(
+            list(recovered.replay(100, 101)),
+            [{"epoch": 100, "quote": 1.0}, {"epoch": 101, "quote": 1.1}],
+        )
+        recovered.close()
+
+    def test_multiple_legacy_uuid_orphans_fail_instead_of_being_arbitrarily_ordered(self):
+        directory = self.root / "R_100" / "1970" / "01" / "01"
+        directory.mkdir(parents=True)
+        TickArchive._append_member(directory / "legacy-a.jsonl.gz", {"epoch": 100, "quote": 1.0})
+        TickArchive._append_member(directory / "legacy-b.jsonl.gz", {"epoch": 101, "quote": 1.1})
+
+        with self.assertRaises(ValueError):
+            TickArchive(self.root, self.db_path)
 
 
 if __name__ == "__main__":

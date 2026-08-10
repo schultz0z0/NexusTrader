@@ -39,6 +39,7 @@ def closed_candles(
         raise ValueError("causal cutoff must be an integer epoch")
     if active_candle_time is not None and active_candle_time % 60:
         raise ValueError("active_candle_time must align to M1")
+    decision_bucket = None if cutoff is None else cutoff - (cutoff % 60)
 
     result: list[dict] = []
     previous: int | None = None
@@ -51,6 +52,15 @@ def closed_candles(
             raise ValueError("candle epochs must be strictly increasing")
         previous = raw_epoch
         normalized["time"] = raw_epoch
+        close_epoch = normalized.get("close_epoch")
+        if "close_epoch" in normalized and close_epoch is not None:
+            if isinstance(close_epoch, bool) or type(close_epoch) is not int:
+                raise ValueError("close_epoch must be an integer M1 close")
+            if close_epoch != raw_epoch + 60:
+                raise ValueError("close_epoch must match the candle's expected M1 close")
+            if cutoff is not None and close_epoch > cutoff:
+                raise ValueError("close_epoch cannot be after the causal decision")
+            normalized["close_epoch"] = close_epoch
         explicit_live = (
             normalized.get("is_closed") is False
             or normalized.get("closed") is False
@@ -64,6 +74,8 @@ def closed_candles(
         if explicit_live and explicit_closed:
             raise ValueError("candle closure markers conflict")
         if explicit_live:
+            continue
+        if decision_bucket is not None and raw_epoch >= decision_bucket:
             continue
         if explicit_closed:
             result.append(normalized)

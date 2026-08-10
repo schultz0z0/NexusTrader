@@ -96,26 +96,73 @@ class DatabaseRepository:
                 await db.execute(f"ALTER TABLE order_intents ADD COLUMN {column} {definition}")
 
     async def _migrate_nexus_tick_segments(self, db):
-        """Add causal segment ordering before the schema creates its unique index."""
+        """Rebuild legacy manifests with NOT NULL per-symbol causal sequencing."""
         async with db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nexus_tick_segments'"
         ) as cursor:
             if await cursor.fetchone() is None:
                 return
         async with db.execute("PRAGMA table_info(nexus_tick_segments)") as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        if "segment_sequence" in columns:
+            columns = {row[1]: row for row in await cursor.fetchall()}
+        sequence_column = columns.get("segment_sequence")
+        needs_rebuild = (
+            sequence_column is None
+            or str(sequence_column[2]).upper() != "INTEGER"
+            or int(sequence_column[3]) != 1
+        )
+        if not needs_rebuild:
+            async with db.execute(
+                "SELECT symbol, segment_sequence FROM nexus_tick_segments ORDER BY symbol, segment_sequence"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            expected_by_symbol = {}
+            for symbol, sequence in rows:
+                expected = expected_by_symbol.get(symbol, 0) + 1
+                if type(sequence) is not int or sequence != expected:
+                    needs_rebuild = True
+                    break
+                expected_by_symbol[symbol] = expected
+        if not needs_rebuild:
             return
-        await db.execute("ALTER TABLE nexus_tick_segments ADD COLUMN segment_sequence INTEGER")
-        async with db.execute(
-            "SELECT id FROM nexus_tick_segments ORDER BY start_epoch, end_epoch, created_at, id"
-        ) as cursor:
-            rows = await cursor.fetchall()
-        for sequence, row in enumerate(rows, start=1):
+        await db.execute("SAVEPOINT rebuild_nexus_tick_segments")
+        try:
             await db.execute(
-                "UPDATE nexus_tick_segments SET segment_sequence = ? WHERE id = ?",
-                (sequence, row[0]),
+                """
+                CREATE TABLE nexus_tick_segments_rebuilt (
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, start_epoch INTEGER NOT NULL,
+                    end_epoch INTEGER NOT NULL, tick_count INTEGER NOT NULL,
+                    byte_count INTEGER NOT NULL, sha256 TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL UNIQUE, segment_sequence INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
+            async with db.execute(
+                """
+                SELECT id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, created_at
+                FROM nexus_tick_segments ORDER BY symbol, start_epoch, end_epoch, created_at, id
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+            sequence_by_symbol = {}
+            for row in rows:
+                symbol = row[1]
+                sequence_by_symbol[symbol] = sequence_by_symbol.get(symbol, 0) + 1
+                await db.execute(
+                    """
+                    INSERT INTO nexus_tick_segments_rebuilt
+                        (id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, segment_sequence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*row[:8], sequence_by_symbol[symbol], row[8]),
+                )
+            await db.execute("DROP TABLE nexus_tick_segments")
+            await db.execute("ALTER TABLE nexus_tick_segments_rebuilt RENAME TO nexus_tick_segments")
+            await db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
+        except Exception:
+            await db.execute("ROLLBACK TO SAVEPOINT rebuild_nexus_tick_segments")
+            await db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
+            raise
 
     async def _ensure_default_bot(self, db):
         async with db.execute("SELECT COUNT(*) FROM bot_instances") as cursor:

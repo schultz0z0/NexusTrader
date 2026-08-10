@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sqlite3
+import threading
 import uuid
 import zlib
 from datetime import UTC, datetime
@@ -14,6 +15,12 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 from nexus_trade.constants import NEXUS_SYMBOL
+
+try:  # pragma: no cover - selected by the host operating system
+    import fcntl
+except ImportError:  # pragma: no cover - Windows path is covered in local tests
+    fcntl = None
+    import msvcrt
 
 
 class TickArchive:
@@ -23,6 +30,9 @@ class TickArchive:
     filenames are deliberately not used to order replay.  Each append is a complete
     gzip member that is flushed and fsynced before it becomes recoverable.
     """
+
+    _process_lock = threading.Lock()
+    _owned_lock_paths: set[Path] = set()
 
     def __init__(self, root_path: str | Path, db_path: str | Path, symbol: str = NEXUS_SYMBOL):
         if symbol != NEXUS_SYMBOL:
@@ -37,12 +47,51 @@ class TickArchive:
         self._last_epoch: int | None = None
         self._tail_fingerprints: set[str] = set()
         self._next_sequence = 1
-        self._ensure_manifest_table()
-        self._recover_published_segments()
-        self._recover_partial_segment()
+        self._lock_path: Path | None = None
+        self._lock_file = None
+        self._closed = False
+        try:
+            self._acquire_writer_lock()
+            self._ensure_manifest_table()
+            self._recover_published_segments()
+            self._recover_partial_segment()
+        except Exception:
+            self.close()
+            raise
+
+    def __enter__(self) -> "TickArchive":
+        if self._closed:
+            raise RuntimeError("TickArchive writer is closed")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if hasattr(self, "_closed"):
+            self.close()
+
+    def close(self) -> None:
+        """Release the writer lock without implicitly publishing a partial segment."""
+        if self._closed:
+            return
+        self._closed = True
+        lock_file = self._lock_file
+        lock_path = self._lock_path
+        self._lock_file = None
+        if lock_file is not None:
+            try:
+                self._unlock_file(lock_file)
+            finally:
+                lock_file.close()
+        if lock_path is not None:
+            with self._process_lock:
+                self._owned_lock_paths.discard(lock_path)
 
     def append(self, tick: Mapping[str, object]) -> None:
         """Append one validated tick without allowing causal backdating."""
+        if self._closed:
+            raise RuntimeError("TickArchive writer is closed")
         normalized = self._normalize_tick(tick)
         epoch = normalized["epoch"]
         fingerprint = self._fingerprint(normalized)
@@ -67,6 +116,8 @@ class TickArchive:
 
     def close_segment(self) -> dict | None:
         """Publish the active segment atomically, then attest it in SQLite."""
+        if self._closed:
+            raise RuntimeError("TickArchive writer is closed")
         if self._partial_path is None:
             return None
         if not self._ticks:
@@ -125,17 +176,9 @@ class TickArchive:
                 )
                 """
             )
-            columns = {row[1] for row in db.execute("PRAGMA table_info(nexus_tick_segments)")}
-            if "segment_sequence" not in columns:
-                db.execute("ALTER TABLE nexus_tick_segments ADD COLUMN segment_sequence INTEGER")
-                rows = db.execute(
-                    "SELECT id FROM nexus_tick_segments ORDER BY start_epoch, end_epoch, created_at, id"
-                ).fetchall()
-                for sequence, (segment_id,) in enumerate(rows, start=1):
-                    db.execute(
-                        "UPDATE nexus_tick_segments SET segment_sequence = ? WHERE id = ?",
-                        (sequence, segment_id),
-                    )
+            columns = {row[1]: row for row in db.execute("PRAGMA table_info(nexus_tick_segments)")}
+            if self._manifest_needs_rebuild(db, columns):
+                self._rebuild_manifest_table(db)
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_tick_segments_symbol_sequence "
                 "ON nexus_tick_segments(symbol, segment_sequence)"
@@ -152,15 +195,32 @@ class TickArchive:
             registered_paths.add(path.resolve())
             ticks = self._read_ticks(path)
             self._record_segment(path, ticks, row["segment_sequence"], row["id"])
-
-        for path in self.root_path.glob(f"{self.symbol}/**/*.jsonl.gz"):
-            if path.resolve() in registered_paths:
-                continue
+        self._rebuild_global_tail()
+        orphans = [
+            path for path in self.root_path.glob(f"{self.symbol}/**/*.jsonl.gz")
+            if path.resolve() not in registered_paths
+        ]
+        legacy_orphans = [path for path in orphans if self._sequence_from_path(path) is None]
+        if len(legacy_orphans) > 1:
+            raise ValueError("multiple legacy UUID orphan segments have ambiguous order")
+        sequenced_orphans = sorted(
+            (path for path in orphans if path not in legacy_orphans),
+            key=lambda path: self._sequence_from_path(path),
+        )
+        for path in sequenced_orphans:
+            sequence = self._sequence_from_path(path)
+            if sequence != self._next_sequence:
+                raise ValueError("orphan segment sequence is not causally contiguous")
             ticks = self._read_ticks(path)
-            sequence = self._sequence_from_path(path) or self._next_sequence
+            self._adopt_orphan_tail(ticks)
             self._record_segment(path, ticks, sequence)
-            self._next_sequence = max(self._next_sequence, sequence + 1)
-
+            self._next_sequence += 1
+        if legacy_orphans:
+            path = legacy_orphans[0]
+            ticks = self._read_ticks(path)
+            self._adopt_orphan_tail(ticks)
+            self._record_segment(path, ticks, self._next_sequence)
+            self._next_sequence += 1
         self._rebuild_global_tail()
 
     def _recover_partial_segment(self) -> None:
@@ -308,6 +368,109 @@ class TickArchive:
         self._day = day
         self._ticks = []
         self._fingerprints = set()
+
+    def _acquire_writer_lock(self) -> None:
+        directory = self.root_path / self.symbol
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_path = (directory / ".writer.lock").resolve()
+        with self._process_lock:
+            if lock_path in self._owned_lock_paths:
+                raise RuntimeError("TickArchive already has a writer in this process")
+        lock_file = lock_path.open("a+b")
+        try:
+            if lock_file.tell() == 0:
+                lock_file.write(b"0")
+                lock_file.flush()
+                os.fsync(lock_file.fileno())
+            self._lock_file_exclusively(lock_file)
+        except OSError as exc:
+            lock_file.close()
+            raise RuntimeError("TickArchive writer lock is already held") from exc
+        with self._process_lock:
+            if lock_path in self._owned_lock_paths:
+                self._unlock_file(lock_file)
+                lock_file.close()
+                raise RuntimeError("TickArchive already has a writer in this process")
+            self._owned_lock_paths.add(lock_path)
+        self._lock_path = lock_path
+        self._lock_file = lock_file
+
+    @staticmethod
+    def _lock_file_exclusively(lock_file) -> None:
+        lock_file.seek(0)
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # pragma: no cover - Windows-only branch
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+    @staticmethod
+    def _unlock_file(lock_file) -> None:
+        lock_file.seek(0)
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        else:  # pragma: no cover - Windows-only branch
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+    @staticmethod
+    def _manifest_needs_rebuild(db: sqlite3.Connection, columns: dict[str, tuple]) -> bool:
+        sequence_column = columns.get("segment_sequence")
+        if sequence_column is None or sequence_column[2].upper() != "INTEGER" or sequence_column[3] != 1:
+            return True
+        rows = db.execute(
+            "SELECT symbol, segment_sequence FROM nexus_tick_segments ORDER BY symbol, segment_sequence"
+        ).fetchall()
+        expected_by_symbol: dict[str, int] = {}
+        for symbol, sequence in rows:
+            expected = expected_by_symbol.get(symbol, 0) + 1
+            if type(sequence) is not int or sequence != expected:
+                return True
+            expected_by_symbol[symbol] = expected
+        return False
+
+    @staticmethod
+    def _rebuild_manifest_table(db: sqlite3.Connection) -> None:
+        db.execute("SAVEPOINT rebuild_nexus_tick_segments")
+        try:
+            db.execute(
+                """
+                CREATE TABLE nexus_tick_segments_rebuilt (
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, start_epoch INTEGER NOT NULL,
+                    end_epoch INTEGER NOT NULL, tick_count INTEGER NOT NULL,
+                    byte_count INTEGER NOT NULL, sha256 TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL UNIQUE, segment_sequence INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            rows = db.execute(
+                """
+                SELECT id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, created_at
+                FROM nexus_tick_segments ORDER BY symbol, start_epoch, end_epoch, created_at, id
+                """
+            ).fetchall()
+            sequence_by_symbol: dict[str, int] = {}
+            for row in rows:
+                sequence_by_symbol[row[1]] = sequence_by_symbol.get(row[1], 0) + 1
+                db.execute(
+                    """
+                    INSERT INTO nexus_tick_segments_rebuilt
+                        (id, symbol, start_epoch, end_epoch, tick_count, byte_count, sha256, path, segment_sequence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*row[:8], sequence_by_symbol[row[1]], row[8]),
+                )
+            db.execute("DROP TABLE nexus_tick_segments")
+            db.execute("ALTER TABLE nexus_tick_segments_rebuilt RENAME TO nexus_tick_segments")
+            db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
+        except Exception:
+            db.execute("ROLLBACK TO SAVEPOINT rebuild_nexus_tick_segments")
+            db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
+            raise
+
+    def _adopt_orphan_tail(self, ticks: list[dict]) -> None:
+        self._validate_segment_ticks(ticks, Path("orphan"))
+        for tick in ticks:
+            self._advance_tail(tick)
 
     def _clear_active_segment(self) -> None:
         self._partial_path = None

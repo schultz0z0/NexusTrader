@@ -72,6 +72,33 @@ class IndicatorEngineTests(unittest.TestCase):
 
         self.assertEqual([candle["time"] for candle in completed], [0, 60])
 
+    def test_decision_inside_active_bucket_excludes_even_explicitly_closed_active_and_future_candles(self):
+        completed = closed_candles(candles(3), decision_epoch=90)
+
+        self.assertEqual([candle["time"] for candle in completed], [0])
+
+    def test_close_epoch_must_be_an_expected_m1_close_not_after_the_decision(self):
+        invalid = [
+            {**candles(1)[0], "close_epoch": 59},
+            {**candles(1)[0], "close_epoch": 60.0},
+            {**candles(1)[0], "close_epoch": True},
+            {**candles(1)[0], "close_epoch": 120},
+            {**candles(2)[1], "close_epoch": 120},
+        ]
+
+        for candle in invalid:
+            with self.subTest(candle=candle), self.assertRaises(ValueError):
+                closed_candles([candle], decision_epoch=90)
+
+    def test_decision_prefix_is_unchanged_when_active_and_future_candles_are_marked_closed(self):
+        history = candles(40)
+        marked_closed_active = {**candles(41)[40], "is_closed": True}
+
+        before = IndicatorEngine().calculate(history, decision_epoch=2_400)
+        after = IndicatorEngine().calculate([*history, marked_closed_active], decision_epoch=2_400)
+
+        self.assertEqual(before, after)
+
     def test_indicator_prefix_is_unchanged_by_later_closed_candles(self):
         prefix = candles(40)
         extended = [*prefix, *candles(45)[40:]]
