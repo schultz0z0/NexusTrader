@@ -165,6 +165,17 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_database_upgrades_to_the_protected_nexus_schema(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(DatabaseModels.create_tables_sql())
+            await db.execute(
+                """
+                CREATE TABLE nexus_tick_segments (
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, start_epoch INTEGER NOT NULL,
+                    end_epoch INTEGER NOT NULL, tick_count INTEGER NOT NULL,
+                    byte_count INTEGER NOT NULL, sha256 TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             await db.commit()
 
         await self.repo.init_db()
@@ -172,6 +183,8 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await self.nexus.get_runtime_snapshot()
         self.assertEqual(snapshot["bot"]["id"], "nexus-trade")
         async with aiosqlite.connect(self.db_path) as db:
+            columns = {row[1] for row in await (await db.execute("PRAGMA table_info(nexus_tick_segments)")).fetchall()}
+            self.assertIn("segment_sequence", columns)
             with self.assertRaises(aiosqlite.IntegrityError):
                 await db.execute(
                     "INSERT INTO bot_instances (id, name, strategy_id, account_id) VALUES ('nexus-trade', 'Other', 'donchian', '')"

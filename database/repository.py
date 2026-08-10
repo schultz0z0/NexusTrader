@@ -38,6 +38,7 @@ class DatabaseRepository:
             await db.execute("PRAGMA busy_timeout=30000;")
             await db.executescript(DatabaseModels.create_tables_sql())
             await self._migrate_trade_columns(db)
+            await self._migrate_nexus_tick_segments(db)
             await db.executescript(NexusModels.create_tables_sql())
             await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
@@ -93,6 +94,28 @@ class DatabaseRepository:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {column} {definition}")
             if column not in existing_intents:
                 await db.execute(f"ALTER TABLE order_intents ADD COLUMN {column} {definition}")
+
+    async def _migrate_nexus_tick_segments(self, db):
+        """Add causal segment ordering before the schema creates its unique index."""
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nexus_tick_segments'"
+        ) as cursor:
+            if await cursor.fetchone() is None:
+                return
+        async with db.execute("PRAGMA table_info(nexus_tick_segments)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "segment_sequence" in columns:
+            return
+        await db.execute("ALTER TABLE nexus_tick_segments ADD COLUMN segment_sequence INTEGER")
+        async with db.execute(
+            "SELECT id FROM nexus_tick_segments ORDER BY start_epoch, end_epoch, created_at, id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for sequence, row in enumerate(rows, start=1):
+            await db.execute(
+                "UPDATE nexus_tick_segments SET segment_sequence = ? WHERE id = ?",
+                (sequence, row[0]),
+            )
 
     async def _ensure_default_bot(self, db):
         async with db.execute("SELECT COUNT(*) FROM bot_instances") as cursor:
