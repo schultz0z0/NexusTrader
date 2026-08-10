@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     DASHBOARD_API_KEY: str = ""
     API_BASE_URL: str = "http://127.0.0.1:8000"
     BUSINESS_TIMEZONE: str = "America/Sao_Paulo"
+    NEXUS_TICK_ARCHIVE_PATH: str = "storage/nexus_ticks"
+    NEXUS_DEMO_STAKE: float = 0.35
+    NEXUS_DAILY_CLOSE_HOUR: int = 10
+    NEXUS_ENTRY_MAX_DELAY_SECONDS: int = 2
     ALLOW_REAL_TRADING: bool = False
     REAL_MAX_STAKE_USD: float = 0.0
     EVENT_QUEUE_MAX: int = 2000
@@ -60,6 +64,12 @@ class Settings(BaseSettings):
             raise ValueError("CONTRACT_EXPIRY_GRACE_SECONDS nao pode ser negativo")
         if self.MARKET_HISTORY_RESYNC_SECONDS < 5:
             raise ValueError("MARKET_HISTORY_RESYNC_SECONDS deve ser pelo menos 5")
+        if self.NEXUS_DEMO_STAKE != 0.35:
+            raise ValueError("NEXUS_DEMO_STAKE deve ser 0.35")
+        if not 0 <= self.NEXUS_DAILY_CLOSE_HOUR <= 23:
+            raise ValueError("NEXUS_DAILY_CLOSE_HOUR deve estar entre 0 e 23")
+        if self.NEXUS_ENTRY_MAX_DELAY_SECONDS != 2:
+            raise ValueError("NEXUS_ENTRY_MAX_DELAY_SECONDS deve ser 2")
         return self
 
 settings = Settings()

@@ -53,6 +53,18 @@ python -m pip check
 
 Os testes cobrem configuração, ownership, risco persistente, replay, candles, fila, lifecycle, health, orquestração, API, Docker e frontend.
 
+### Configuração segura do NexusTrade
+
+O runtime isolado do NexusTrade mantém os parâmetros de segurança fixos: archive de
+ticks em `storage/nexus_ticks`, stake DEMO de `0.35`, fechamento diário às `10` horas
+(`America/Sao_Paulo`) e atraso máximo de entrada de `2` segundos. Não altere esses
+valores por ambiente; a validação de configuração rejeita stake ou atraso diferentes e
+horas fora de `0..23`.
+
+Para importar `config.settings` durante a suíte de testes sem habilitar `DEV_MODE`,
+forneça valores fictícios para `DERIV_APP_ID`, `DERIV_API_TOKEN`, `INTERNAL_API_TOKEN`
+e `DASHBOARD_API_KEY` no ambiente do processo de teste.
+
 ### Replay/paper determinístico
 
 Cada linha do dataset contém `epoch`, `quote` e opcionalmente `payout_ratio`:
