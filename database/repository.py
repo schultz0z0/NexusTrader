@@ -6,6 +6,8 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from config.settings import settings
 from database.models import DatabaseModels
+from database.nexus_models import NexusModels
+from nexus_trade.repository import NexusTradeRepository
 from risk.state import advance_risk_state, initial_risk_state
 from utils.logger import setup_logger
 
@@ -29,6 +31,7 @@ class DatabaseRepository:
             await db.execute("PRAGMA busy_timeout=30000;")
             await db.executescript(DatabaseModels.create_tables_sql())
             await self._migrate_trade_columns(db)
+            await db.executescript(NexusModels.create_tables_sql())
             
             # Insere configuracao inicial de risco se tabela estiver vazia
             async with db.execute("SELECT COUNT(*) FROM risk_configs") as cursor:
@@ -40,6 +43,7 @@ class DatabaseRepository:
                     """)
             await self._ensure_default_bot(db)
             await self._backfill_risk_states(db)
+            await NexusTradeRepository.ensure_singleton_in_transaction(db)
             await db.commit()
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
 
@@ -63,6 +67,20 @@ class DatabaseRepository:
             ON trades(bot_id, contract_id)
             WHERE bot_id IS NOT NULL AND contract_id IS NOT NULL
         """)
+        async with db.execute("PRAGMA table_info(order_intents)") as cursor:
+            existing_intents = {row[1] for row in await cursor.fetchall()}
+        nexus_additions = {
+            "lane": "TEXT",
+            "nexus_version_id": "TEXT",
+            "campaign_id": "TEXT",
+            "decision_id": "TEXT",
+            "entry_delay_ms": "INTEGER",
+        }
+        for column, definition in nexus_additions.items():
+            if column not in existing:
+                await db.execute(f"ALTER TABLE trades ADD COLUMN {column} {definition}")
+            if column not in existing_intents:
+                await db.execute(f"ALTER TABLE order_intents ADD COLUMN {column} {definition}")
 
     async def _ensure_default_bot(self, db):
         async with db.execute("SELECT COUNT(*) FROM bot_instances") as cursor:
