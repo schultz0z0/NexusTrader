@@ -110,6 +110,7 @@ class SetupState:
     position_status: str = "IDLE"
     owner_decision_id: str | None = None
     contract_id: int | None = None
+    quarantine_correlation_id: str | None = None
     reconciliation_id: str | None = None
     reconciliation_decision_id: str | None = None
     reconciliation_outcome: str | None = None
@@ -124,6 +125,11 @@ class SetupState:
             raise ValueError("position_status is invalid")
         _nonempty_string(self.owner_decision_id, "owner_decision_id", optional=True)
         _positive_contract_id(self.contract_id, optional=True)
+        _nonempty_string(
+            self.quarantine_correlation_id,
+            "quarantine_correlation_id",
+            optional=True,
+        )
         _nonempty_string(self.reconciliation_id, "reconciliation_id", optional=True)
         _nonempty_string(
             self.reconciliation_decision_id,
@@ -153,8 +159,16 @@ class SetupState:
         elif self.position_status == "ACTIVE":
             if self.owner_decision_id is None or self.contract_id is None:
                 raise ValueError("ACTIVE state requires owner and contract")
-        elif self.owner_decision_id is None:
-            raise ValueError("QUARANTINED state requires an owner")
+        elif (
+            self.owner_decision_id is None
+            or self.quarantine_correlation_id is None
+        ):
+            raise ValueError("QUARANTINED state requires owner and correlation")
+        if (
+            self.position_status != "QUARANTINED"
+            and self.quarantine_correlation_id is not None
+        ):
+            raise ValueError("quarantine correlation requires QUARANTINED state")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -316,9 +330,18 @@ class NexusTradeStrategy:
             contract_id=contract_id,
         )
 
-    def mark_position_quarantined(self, owner_decision_id: str) -> None:
+    def mark_position_quarantined(
+        self,
+        owner_decision_id: str,
+        correlation_id: str,
+    ) -> None:
         self._require_owner("RESERVED", owner_decision_id)
-        self.state = replace(self.state, position_status="QUARANTINED")
+        _nonempty_string(correlation_id, "correlation_id")
+        self.state = replace(
+            self.state,
+            position_status="QUARANTINED",
+            quarantine_correlation_id=correlation_id,
+        )
 
     def reconcile_quarantine(self, result: OwnershipReconciliation) -> None:
         if type(result) is not OwnershipReconciliation:
@@ -345,7 +368,10 @@ class NexusTradeStrategy:
             )
         if result.decision_id != self.state.owner_decision_id:
             raise ValueError("owner decision does not match quarantined position")
+        if result.correlation_id != self.state.quarantine_correlation_id:
+            raise ValueError("correlation does not match quarantined dispatch")
         common = {
+            "quarantine_correlation_id": None,
             "reconciliation_id": result.correlation_id,
             "reconciliation_decision_id": result.decision_id,
             "reconciliation_outcome": result.outcome,
@@ -506,6 +532,7 @@ class NexusTradeStrategy:
             position_status="RESERVED" if reserve else self.state.position_status,
             owner_decision_id=decision.decision_id if reserve else self.state.owner_decision_id,
             contract_id=self.state.contract_id,
+            quarantine_correlation_id=self.state.quarantine_correlation_id,
             reconciliation_id=self.state.reconciliation_id,
             reconciliation_decision_id=self.state.reconciliation_decision_id,
             reconciliation_outcome=self.state.reconciliation_outcome,

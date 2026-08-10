@@ -227,21 +227,45 @@ class NexusTradeStrategyTests(unittest.TestCase):
     def test_quarantine_survives_restart_and_cannot_be_blindly_released(self):
         strategy = NexusTradeStrategy()
         owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
-        strategy.mark_position_quarantined(owner.decision_id)
+        strategy.mark_position_quarantined(owner.decision_id, "send-ambiguous-1")
 
         restarted = NexusTradeStrategy(state=json.loads(json.dumps(strategy.snapshot())))
 
         self.assertEqual(restarted.state.position_status, "QUARANTINED")
         self.assertEqual(restarted.state.owner_decision_id, owner.decision_id)
+        self.assertEqual(
+            restarted.state.quarantine_correlation_id,
+            "send-ambiguous-1",
+        )
         with self.assertRaisesRegex(ValueError, "QUARANTINED"):
             restarted.release_reservation(owner.decision_id)
         with self.assertRaisesRegex(ValueError, "QUARANTINED"):
             restarted.mark_position_closed(owner.decision_id, 101)
+        restarted.reconcile_quarantine(OwnershipReconciliation(
+            correlation_id="send-ambiguous-1",
+            decision_id=owner.decision_id,
+            outcome="PURCHASE_ABSENT",
+            contract_id=None,
+        ))
+        self.assertEqual(restarted.state.position_status, "IDLE")
+        self.assertIsNone(restarted.state.quarantine_correlation_id)
+
+    def test_quarantine_requires_a_strict_correlation_without_mutating_reservation(self):
+        for invalid in (None, "", False, 1):
+            with self.subTest(correlation_id=invalid):
+                strategy = NexusTradeStrategy()
+                owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
+                before = strategy.snapshot()
+
+                with self.assertRaises((TypeError, ValueError)):
+                    strategy.mark_position_quarantined(owner.decision_id, invalid)
+
+                self.assertEqual(strategy.snapshot(), before)
 
     def test_quarantine_reconciliation_found_contract_is_owner_checked_and_idempotent(self):
         strategy = NexusTradeStrategy()
         owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
-        strategy.mark_position_quarantined(owner.decision_id)
+        strategy.mark_position_quarantined(owner.decision_id, "reconcile-1")
         found = OwnershipReconciliation(
             correlation_id="reconcile-1",
             decision_id=owner.decision_id,
@@ -249,13 +273,23 @@ class NexusTradeStrategyTests(unittest.TestCase):
             contract_id=707,
         )
 
+        quarantined_snapshot = strategy.snapshot()
         with self.assertRaisesRegex(ValueError, "owner"):
             strategy.reconcile_quarantine(OwnershipReconciliation(
-                correlation_id="reconcile-wrong",
+                correlation_id="reconcile-1",
                 decision_id="wrong-owner",
                 outcome="CONTRACT_FOUND",
                 contract_id=707,
             ))
+        self.assertEqual(strategy.snapshot(), quarantined_snapshot)
+        with self.assertRaisesRegex(ValueError, "correlation"):
+            strategy.reconcile_quarantine(OwnershipReconciliation(
+                correlation_id="reconcile-wrong",
+                decision_id=owner.decision_id,
+                outcome="CONTRACT_FOUND",
+                contract_id=707,
+            ))
+        self.assertEqual(strategy.snapshot(), quarantined_snapshot)
         strategy.reconcile_quarantine(found)
         snapshot = strategy.snapshot()
         strategy.reconcile_quarantine(found)
@@ -271,7 +305,7 @@ class NexusTradeStrategyTests(unittest.TestCase):
     def test_quarantine_reconciliation_confirmed_absent_is_strict_and_idempotent(self):
         strategy = NexusTradeStrategy()
         owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
-        strategy.mark_position_quarantined(owner.decision_id)
+        strategy.mark_position_quarantined(owner.decision_id, "reconcile-absent")
         absent = OwnershipReconciliation(
             correlation_id="reconcile-absent",
             decision_id=owner.decision_id,
@@ -405,6 +439,17 @@ class NexusTradeStrategyTests(unittest.TestCase):
             {"position_status": "IDLE", "owner_decision_id": "owner"},
             {"unexpected": "field"},
             {"contract_id": "101"},
+            {"position_status": "IDLE", "quarantine_correlation_id": "orphan"},
+            {
+                "position_status": "QUARANTINED",
+                "owner_decision_id": "owner",
+                "quarantine_correlation_id": None,
+            },
+            {
+                "position_status": "QUARANTINED",
+                "owner_decision_id": "owner",
+                "quarantine_correlation_id": "",
+            },
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
