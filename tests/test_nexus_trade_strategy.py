@@ -15,6 +15,7 @@ def candle(epoch, opening, close, *, high=None, low=None):
         "low": min(opening, close) if low is None else low,
         "close": close,
         "is_closed": True,
+        "close_epoch": epoch + 60,
     }
 
 
@@ -183,19 +184,54 @@ class NexusTradeStrategyTests(unittest.TestCase):
             ("upper_reversal_confirmation", "center_cross_down"),
         )
 
-    def test_active_position_blocks_and_consumes_a_new_signal(self):
-        strategy = NexusTradeStrategy(state=SetupState(position_active=True))
+    def test_reserved_position_blocks_signal_and_owner_controls_active_close(self):
+        strategy = NexusTradeStrategy()
+        owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0, adx=20))[0]
 
         blocked = strategy.on_closed_candle(
-            candle(0, 99, 101), frame(0, adx=20)
+            candle(60, 101, 99), frame(60, adx=20)
         )[0]
-        strategy.mark_position_closed()
-        later = strategy.on_closed_candle(
-            candle(60, 101, 102), frame(60, adx=20)
-        )[0]
-
         self.assertEqual(blocked.blocked_reason, "POSITION_ACTIVE")
-        self.assertEqual(later.blocked_reason, "NO_TRADE")
+        self.assertEqual(strategy.state.position_status, "RESERVED")
+        self.assertEqual(strategy.state.owner_decision_id, owner.decision_id)
+
+        with self.assertRaisesRegex(ValueError, "owner"):
+            strategy.mark_position_active("wrong-owner", "contract-1")
+        strategy.mark_position_active(owner.decision_id, "contract-1")
+        self.assertEqual(strategy.state.position_status, "ACTIVE")
+        self.assertEqual(strategy.state.contract_id, "contract-1")
+
+        with self.assertRaisesRegex(ValueError, "owner"):
+            strategy.mark_position_closed("wrong-owner", "contract-1")
+        with self.assertRaisesRegex(ValueError, "contract"):
+            strategy.mark_position_closed(owner.decision_id, "wrong-contract")
+        strategy.mark_position_closed(owner.decision_id, "contract-1")
+        self.assertEqual(strategy.state.position_status, "IDLE")
+
+    def test_reservation_can_only_be_released_by_its_owner_before_send(self):
+        strategy = NexusTradeStrategy()
+        owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
+
+        with self.assertRaisesRegex(ValueError, "owner"):
+            strategy.release_reservation("wrong-owner")
+        strategy.release_reservation(owner.decision_id)
+
+        self.assertEqual(strategy.state.position_status, "IDLE")
+        self.assertIsNone(strategy.state.owner_decision_id)
+
+    def test_quarantine_survives_restart_and_cannot_be_blindly_released(self):
+        strategy = NexusTradeStrategy()
+        owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
+        strategy.mark_position_quarantined(owner.decision_id)
+
+        restarted = NexusTradeStrategy(state=json.loads(json.dumps(strategy.snapshot())))
+
+        self.assertEqual(restarted.state.position_status, "QUARANTINED")
+        self.assertEqual(restarted.state.owner_decision_id, owner.decision_id)
+        with self.assertRaisesRegex(ValueError, "QUARANTINED"):
+            restarted.release_reservation(owner.decision_id)
+        with self.assertRaisesRegex(ValueError, "QUARANTINED"):
+            restarted.mark_position_closed(owner.decision_id, "contract-unknown")
 
     def test_decisions_and_state_are_json_serializable_and_replay_deterministic(self):
         candles = (
@@ -210,7 +246,7 @@ class NexusTradeStrategyTests(unittest.TestCase):
         encoded = json.dumps({
             "state": snapshot,
             "decisions": [asdict(decision) for decision in first_decisions],
-        }, sort_keys=True)
+        }, sort_keys=True, allow_nan=False)
 
         second = NexusTradeStrategy(lane=Lane.CHAMPION)
         second_decisions = [second.on_closed_candle(bar, values)[0] for bar, values in candles]
@@ -231,6 +267,60 @@ class NexusTradeStrategyTests(unittest.TestCase):
             with self.subTest(bar=bar, values=values):
                 with self.assertRaises(ValueError):
                     NexusTradeStrategy().on_closed_candle(bar, values)
+
+    def test_requires_unambiguous_closed_candle_evidence(self):
+        base = candle(0, 99, 101)
+        ambiguous = dict(base)
+        ambiguous.pop("is_closed")
+        ambiguous.pop("close_epoch")
+        cases = (
+            ambiguous,
+            {**base, "is_closed": "true"},
+            {**base, "is_closed": True, "closed": False},
+            {**base, "close_epoch": None},
+            {**base, "close_epoch": 61},
+            {**base, "close_epoch": True},
+            {**base, "closed": "false"},
+        )
+        for bar in cases:
+            with self.subTest(bar=bar):
+                with self.assertRaises(ValueError):
+                    NexusTradeStrategy().on_closed_candle(bar, frame(0))
+
+    def test_setup_state_from_dict_is_strict_about_status_epochs_and_floats(self):
+        valid = SetupState().to_dict()
+        mutations = (
+            {"last_candle_epoch": "60"},
+            {"upper_break_epoch": 1},
+            {"previous_upper": float("nan")},
+            {"position_status": "active"},
+            {"position_status": "IDLE", "owner_decision_id": "owner"},
+            {"unexpected": "field"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises((TypeError, ValueError)):
+                    SetupState.from_dict({**valid, **mutation})
+
+    def test_decision_from_dict_rejects_coercions_nan_and_invalid_domain(self):
+        valid = NexusTradeStrategy().on_closed_candle(
+            candle(0, 99, 101), frame(0)
+        )[0].to_dict()
+        mutations = (
+            {"signal_epoch": "0"},
+            {"target_epoch": 120},
+            {"adx": float("nan")},
+            {"contract_type": "BUY"},
+            {"lane": "unknown"},
+            {"blocked_reason": "STALE"},
+            {"reason_codes": ["center_cross_up", 1]},
+            {"decision_id": ""},
+            {"unexpected": "field"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises((TypeError, ValueError)):
+                    Decision.from_dict({**valid, **mutation})
 
 
 if __name__ == "__main__":
