@@ -195,6 +195,13 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await self.nexus.get_runtime_snapshot()
         version_id = snapshot["lanes"][0]["version"]["id"]
         campaign_id = snapshot["active_campaigns"][0]["id"]
+        invalid_values = {
+            "lane": "invalid-lane",
+            "entry_delay_ms": -1,
+            "nexus_version_id": "missing-version",
+            "campaign_id": "missing-campaign",
+            "decision_id": "missing-decision",
+        }
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys=ON")
             await db.execute(
@@ -204,34 +211,64 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 """,
                 (version_id, campaign_id),
             )
-            with self.assertRaises(aiosqlite.IntegrityError):
-                await db.execute("INSERT INTO trades (lane) VALUES ('invalid')")
-            with self.assertRaises(aiosqlite.IntegrityError):
-                await db.execute(
-                    """
-                    INSERT INTO order_intents (
-                        id, bot_id, account_id, proposal_id, symbol, contract_type, stake, price,
-                        duration, duration_unit, entry_delay_ms
-                    ) VALUES ('intent-negative', 'nexus-trade', 'demo', 'proposal', 'R_100', 'CALL', 0.35, 0.35, 58, 's', -1)
-                    """
-                )
-            await db.execute(
-                "INSERT INTO trades (lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms) VALUES ('champion_baseline', ?, ?, 'decision-ok', 0)",
-                (version_id, campaign_id),
-            )
-            await db.execute(
-                """
-                INSERT INTO order_intents (
-                    id, bot_id, account_id, proposal_id, symbol, contract_type, stake, price,
-                    duration, duration_unit, lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms
-                ) VALUES ('intent-ok', 'nexus-trade', 'demo', 'proposal', 'R_100', 'CALL', 0.35, 0.35, 58, 's', 'champion_baseline', ?, ?, 'decision-ok', 0)
-                """,
-                (version_id, campaign_id),
-            )
-            with self.assertRaises(aiosqlite.IntegrityError):
-                await db.execute("UPDATE trades SET nexus_version_id = 'missing' WHERE lane = 'champion_baseline'")
-            with self.assertRaises(aiosqlite.IntegrityError):
-                await db.execute("UPDATE order_intents SET campaign_id = 'missing' WHERE id = 'intent-ok'")
+            valid_nexus = {
+                "lane": "champion_baseline",
+                "nexus_version_id": version_id,
+                "campaign_id": campaign_id,
+                "decision_id": "decision-ok",
+                "entry_delay_ms": 0,
+            }
+            for journal in ("trades", "order_intents"):
+                for field, invalid_value in invalid_values.items():
+                    with self.subTest(journal=journal, operation="insert", field=field):
+                        values = {**valid_nexus, field: invalid_value}
+                        if journal == "trades":
+                            columns = ", ".join(values)
+                            placeholders = ", ".join("?" for _ in values)
+                            with self.assertRaises(aiosqlite.IntegrityError):
+                                await db.execute(
+                                    f"INSERT INTO trades ({columns}) VALUES ({placeholders})",
+                                    tuple(values.values()),
+                                )
+                        else:
+                            columns = [
+                                "id", "bot_id", "account_id", "proposal_id", "symbol",
+                                "contract_type", "stake", "price", "duration", "duration_unit",
+                                *values.keys(),
+                            ]
+                            parameters = [
+                                f"insert-{field}", "nexus-trade", "demo", "proposal", "R_100",
+                                "CALL", 0.35, 0.35, 58, "s", *values.values(),
+                            ]
+                            with self.assertRaises(aiosqlite.IntegrityError):
+                                await db.execute(
+                                    f"INSERT INTO order_intents ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                                    parameters,
+                                )
+
+                    with self.subTest(journal=journal, operation="update", field=field):
+                        if journal == "trades":
+                            cursor = await db.execute(
+                                "INSERT INTO trades (lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms) VALUES (?, ?, ?, ?, ?)",
+                                tuple(valid_nexus.values()),
+                            )
+                            identity_column, identity_value = "id", cursor.lastrowid
+                        else:
+                            identity_column, identity_value = "id", f"update-{field}"
+                            await db.execute(
+                                """
+                                INSERT INTO order_intents (
+                                    id, bot_id, account_id, proposal_id, symbol, contract_type, stake, price,
+                                    duration, duration_unit, lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms
+                                ) VALUES (?, 'nexus-trade', ?, 'proposal', 'R_100', 'CALL', 0.35, 0.35, 58, 's', ?, ?, ?, ?, ?)
+                                """,
+                                (identity_value, f"demo-{field}", *valid_nexus.values()),
+                            )
+                        with self.assertRaises(aiosqlite.IntegrityError):
+                            await db.execute(
+                                f"UPDATE {journal} SET {field} = ? WHERE {identity_column} = ?",
+                                (invalid_value, identity_value),
+                            )
 
 
 if __name__ == "__main__":
