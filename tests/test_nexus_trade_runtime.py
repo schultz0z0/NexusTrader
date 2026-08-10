@@ -22,6 +22,10 @@ class FakeRepository:
         self.trades = []
         self.restored_states = {}
         self.risk_settlements = []
+        self.recovery_intents = []
+        self.runtime_snapshot = None
+        self.risk_state = None
+        self.fail_atomic_settlement = False
 
     async def record_nexus_decision(self, decision, *, nexus_version_id, campaign_id, state):
         self.decisions.append({
@@ -40,6 +44,31 @@ class FakeRepository:
     async def load_nexus_lane_states(self):
         return {lane: dict(state) for lane, state in self.restored_states.items()}
 
+    async def list_nexus_recovery_intents(self, bot_id):
+        return [dict(intent) for intent in self.recovery_intents]
+
+    async def get_nexus_runtime_snapshot(self):
+        return self.runtime_snapshot
+
+    async def get_risk_state(self, bot_id, initial_stake=1.0):
+        return self.risk_state or {
+            "current_stake": initial_stake,
+            "current_level": 0,
+            "consecutive_wins": 0,
+            "consecutive_losses": 0,
+            "circuit_consecutive_losses": 0,
+            "circuit_tripped_at": 0.0,
+        }
+
+    async def settle_nexus_trade_and_lane(self, trade, *, lane_state, **configuration):
+        if self.fail_atomic_settlement:
+            raise RuntimeError("atomic settlement fault")
+        self.trades.append(dict(trade))
+        self.lane_states[trade["lane"]] = dict(lane_state)
+        if configuration.get("apply_risk"):
+            return await self.settle_trade_and_risk(trade, **configuration)
+        return {"applied": False, "state": None}
+
     async def upsert_trade(self, trade):
         self.trades.append(dict(trade))
 
@@ -57,8 +86,12 @@ class FakeRepository:
 
 
 class FakeDispatcher:
-    def __init__(self, contract_id=700):
+    def __init__(
+        self, contract_id=700, *, account_id="DOT-DEMO", account_type="demo"
+    ):
         self.contract_id = contract_id
+        self.account_id = account_id
+        self.account_type = account_type
         self.intents = []
         self.emergency_stop = False
         self.released = []
@@ -94,6 +127,18 @@ class WaitUntilStoppedCycleSource:
         self.started.set()
         await runtime.stop_event.wait()
         return None
+
+
+class DelayedCycleSource:
+    def __init__(self, cycle):
+        self.cycle = cycle
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, runtime):
+        self.started.set()
+        await self.release.wait()
+        return self.cycle
 
 
 class FakeAuth:
@@ -215,11 +260,14 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         settings.ALLOW_REAL_TRADING = self.previous_allow_real
 
     def runtime(self, **kwargs):
+        champion_factory = kwargs.pop(
+            "champion_dispatcher_factory", lambda config: self.separate,
+        )
         return NexusTradeRuntime(
             self.repository,
             {"id": "nexus-trade", "strategy_id": "nexus_trade", "desired_state": "STOPPED"},
             shared_demo_dispatcher=self.shared,
-            champion_dispatcher_factory=lambda config: self.separate,
+            champion_dispatcher_factory=champion_factory,
             runtime_snapshot=self.snapshot,
             **kwargs,
         )
@@ -274,6 +322,120 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.separate)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
 
+    def test_champion_switch_waits_for_idle_boundary(self):
+        runtime = self.runtime(restored_lane_states={
+            Lane.CHAMPION.value: SetupState(
+                position_status="RESERVED",
+                owner_decision_id="in-flight",
+            ).to_dict(),
+        })
+        on_snapshot = {
+            **self.snapshot,
+            "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
+        }
+
+        with self.assertRaisesRegex(ValueError, "safe boundary"):
+            runtime.apply_champion_mode(on_snapshot)
+
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    def test_champion_account_change_uses_current_exact_config(self):
+        account_a = FakeDispatcher(801, account_id="DEMO-A", account_type="demo")
+        account_b = FakeDispatcher(802, account_id="DEMO-B", account_type="demo")
+        requested = []
+
+        def factory(config):
+            requested.append((config["account_id"], config["account_type"]))
+            return {
+                ("DEMO-A", "demo"): account_a,
+                ("DEMO-B", "demo"): account_b,
+            }[(config["account_id"], config["account_type"])]
+
+        runtime = self.runtime(champion_dispatcher_factory=factory)
+        for account_id in ("DEMO-A", "DEMO-B"):
+            runtime.apply_champion_mode({
+                **self.snapshot,
+                "runtime": {
+                    **self.snapshot["runtime"],
+                    "champion_enabled": 1,
+                    "champion_account_id": account_id,
+                    "champion_account_type": "demo",
+                },
+            })
+
+        self.assertEqual(requested, [("DEMO-A", "demo"), ("DEMO-B", "demo")])
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], account_b)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    def test_factory_identity_mismatch_fails_closed(self):
+        wrong = FakeDispatcher(802, account_id="STALE-DEMO", account_type="demo")
+        runtime = self.runtime(champion_dispatcher_factory=lambda config: wrong)
+        snapshot = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "CURRENT-DEMO",
+                "champion_account_type": "demo",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            runtime.apply_champion_mode(snapshot)
+
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    def test_real_to_demo_switch_uses_no_real_factory_when_real_is_disabled(self):
+        demo = FakeDispatcher(803, account_id="NEW-DEMO", account_type="demo")
+        real = FakeDispatcher(804, account_id="OLD-REAL", account_type="real")
+        requested = []
+
+        def factory(config):
+            requested.append((config["account_id"], config["account_type"]))
+            return demo
+
+        runtime = self.runtime(champion_dispatcher_factory=factory)
+        runtime._champion_enabled = True
+        runtime.dispatchers[Lane.CHAMPION] = real
+
+        runtime.apply_champion_mode({
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "NEW-DEMO",
+                "champion_account_type": "demo",
+            },
+        })
+
+        self.assertFalse(settings.ALLOW_REAL_TRADING)
+        self.assertEqual(requested, [("NEW-DEMO", "demo")])
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], demo)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    async def test_runtime_refresh_applies_new_snapshot_at_boundary(self):
+        updated = FakeDispatcher(805, account_id="UPDATED-DEMO", account_type="demo")
+        runtime = self.runtime(
+            champion_dispatcher_factory=lambda config: updated,
+        )
+        runtime.apply_champion_mode(self.snapshot)
+        self.repository.runtime_snapshot = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "UPDATED-DEMO",
+                "champion_account_type": "demo",
+            },
+        }
+
+        await runtime._refresh_runtime_snapshot()
+
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], updated)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
     async def test_decision_and_active_lifecycle_are_persisted_for_restart(self):
         monitor = FakeMonitor()
         runtime = self.runtime(monitors={Lane.CHAMPION: monitor, Lane.TRIAL: monitor})
@@ -308,6 +470,27 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
+    async def test_stop_blocks_dispatchers_immediately_and_skips_returned_cycle(self):
+        decision, intent = decision_and_intent(Lane.TRIAL)
+        cycle = CausalCycleResult(60, object(), object(), (decision,), (intent,))
+        source = DelayedCycleSource(cycle)
+        runtime = self.runtime(cycle_source=source)
+        runtime._runtime_snapshot = {
+            **self.snapshot,
+            "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
+        }
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+        await runtime.request_stop()
+
+        self.assertTrue(self.shared.emergency_stop)
+        self.assertTrue(self.separate.emergency_stop)
+        source.release.set()
+        await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(self.shared.intents, [])
+        self.assertEqual(self.separate.intents, [])
+
     async def test_run_restores_active_lane_before_waiting_for_the_next_cycle(self):
         champion_state = SetupState(
             position_status="ACTIVE",
@@ -323,6 +506,100 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime.strategies[Lane.CHAMPION].state.contract_id, 919)
         self.assertIn((Lane.CHAMPION.value, 919), self.shared.restored)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_promotes_exact_owned_reserved_journal_to_active(self):
+        decision_id = "owned-after-crash"
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="RESERVED",
+                owner_decision_id=decision_id,
+            ).to_dict(),
+        }
+        self.repository.recovery_intents = [{
+            "id": f"nexus-{decision_id}",
+            "bot_id": "nexus-trade",
+            "lane": Lane.CHAMPION.value,
+            "decision_id": decision_id,
+            "state": "owned",
+            "contract_id": 921,
+            "metadata": {
+                "correlation_id": f"nexus-{decision_id}",
+                "entry_intent": {"decision_id": decision_id},
+            },
+        }]
+        monitor = FakeMonitor()
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(
+            cycle_source=source,
+            monitors={Lane.CHAMPION: monitor, Lane.TRIAL: monitor},
+        )
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        state = runtime.strategies[Lane.CHAMPION].state
+        self.assertEqual(state.position_status, "ACTIVE")
+        self.assertEqual(state.contract_id, 921)
+        self.assertIn((Lane.CHAMPION.value, 921), self.shared.restored)
+        self.assertEqual(monitor.contracts, [921])
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_quarantines_reserved_submitting_journal(self):
+        decision_id = "ambiguous-after-crash"
+        self.repository.restored_states = {
+            Lane.TRIAL.value: SetupState(
+                position_status="RESERVED",
+                owner_decision_id=decision_id,
+            ).to_dict(),
+        }
+        self.repository.recovery_intents = [{
+            "id": f"nexus-{decision_id}",
+            "bot_id": "nexus-trade",
+            "lane": Lane.TRIAL.value,
+            "decision_id": decision_id,
+            "state": "submitting",
+            "contract_id": None,
+            "metadata": {
+                "correlation_id": f"nexus-{decision_id}",
+                "entry_intent": {"decision_id": decision_id},
+            },
+        }]
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(cycle_source=source)
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        state = runtime.strategies[Lane.TRIAL].state
+        self.assertEqual(state.position_status, "QUARANTINED")
+        self.assertEqual(
+            state.quarantine_correlation_id, f"nexus-{decision_id}",
+        )
+        self.assertIn((Lane.TRIAL.value, "QUARANTINED"), self.shared.restored)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_releases_reserved_lane_when_no_transport_journal_exists(self):
+        decision_id = "crash-before-intent"
+        self.repository.restored_states = {
+            Lane.TRIAL.value: SetupState(
+                position_status="RESERVED",
+                owner_decision_id=decision_id,
+            ).to_dict(),
+        }
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(cycle_source=source)
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].state.position_status, "IDLE",
+        )
+        self.assertNotIn((Lane.TRIAL.value, "QUARANTINED"), self.shared.restored)
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
@@ -354,17 +631,19 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repository.risk_settlements, [])
 
     async def test_champion_on_settlement_applies_configured_management(self):
-        runtime = self.runtime(restored_lane_states={
-            Lane.CHAMPION.value: SetupState(
-                position_status="ACTIVE",
-                owner_decision_id="champion-owner",
-                contract_id=717,
-            ).to_dict(),
-        })
+        runtime = self.runtime()
         runtime.apply_champion_mode({
             **self.snapshot,
             "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
         })
+        runtime.strategies[Lane.CHAMPION] = NexusTradeStrategy(
+            lane=Lane.CHAMPION,
+            state=SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="champion-owner",
+                contract_id=717,
+            ),
+        )
 
         await runtime.settle_contract(Lane.CHAMPION, "champion-owner", {
             "contract_id": 717,
@@ -377,6 +656,31 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         configuration = self.repository.risk_settlements[0][1]
         self.assertEqual(configuration["money_management"], "fixed")
         self.assertEqual(configuration["initial_stake"], 0.35)
+
+    async def test_settlement_failure_keeps_lane_and_dispatcher_owned(self):
+        self.repository.fail_atomic_settlement = True
+        runtime = self.runtime(restored_lane_states={
+            Lane.TRIAL.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="trial-fault",
+                contract_id=828,
+            ).to_dict(),
+        })
+        runtime.apply_champion_mode(self.snapshot)
+
+        with self.assertRaisesRegex(RuntimeError, "atomic settlement fault"):
+            await runtime.settle_contract(Lane.TRIAL, "trial-fault", {
+                "contract_id": 828,
+                "status": "won",
+                "buy_price": 0.35,
+                "profit": 0.32,
+            })
+
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].state.position_status, "ACTIVE",
+        )
+        self.assertEqual(self.shared.released, [])
+        self.assertEqual(self.repository.trades, [])
 
     async def test_restart_reconciles_quarantine_only_with_persisted_correlation(self):
         quarantined = SetupState(
@@ -447,6 +751,52 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(markets[0].starts, [("R_100", 60)])
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+        await runtime.close()
+
+    async def test_bootstrap_restores_accumulated_champion_stake_before_factory(self):
+        self.repository.risk_state = {
+            "current_stake": 1.4,
+            "current_level": 0,
+            "consecutive_wins": 1,
+            "consecutive_losses": 0,
+            "circuit_consecutive_losses": 0,
+            "circuit_tripped_at": 0.0,
+        }
+        on_snapshot = {
+            **self.snapshot,
+            "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
+        }
+        observed_stakes = []
+        champion = FakeDispatcher(806)
+
+        def account_dispatcher_factory(connection, repository, **kwargs):
+            observed_stakes.append(kwargs["stake_provider"]())
+            return champion
+
+        runtime = NexusTradeRuntime(
+            self.repository,
+            {
+                "id": "nexus-trade",
+                "strategy_id": "nexus_trade",
+                "desired_state": "STOPPED",
+                "initial_stake": 0.35,
+                "money_management": "soros",
+                "money_config": {"levels": 2, "percent": 0.5},
+            },
+            runtime_snapshot=on_snapshot,
+            auth_factory=FakeAuth,
+            connection_factory=FakeRuntimeConnection,
+            market_data_factory=FakeMarketData,
+            shared_dispatcher_factory=(
+                lambda connection, repository, **kwargs: self.shared
+            ),
+            account_dispatcher_factory=account_dispatcher_factory,
+            monitor_factory=lambda connection: FakeMonitor(),
+        )
+
+        await runtime.bootstrap()
+
+        self.assertEqual(observed_stakes, [1.4])
         await runtime.close()
 
 

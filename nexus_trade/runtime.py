@@ -76,6 +76,12 @@ class NexusTradeRuntime:
         self.monitors = dict(monitors or {})
         self._connections = []
         self._dispatchers_started = set()
+        self._champion_dispatchers = {}
+        self._champion_monitors = {}
+        self._managed_champion_factory = False
+        self._available_accounts = []
+        self._shared_connection = None
+        self._shared_buy_lock = None
         self._last_boundary = None
         self._bootstrapped = shared_demo_dispatcher is not None
         self._stop_event = asyncio.Event()
@@ -110,6 +116,9 @@ class NexusTradeRuntime:
         return self._stop_event
 
     async def request_stop(self):
+        # Block both account queues synchronously before waking/cancelling the
+        # current boundary wait.
+        self.set_emergency_stop(True)
         self._stop_event.set()
 
     async def bootstrap(self) -> None:
@@ -122,6 +131,14 @@ class NexusTradeRuntime:
             if not callable(snapshot_getter):
                 raise ValueError("NexusTrade runtime snapshot is unavailable")
             self._runtime_snapshot = await snapshot_getter()
+
+        risk_loader = getattr(self.repository, "get_risk_state", None)
+        if callable(risk_loader):
+            restored_risk = await risk_loader(
+                self.bot_id,
+                float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
+            )
+            self._restore_champion_risk_state(restored_risk)
 
         if self._auth_factory is None:
             from core.auth import AuthManager
@@ -150,6 +167,7 @@ class NexusTradeRuntime:
                 continue
             if str(account.get("status", "active")).lower() == "active":
                 accounts.append(account)
+        self._available_accounts = list(accounts)
         demos = [account for account in accounts if account["account_type"] == "demo"]
         if not demos:
             await auth.close()
@@ -166,6 +184,8 @@ class NexusTradeRuntime:
             raise ConnectionError("unable to connect the NexusTrade DEMO account")
         self._connections.append(connection)
         shared_buy_lock = asyncio.Lock()
+        self._shared_connection = connection
+        self._shared_buy_lock = shared_buy_lock
         self._shared_demo_dispatcher = self._shared_dispatcher_factory(
             connection,
             self.repository,
@@ -224,9 +244,24 @@ class NexusTradeRuntime:
                 if champion_connection is connection
                 else self._monitor_factory(champion_connection)
             )
-        self._champion_dispatcher_factory = lambda config: (
-            champion_dispatcher if champion_dispatcher is not None else self._shared_demo_dispatcher
-        )
+            self._champion_dispatchers[
+                (selected["account_id"], selected["account_type"])
+            ] = champion_dispatcher
+            self._champion_monitors[
+                (selected["account_id"], selected["account_type"])
+            ] = self._champion_monitor
+        if self._champion_dispatcher_factory is None:
+            self._managed_champion_factory = True
+            def configured_dispatcher(config):
+                identity = (config["account_id"], config["account_type"])
+                dispatcher = self._champion_dispatchers.get(identity)
+                if dispatcher is None:
+                    raise ValueError(
+                        "Champion account dispatcher is not provisioned for current config",
+                    )
+                return dispatcher
+
+            self._champion_dispatcher_factory = configured_dispatcher
         self._market_data = self._market_data_factory(
             connection,
             bot_id=self.bot_id,
@@ -246,13 +281,15 @@ class NexusTradeRuntime:
             await self._market_data.close()
             self._market_data = None
         seen_monitors = set()
-        for monitor in self.monitors.values():
+        for monitor in [*self.monitors.values(), *self._champion_monitors.values()]:
             if monitor is None or id(monitor) in seen_monitors:
                 continue
             await monitor.close()
             seen_monitors.add(id(monitor))
         seen = set()
-        for dispatcher in self.dispatchers.values():
+        for dispatcher in [
+            *self.dispatchers.values(), *self._champion_dispatchers.values(),
+        ]:
             if dispatcher is None or id(dispatcher) in seen:
                 continue
             closer = getattr(dispatcher, "close", None)
@@ -314,13 +351,12 @@ class NexusTradeRuntime:
     def apply_champion_mode(self, snapshot: dict) -> None:
         runtime = snapshot.get("runtime") or {}
         lanes = snapshot.get("lanes") or []
-        versions = {
+        next_versions = {
             Lane(item["lane"]): (item.get("version") or {}).get("id")
             for item in lanes
         }
-        self._versions.update(versions)
         active_campaigns = snapshot.get("active_campaigns") or []
-        self._campaigns[Lane.TRIAL] = next(
+        next_trial_campaign = next(
             (
                 item.get("id")
                 for item in active_campaigns
@@ -330,15 +366,22 @@ class NexusTradeRuntime:
         )
         if self._shared_demo_dispatcher is None:
             raise ValueError("the shared DEMO dispatcher is not configured")
-        self.dispatchers[Lane.TRIAL] = self._shared_demo_dispatcher
+        shared_identity = self._dispatcher_identity(self._shared_demo_dispatcher)
+        if shared_identity[1] != "demo":
+            raise ValueError("Trial dispatcher must remain on a DEMO account")
         enabled = runtime.get("champion_enabled", 0)
         if enabled not in {0, 1, False, True}:
             raise ValueError("champion_enabled must be boolean")
-        self._champion_enabled = bool(enabled)
-        if not bool(enabled):
-            self.dispatchers[Lane.CHAMPION] = self._shared_demo_dispatcher
-            if self._shared_demo_monitor is not None:
-                self.monitors[Lane.CHAMPION] = self._shared_demo_monitor
+        desired_enabled = bool(enabled)
+        current_dispatcher = self.dispatchers.get(Lane.CHAMPION)
+        current_identity = (
+            self._dispatcher_identity(current_dispatcher)
+            if current_dispatcher is not None
+            else (None, None)
+        )
+        if not desired_enabled:
+            desired_identity = shared_identity
+            desired_dispatcher = self._shared_demo_dispatcher
         else:
             account_type = str(runtime.get("champion_account_type") or "").lower()
             account_id = str(runtime.get("champion_account_id") or "").strip()
@@ -347,16 +390,47 @@ class NexusTradeRuntime:
                 raise ValueError("Champion ON requires a selected account")
             if self._champion_dispatcher_factory is None:
                 raise ValueError("Champion ON dispatcher is not configured")
+            desired_identity = (account_id, account_type)
+        route_changes = (
+            desired_enabled != self._champion_enabled
+            or current_identity != desired_identity
+        )
+        if (
+            route_changes
+            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+        ):
+            raise ValueError(
+                "Champion dispatcher can only switch at a safe boundary with an IDLE lane",
+            )
+        if desired_enabled:
             config = {
-                "account_id": account_id,
-                "account_type": account_type,
+                "account_id": desired_identity[0],
+                "account_type": desired_identity[1],
                 "stake": float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
                 "money_management": self.bot.get("money_management", "fixed"),
                 "money_config": dict(self.bot.get("money_config") or {}),
                 "risk_config": dict(self.bot.get("risk_config") or {}),
             }
-            self.dispatchers[Lane.CHAMPION] = self._champion_dispatcher_factory(config)
-            if self._champion_monitor is not None:
+            desired_dispatcher = self._champion_dispatcher_factory(config)
+            if self._dispatcher_identity(desired_dispatcher) != desired_identity:
+                raise ValueError(
+                    "Champion dispatcher identity mismatch for current configuration",
+                )
+
+        # Commit the route only after all validation/factory work succeeds.
+        self.dispatchers[Lane.TRIAL] = self._shared_demo_dispatcher
+        self.dispatchers[Lane.CHAMPION] = desired_dispatcher
+        self._champion_enabled = desired_enabled
+        self._versions.update(next_versions)
+        self._campaigns[Lane.TRIAL] = next_trial_campaign
+        if not desired_enabled:
+            if self._shared_demo_monitor is not None:
+                self.monitors[Lane.CHAMPION] = self._shared_demo_monitor
+        else:
+            champion_monitor = self._champion_monitors.get(desired_identity)
+            if champion_monitor is not None:
+                self.monitors[Lane.CHAMPION] = champion_monitor
+            elif self._champion_monitor is not None:
                 self.monitors[Lane.CHAMPION] = self._champion_monitor
         if self._shared_demo_monitor is not None:
             self.monitors[Lane.TRIAL] = self._shared_demo_monitor
@@ -371,6 +445,16 @@ class NexusTradeRuntime:
                 )
             dispatcher.set_emergency_stop(self._emergency_stop)
 
+    @staticmethod
+    def _dispatcher_identity(dispatcher) -> tuple[str, str]:
+        account_id = str(getattr(dispatcher, "account_id", "") or "").strip()
+        account_type = str(
+            getattr(dispatcher, "account_type", "") or "",
+        ).lower()
+        if not account_id or account_type not in {"demo", "real"}:
+            raise ValueError("dispatcher must expose an exact account identity")
+        return account_id, account_type
+
     def set_emergency_stop(self, enabled: bool) -> None:
         if type(enabled) is not bool:
             raise TypeError("emergency_stop must be boolean")
@@ -381,9 +465,20 @@ class NexusTradeRuntime:
                 dispatcher.set_emergency_stop(enabled)
                 seen.add(id(dispatcher))
 
+    def _restore_champion_risk_state(self, state: dict) -> None:
+        self._champion_money_manager.restore_state(state)
+        # MoneyManager's legacy restore resets level-zero state to the initial
+        # stake, but a level-zero Soros cycle can have a durable accumulated stake.
+        if state.get("current_stake") is not None:
+            self._champion_money_manager.current_stake = float(
+                state["current_stake"],
+            )
+
     async def process_cycle(self, cycle: CausalCycleResult) -> None:
         if type(cycle) is not CausalCycleResult:
             raise TypeError("process_cycle requires CausalCycleResult")
+        if self._stop_event.is_set() or self._emergency_stop:
+            return
         decisions = {decision.decision_id: decision for decision in cycle.decisions}
         for intent in cycle.intents:
             decision = decisions[intent.decision_id]
@@ -513,14 +608,21 @@ class NexusTradeRuntime:
             "decision_id": owner_decision_id,
             "entry_delay_ms": contract.get("entry_delay_ms"),
         }
-        await self.repository.upsert_trade(trade)
-        if (
-            lane is Lane.CHAMPION
-            and self._champion_enabled
-            and hasattr(self.repository, "settle_trade_and_risk")
-        ):
-            result = await self.repository.settle_trade_and_risk(
+        settled_state = replace(
+            strategy.state,
+            position_status="IDLE",
+            owner_decision_id=None,
+            contract_id=None,
+        ).to_dict()
+        apply_risk = lane is Lane.CHAMPION and self._champion_enabled
+        atomic_settler = getattr(
+            self.repository, "settle_nexus_trade_and_lane", None,
+        )
+        if callable(atomic_settler):
+            result = await atomic_settler(
                 trade,
+                lane_state=settled_state,
+                apply_risk=apply_risk,
                 money_management=self.bot.get("money_management", "fixed"),
                 money_config=dict(self.bot.get("money_config") or {}),
                 risk_config=dict(self.bot.get("risk_config") or {}),
@@ -531,12 +633,34 @@ class NexusTradeRuntime:
                     or time.time()
                 ),
             )
-            if isinstance(result, dict) and isinstance(result.get("state"), dict):
-                self._champion_money_manager.restore_state(result["state"])
+        else:
+            await self.repository.upsert_trade(trade)
+            result = None
+            if (
+                apply_risk
+                and hasattr(self.repository, "settle_trade_and_risk")
+            ):
+                result = await self.repository.settle_trade_and_risk(
+                    trade,
+                    money_management=self.bot.get("money_management", "fixed"),
+                    money_config=dict(self.bot.get("money_config") or {}),
+                    risk_config=dict(self.bot.get("risk_config") or {}),
+                    initial_stake=float(
+                        self.bot.get("initial_stake", NEXUS_DEMO_STAKE),
+                    ),
+                    settled_epoch=float(
+                        contract.get("sell_time")
+                        or contract.get("date_expiry")
+                        or time.time()
+                    ),
+                )
+        if isinstance(result, dict) and isinstance(result.get("state"), dict):
+            self._restore_champion_risk_state(result["state"])
         strategy.mark_position_closed(owner_decision_id, contract_id)
         dispatcher = self.dispatchers[lane]
         dispatcher.release_position(lane, contract_id)
-        await self._save_lane_state(lane)
+        if not callable(atomic_settler):
+            await self._save_lane_state(lane)
 
     async def _restore_lane_states(self) -> None:
         loader = getattr(self.repository, "load_nexus_lane_states", None)
@@ -546,6 +670,76 @@ class NexusTradeRuntime:
                 state = stored.get(lane.value) if isinstance(stored, dict) else None
                 if state is not None:
                     self.strategies[lane] = NexusTradeStrategy(lane=lane, state=state)
+
+    async def _recover_reserved_lanes(self) -> None:
+        loader = getattr(self.repository, "list_nexus_recovery_intents", None)
+        if not callable(loader):
+            return
+        journals = await loader(self.bot_id)
+        for lane, strategy in self.strategies.items():
+            state = strategy.state
+            if state.position_status != "RESERVED":
+                continue
+            matches = [
+                item
+                for item in (journals or [])
+                if item.get("lane") == lane.value
+                and item.get("decision_id") == state.owner_decision_id
+                and item.get("id") == f"nexus-{state.owner_decision_id}"
+            ]
+            if not matches:
+                # The durable reservation precedes create_order_intent. With no
+                # transport journal, no buy could have been sent.
+                strategy.release_reservation(state.owner_decision_id)
+                await self._save_lane_state(lane)
+                continue
+            if len(matches) != 1:
+                correlation_id = f"nexus-{state.owner_decision_id}"
+                strategy.mark_position_quarantined(
+                    state.owner_decision_id, correlation_id,
+                )
+                await self._save_lane_state(lane)
+                continue
+            intent = matches[0]
+            correlation_id = intent["id"]
+            journal_state = intent.get("state")
+            if journal_state == "owned":
+                metadata = intent.get("metadata") or {}
+                entry_intent = metadata.get("entry_intent") or {}
+                contract_id = intent.get("contract_id")
+                exact = (
+                    metadata.get("correlation_id") == correlation_id
+                    and entry_intent.get("decision_id") == state.owner_decision_id
+                    and not isinstance(contract_id, bool)
+                    and type(contract_id) is int
+                    and contract_id > 0
+                )
+                if exact:
+                    strategy.mark_position_active(
+                        state.owner_decision_id, contract_id,
+                    )
+                else:
+                    strategy.mark_position_quarantined(
+                        state.owner_decision_id, correlation_id,
+                    )
+            elif journal_state in {"submitting", "reconcile_pending", "ambiguous"}:
+                strategy.mark_position_quarantined(
+                    state.owner_decision_id, correlation_id,
+                )
+            elif journal_state == "prepared":
+                updater = getattr(self.repository, "update_order_intent", None)
+                if callable(updater):
+                    await updater(
+                        correlation_id,
+                        "cancelled",
+                        error="restart occurred before Nexus buy transport",
+                    )
+                strategy.release_reservation(state.owner_decision_id)
+            else:
+                strategy.mark_position_quarantined(
+                    state.owner_decision_id, correlation_id,
+                )
+            await self._save_lane_state(lane)
 
     def _restore_dispatcher_ownership(self) -> None:
         for lane, strategy in self.strategies.items():
@@ -580,12 +774,87 @@ class NexusTradeRuntime:
                     lane, state.owner_decision_id, state.contract_id,
                 )
 
+    async def _refresh_runtime_snapshot(self) -> None:
+        getter = getattr(self.repository, "get_nexus_runtime_snapshot", None)
+        if not callable(getter):
+            return
+        snapshot = await getter()
+        if snapshot is None or snapshot == self._runtime_snapshot:
+            return
+        await self._provision_champion_dispatcher(snapshot)
+        self.apply_champion_mode(snapshot)
+        self._runtime_snapshot = snapshot
+
+    async def _provision_champion_dispatcher(self, snapshot: dict) -> None:
+        if not self._managed_champion_factory:
+            return
+        runtime = snapshot.get("runtime") or {}
+        if not bool(runtime.get("champion_enabled", 0)):
+            return
+        identity = (
+            str(runtime.get("champion_account_id") or "").strip(),
+            str(runtime.get("champion_account_type") or "").lower(),
+        )
+        ensure_account_allowed(identity[1])
+        current = self.dispatchers.get(Lane.CHAMPION)
+        current_identity = (
+            self._dispatcher_identity(current) if current is not None else (None, None)
+        )
+        route_changes = not self._champion_enabled or current_identity != identity
+        if (
+            route_changes
+            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+        ):
+            raise ValueError(
+                "Champion dispatcher can only switch at a safe boundary with an IDLE lane",
+            )
+        if identity in self._champion_dispatchers:
+            return
+        selected = next(
+            (
+                account for account in self._available_accounts
+                if (account["account_id"], account["account_type"]) == identity
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError("selected Champion account is unavailable")
+        if identity == self._dispatcher_identity(self._shared_demo_dispatcher):
+            connection = self._shared_connection
+            buy_lock = self._shared_buy_lock
+            monitor = self._shared_demo_monitor
+        else:
+            auth = self._auth_factory()
+            connection = self._connection_factory(auth)
+            if not await connection.connect(identity[0]):
+                await auth.close()
+                raise ConnectionError("unable to connect the selected Champion account")
+            self._connections.append(connection)
+            buy_lock = asyncio.Lock()
+            monitor = self._monitor_factory(connection)
+        dispatcher = self._account_dispatcher_factory(
+            connection,
+            self.repository,
+            account_id=identity[0],
+            account_type=identity[1],
+            stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
+            stake_provider=self._champion_money_manager.get_stake,
+            buy_lock=buy_lock,
+        )
+        starter = getattr(dispatcher, "start", None)
+        if callable(starter):
+            await starter()
+            self._dispatchers_started.add(id(dispatcher))
+        self._champion_dispatchers[identity] = dispatcher
+        self._champion_monitors[identity] = monitor
+
     async def run(self):
         self._stop_event.clear()
         try:
             await self.bootstrap()
             await self._restore_lane_states()
             self.apply_champion_mode(self._runtime_snapshot)
+            await self._recover_reserved_lanes()
             self._restore_dispatcher_ownership()
             await self._reconcile_quarantines()
             await self._resume_active_monitors()
@@ -593,8 +862,27 @@ class NexusTradeRuntime:
                 if hasattr(self.repository, "touch_bot_heartbeat"):
                     await self.repository.touch_bot_heartbeat(self.bot_id)
                 produced = self._cycle_source(self)
-                cycle = await produced if inspect.isawaitable(produced) else produced
-                if cycle is not None:
+                if inspect.isawaitable(produced):
+                    cycle_task = asyncio.create_task(produced)
+                    stop_task = asyncio.create_task(self._stop_event.wait())
+                    done, _ = await asyncio.wait(
+                        {cycle_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if stop_task in done:
+                        if not cycle_task.done():
+                            cycle_task.cancel()
+                        await asyncio.gather(cycle_task, return_exceptions=True)
+                        break
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
+                    cycle = await cycle_task
+                else:
+                    cycle = produced
+                if self._stop_event.is_set():
+                    break
+                await self._refresh_runtime_snapshot()
+                if cycle is not None and not self._stop_event.is_set():
                     await self.process_cycle(cycle)
                 elif not self._stop_event.is_set():
                     await asyncio.sleep(0)

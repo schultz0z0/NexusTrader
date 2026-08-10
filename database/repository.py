@@ -668,6 +668,98 @@ class DatabaseRepository:
             await db.commit()
         return await self.get_order_intent(intent_id)
 
+    async def commit_nexus_known_ownership(
+        self,
+        intent_id: str,
+        contract: dict,
+        *,
+        entry_intent: dict,
+        entry_delay_ms: int,
+    ) -> dict:
+        """Atomically own a contract and move its Nexus lane to ACTIVE."""
+        contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
+        if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:
+            raise ValueError("contract_id must be a positive integer")
+        if isinstance(entry_delay_ms, bool) or type(entry_delay_ms) is not int or entry_delay_ms < 0:
+            raise ValueError("entry_delay_ms must be a non-negative integer")
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            db.row_factory = aiosqlite.Row
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM order_intents WHERE id = ?", (intent_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("Nexus ownership intent does not exist")
+                stored = self._decode_order_intent(row)
+                lane = stored.get("lane")
+                decision_id = stored.get("decision_id")
+                if not lane or not decision_id:
+                    raise ValueError("Nexus ownership requires lane and decision_id")
+                async with db.execute(
+                    "SELECT id FROM order_intents WHERE contract_id = ? AND id != ?",
+                    (contract_id, intent_id),
+                ) as cursor:
+                    collision = await cursor.fetchone()
+                if collision is not None:
+                    raise ValueError(
+                        f"contract_id {contract_id} is already owned by {collision['id']}",
+                    )
+                metadata = {
+                    **(stored.get("metadata") or {}),
+                    "entry_intent": dict(entry_intent),
+                    **dict(contract),
+                }
+                transaction_id = contract.get("transaction_id")
+                await db.execute(
+                    """
+                    UPDATE order_intents
+                    SET state = 'owned', contract_id = ?, transaction_id = ?,
+                        entry_delay_ms = ?, error = NULL, metadata = ?,
+                        resolved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        contract_id,
+                        int(transaction_id) if transaction_id is not None else None,
+                        entry_delay_ms,
+                        json.dumps(metadata),
+                        intent_id,
+                    ),
+                )
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE id = ? AND lane = ?",
+                    (decision_id, lane),
+                ) as cursor:
+                    decision = await cursor.fetchone()
+                if decision is None:
+                    raise ValueError("durable RESERVED Nexus decision was not found")
+                payload = json.loads(decision["payload"])
+                state = dict(payload.get("state") or {})
+                state.update(
+                    position_status="ACTIVE",
+                    owner_decision_id=decision_id,
+                    contract_id=contract_id,
+                    quarantine_correlation_id=None,
+                )
+                payload["state"] = state
+                await db.execute(
+                    "UPDATE nexus_decisions SET entry_delay_ms = ?, payload = ? WHERE id = ?",
+                    (
+                        entry_delay_ms,
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        decision_id,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return await self.get_order_intent(intent_id)
+
     async def record_nexus_decision(
         self,
         decision: dict,
@@ -781,6 +873,26 @@ class DatabaseRepository:
                     self._decode_order_intent(row) for row in await cursor.fetchall()
                 ]
 
+    async def list_nexus_recovery_intents(self, bot_id: str) -> list:
+        """Return Nexus lifecycle journals needed to recover RESERVED lanes."""
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT * FROM order_intents
+                WHERE bot_id = ? AND lane IS NOT NULL AND decision_id IS NOT NULL
+                  AND state IN (
+                      'prepared', 'submitting', 'reconcile_pending',
+                      'ambiguous', 'owned'
+                  )
+                ORDER BY created_at, id
+                """,
+                (bot_id,),
+            ) as cursor:
+                return [
+                    self._decode_order_intent(row) for row in await cursor.fetchall()
+                ]
+
     async def list_order_intents(self, bot_id: str, limit=100) -> list:
         limit = max(1, min(int(limit), 1000))
         async with self._connection() as db:
@@ -824,19 +936,35 @@ class DatabaseRepository:
         contract_id = int(contract["contract_id"])
         transaction_id = contract.get("transaction_id")
         async with self._connection() as db:
-            await db.execute("""
-                UPDATE order_intents
-                SET state = 'owned', contract_id = ?, transaction_id = ?, error = NULL,
-                    metadata = ?, resolved_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (
-                contract_id,
-                int(transaction_id) if transaction_id is not None else None,
-                json.dumps(contract),
-                intent_id,
-            ))
-            await db.commit()
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute(
+                    "SELECT metadata FROM order_intents WHERE id = ?", (intent_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("order intent does not exist")
+                metadata = {
+                    **json.loads(row["metadata"] or "{}"),
+                    **dict(contract),
+                }
+                await db.execute("""
+                    UPDATE order_intents
+                    SET state = 'owned', contract_id = ?, transaction_id = ?, error = NULL,
+                        metadata = ?, resolved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    contract_id,
+                    int(transaction_id) if transaction_id is not None else None,
+                    json.dumps(metadata),
+                    intent_id,
+                ))
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
         return await self.get_order_intent(intent_id)
 
     @staticmethod
@@ -961,6 +1089,180 @@ class DatabaseRepository:
             )
             await db.commit()
         return {"applied": True, "state": next_state}
+
+    async def settle_nexus_trade_and_lane(
+        self,
+        trade_data: dict,
+        *,
+        lane_state: dict,
+        apply_risk: bool,
+        money_management: str,
+        money_config: dict,
+        risk_config: dict,
+        initial_stake: float,
+        settled_epoch: float,
+    ) -> dict:
+        """Commit Nexus trade, optional risk, ownership journal and IDLE lane together."""
+        if type(apply_risk) is not bool:
+            raise TypeError("apply_risk must be boolean")
+        if lane_state.get("position_status") != "IDLE":
+            raise ValueError("settled Nexus lane state must be IDLE")
+        bot_id = trade_data["bot_id"]
+        contract_id = int(trade_data["contract_id"])
+        lane = trade_data["lane"]
+        decision_id = trade_data["decision_id"]
+        columns = (
+            "bot_id", "session_id", "strategy_name", "symbol", "contract_type",
+            "contract_id", "stake", "payout", "profit", "result", "status",
+            "entry_spot", "exit_spot", "purchase_time", "expiry_time",
+            "lane", "nexus_version_id", "campaign_id", "decision_id",
+            "entry_delay_ms",
+        )
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            db.row_factory = aiosqlite.Row
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT risk_applied FROM trades WHERE bot_id = ? AND contract_id = ?",
+                    (bot_id, contract_id),
+                ) as cursor:
+                    existing_trade = await cursor.fetchone()
+                updated = await db.execute(
+                    """
+                    UPDATE trades SET
+                        session_id = ?, strategy_name = ?, symbol = ?, contract_type = ?,
+                        stake = ?, payout = ?, profit = ?, result = ?, status = ?,
+                        entry_spot = ?, exit_spot = ?, purchase_time = ?, expiry_time = ?,
+                        lane = ?, nexus_version_id = ?, campaign_id = ?, decision_id = ?,
+                        entry_delay_ms = ?
+                    WHERE bot_id = ? AND contract_id = ?
+                    """,
+                    (
+                        trade_data.get("session_id"), trade_data.get("strategy_name"),
+                        trade_data.get("symbol"), trade_data.get("contract_type"),
+                        trade_data.get("stake"), trade_data.get("payout"),
+                        trade_data.get("profit"), trade_data.get("result"),
+                        trade_data.get("status"), trade_data.get("entry_spot"),
+                        trade_data.get("exit_spot"), trade_data.get("purchase_time"),
+                        trade_data.get("expiry_time"), lane,
+                        trade_data.get("nexus_version_id"),
+                        trade_data.get("campaign_id"), decision_id,
+                        trade_data.get("entry_delay_ms"), bot_id, contract_id,
+                    ),
+                )
+                if not updated.rowcount:
+                    placeholders = ", ".join("?" for _ in columns)
+                    await db.execute(
+                        f"INSERT INTO trades ({', '.join(columns)}) VALUES ({placeholders})",
+                        [trade_data.get(column) for column in columns],
+                    )
+
+                next_state = None
+                risk_applied = False
+                if apply_risk:
+                    async with db.execute(
+                        "SELECT * FROM risk_states WHERE bot_id = ?", (bot_id,),
+                    ) as cursor:
+                        stored_state = self._decode_risk_state(
+                            await cursor.fetchone(), initial_stake,
+                        )
+                    already_applied = (
+                        existing_trade is not None
+                        and int(existing_trade["risk_applied"] or 0) == 1
+                    )
+                    if already_applied:
+                        next_state = stored_state
+                    else:
+                        next_state = advance_risk_state(
+                            stored_state,
+                            is_win=(
+                                str(trade_data.get("result") or "").lower() == "won"
+                                or float(trade_data.get("profit") or 0) > 0
+                            ),
+                            profit=float(trade_data.get("profit") or 0),
+                            mode=money_management,
+                            initial_stake=float(initial_stake),
+                            money_config=money_config or {},
+                            risk_config=risk_config or {},
+                            settled_epoch=float(settled_epoch),
+                        )
+                        await db.execute(
+                            """
+                            INSERT INTO risk_states (
+                                bot_id, current_stake, current_level,
+                                consecutive_wins, consecutive_losses,
+                                circuit_consecutive_losses, circuit_tripped_at,
+                                updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            ON CONFLICT(bot_id) DO UPDATE SET
+                                current_stake = excluded.current_stake,
+                                current_level = excluded.current_level,
+                                consecutive_wins = excluded.consecutive_wins,
+                                consecutive_losses = excluded.consecutive_losses,
+                                circuit_consecutive_losses = excluded.circuit_consecutive_losses,
+                                circuit_tripped_at = excluded.circuit_tripped_at,
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (
+                                bot_id, next_state["current_stake"],
+                                next_state["current_level"],
+                                next_state["consecutive_wins"],
+                                next_state["consecutive_losses"],
+                                next_state["circuit_consecutive_losses"],
+                                next_state["circuit_tripped_at"],
+                            ),
+                        )
+                        await db.execute(
+                            "UPDATE trades SET risk_applied = 1 WHERE bot_id = ? AND contract_id = ?",
+                            (bot_id, contract_id),
+                        )
+                        risk_applied = True
+
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE id = ? AND lane = ?",
+                    (decision_id, lane),
+                ) as cursor:
+                    decision = await cursor.fetchone()
+                if decision is None:
+                    raise ValueError("settlement Nexus decision journal was not found")
+                payload = json.loads(decision["payload"])
+                payload["state"] = dict(lane_state)
+                await db.execute(
+                    "UPDATE nexus_decisions SET payload = ? WHERE id = ?",
+                    (
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        decision_id,
+                    ),
+                )
+                intent_id = f"nexus-{decision_id}"
+                async with db.execute(
+                    "SELECT metadata FROM order_intents WHERE id = ? AND contract_id = ?",
+                    (intent_id, contract_id),
+                ) as cursor:
+                    intent = await cursor.fetchone()
+                if intent is None:
+                    raise ValueError("settlement ownership journal was not found")
+                metadata = json.loads(intent["metadata"] or "{}")
+                metadata["settlement"] = {
+                    "contract_id": contract_id,
+                    "result": trade_data.get("result"),
+                    "profit": trade_data.get("profit"),
+                }
+                await db.execute(
+                    """
+                    UPDATE order_intents
+                    SET state = 'settled', metadata = ?, resolved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND contract_id = ?
+                    """,
+                    (json.dumps(metadata), intent_id, contract_id),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return {"applied": risk_applied, "state": next_state}
 
     async def record_bot_health(
         self,

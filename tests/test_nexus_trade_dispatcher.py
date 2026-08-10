@@ -14,12 +14,15 @@ from nexus_trade.dispatcher import (
     StaleIntentError,
 )
 from nexus_trade.domain import Lane
+from trading.ownership import OrderOwnershipReconciler
 
 
 class FakeRepository:
     def __init__(self):
         self.intents = {}
         self.transitions = []
+        self.submitting_started = None
+        self.release_submitting = None
 
     async def create_order_intent(self, data):
         value = {
@@ -36,6 +39,9 @@ class FakeRepository:
         return dict(self.intents[intent_id])
 
     async def update_order_intent(self, intent_id, state, *, error=None, metadata=None):
+        if state == "submitting" and self.submitting_started is not None:
+            self.submitting_started.set()
+            await self.release_submitting.wait()
         value = self.intents[intent_id]
         value["state"] = state
         value["error"] = error
@@ -50,9 +56,30 @@ class FakeRepository:
         self.transitions.append((intent_id, "owned"))
         return dict(value)
 
+    async def commit_nexus_known_ownership(
+        self, intent_id, contract, *, entry_intent, entry_delay_ms
+    ):
+        value = self.intents[intent_id]
+        value.update(
+            state="owned",
+            contract_id=contract["contract_id"],
+            transaction_id=contract.get("transaction_id"),
+            entry_delay_ms=entry_delay_ms,
+        )
+        value["metadata"] = {
+            **value.get("metadata", {}),
+            "entry_intent": dict(entry_intent),
+            **contract,
+        }
+        self.transitions.append((intent_id, "owned"))
+        return dict(value)
+
 
 class FailingFinalJournalRepository(FakeRepository):
-    async def finalize_nexus_order_intent(self, intent_id, **changes):
+    async def commit_nexus_known_ownership(self, intent_id, contract, **changes):
+        await super().commit_nexus_known_ownership(
+            intent_id, contract, **changes,
+        )
         raise RuntimeError("final journal unavailable")
 
 
@@ -103,6 +130,18 @@ class FakeConnection:
             }
         finally:
             self.parallel_buy_calls -= 1
+
+
+class ReconciliationConnection:
+    def __init__(self, candidates):
+        self.candidates = candidates
+
+    async def send(self, request):
+        if "portfolio" in request:
+            return {"portfolio": {"contracts": []}}
+        if "statement" in request:
+            return {"statement": {"transactions": list(self.candidates)}}
+        raise AssertionError(f"unexpected request: {request}")
 
 
 def pending_intent(decision_id, lane, *, prepared_epoch=60.0):
@@ -160,6 +199,12 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             await self.dispatcher.submit(pending_intent("champion-2", Lane.CHAMPION))
 
         self.assertEqual(self.connection.buy_calls, 1)
+
+    def test_one_contract_id_cannot_be_restored_into_two_lanes(self):
+        self.dispatcher.restore_position(Lane.CHAMPION, 9001)
+
+        with self.assertRaisesRegex(ValueError, "already owned"):
+            self.dispatcher.restore_position(Lane.TRIAL, 9001)
 
     async def test_stale_intent_is_persisted_without_any_buy(self):
         self.now = 62.001
@@ -227,6 +272,109 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             await self.dispatcher.submit(pending_intent("quote-race", Lane.CHAMPION))
 
         self.assertEqual(self.connection.buy_calls, 0)
+
+    async def test_stop_while_submitting_journal_is_blocked_prevents_transport(self):
+        self.repository.submitting_started = asyncio.Event()
+        self.repository.release_submitting = asyncio.Event()
+        submit = asyncio.create_task(
+            self.dispatcher.submit(pending_intent("blocked-journal-stop", Lane.TRIAL)),
+        )
+        await self.repository.submitting_started.wait()
+
+        self.dispatcher.set_emergency_stop(True)
+        self.repository.release_submitting.set()
+
+        with self.assertRaises(EmergencyStopError):
+            await submit
+        self.assertEqual(self.connection.buy_calls, 0)
+
+    async def test_stale_while_submitting_journal_is_blocked_prevents_transport(self):
+        self.repository.submitting_started = asyncio.Event()
+        self.repository.release_submitting = asyncio.Event()
+        submit = asyncio.create_task(
+            self.dispatcher.submit(pending_intent("blocked-journal-stale", Lane.CHAMPION)),
+        )
+        await self.repository.submitting_started.wait()
+
+        self.now = 62.001
+        self.repository.release_submitting.set()
+
+        with self.assertRaises(StaleIntentError):
+            await submit
+        self.assertEqual(self.connection.buy_calls, 0)
+
+    async def test_reconciliation_never_claims_other_lane_candidate(self):
+        confirmed_id = "nexus-confirmed-champion"
+        candidate = {
+            "contract_id": 7001,
+            "action": "buy",
+            "symbol": "R_100",
+            "contract_type": "CALL",
+            "buy_price": 0.35,
+            "transaction_time": 60,
+            "passthrough": {
+                "order_intent_id": confirmed_id,
+                "decision_id": "confirmed-champion",
+                "lane": Lane.CHAMPION.value,
+            },
+        }
+        lost_id = "nexus-lost-trial"
+        self.repository.intents[lost_id] = {
+            "id": lost_id,
+            "decision_id": "lost-trial",
+            "lane": Lane.TRIAL.value,
+            "symbol": "R_100",
+            "contract_type": "CALL",
+            "price": 0.35,
+            "signal_epoch": 60,
+            "state": "reconcile_pending",
+            "metadata": {
+                "correlation_id": lost_id,
+                "entry_intent": {"decision_id": "lost-trial"},
+            },
+        }
+        reconciler = OrderOwnershipReconciler(
+            ReconciliationConnection([candidate]),
+            self.repository,
+        )
+
+        result = await reconciler.reconcile(self.repository.intents[lost_id])
+
+        self.assertIsNone(result)
+        self.assertEqual(self.repository.intents[lost_id]["state"], "reconcile_pending")
+        self.assertIsNone(self.repository.intents[lost_id].get("contract_id"))
+
+    async def test_reconciliation_requires_both_exact_correlation_fields(self):
+        correlation_id = "nexus-lost-trial"
+        intent = {
+            "id": correlation_id,
+            "decision_id": "lost-trial",
+            "lane": Lane.TRIAL.value,
+            "symbol": "R_100",
+            "contract_type": "CALL",
+            "price": 0.35,
+            "signal_epoch": 60,
+            "state": "reconcile_pending",
+            "metadata": {
+                "correlation_id": correlation_id,
+                "entry_intent": {"decision_id": "lost-trial"},
+            },
+        }
+        self.repository.intents[correlation_id] = intent
+        missing_decision = {
+            "contract_id": 7002,
+            "action": "buy",
+            "symbol": "R_100",
+            "contract_type": "CALL",
+            "buy_price": 0.35,
+            "transaction_time": 60,
+            "passthrough": {"order_intent_id": correlation_id},
+        }
+        reconciler = OrderOwnershipReconciler(
+            ReconciliationConnection([missing_decision]), self.repository,
+        )
+
+        self.assertIsNone(await reconciler.reconcile(intent))
 
     def test_shared_dispatcher_rejects_non_demo_accounts_and_non_exact_stake(self):
         with self.assertRaises(ValueError):
@@ -311,10 +459,159 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored["nexus_version_id"], version_id)
             self.assertEqual(stored["decision_id"], decision_id)
             self.assertEqual(stored["entry_delay_ms"], 250)
-            active = {**reserved, "position_status": "ACTIVE", "contract_id": receipt.contract_id}
-            await repository.save_nexus_lane_state(Lane.CHAMPION.value, active)
             restored = await repository.load_nexus_lane_states()
-            self.assertEqual(restored[Lane.CHAMPION.value], active)
+            self.assertEqual(
+                restored[Lane.CHAMPION.value],
+                {
+                    **reserved,
+                    "position_status": "ACTIVE",
+                    "contract_id": receipt.contract_id,
+                },
+            )
+
+    async def test_known_ownership_and_lane_active_rollback_together(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = DatabaseRepository(str(Path(temp_dir) / "runtime.db"))
+            await repository.init_db()
+            snapshot = await repository.get_nexus_runtime_snapshot()
+            version_id = snapshot["runtime"]["champion_version_id"]
+            decision_id = "atomic-fault"
+            reserved = {
+                "position_status": "RESERVED",
+                "owner_decision_id": decision_id,
+                "contract_id": None,
+            }
+            await repository.record_nexus_decision(
+                {
+                    "id": decision_id,
+                    "decision_id": decision_id,
+                    "lane": Lane.CHAMPION.value,
+                    "signal_epoch": 0,
+                },
+                nexus_version_id=version_id,
+                state=reserved,
+            )
+            async with repository._connection() as db:
+                await db.execute(
+                    """
+                    CREATE TRIGGER fail_nexus_lane_activation
+                    BEFORE UPDATE ON nexus_decisions
+                    BEGIN
+                        SELECT RAISE(ABORT, 'fault after owned update');
+                    END
+                    """,
+                )
+                await db.commit()
+            connection = FakeConnection()
+            dispatcher = SharedDemoDispatcher(
+                connection,
+                repository,
+                account_id="DOT-DEMO",
+                epoch_now=lambda: 60.25,
+            )
+            dispatcher.set_lane_context(
+                Lane.CHAMPION,
+                nexus_version_id=version_id,
+                campaign_id=None,
+            )
+
+            with self.assertRaisesRegex(Exception, "fault after owned update"):
+                await dispatcher.submit(pending_intent(decision_id, Lane.CHAMPION))
+
+            self.assertEqual(connection.buy_calls, 1)
+            stored = await repository.get_order_intent(f"nexus-{decision_id}")
+            self.assertEqual(stored["state"], "submitting")
+            self.assertIsNone(stored["contract_id"])
+            restored = await repository.load_nexus_lane_states()
+            self.assertEqual(
+                restored[Lane.CHAMPION.value]["position_status"], "RESERVED",
+            )
+            with self.assertRaises(LanePositionActiveError):
+                await dispatcher.submit(
+                    pending_intent("atomic-fault-duplicate", Lane.CHAMPION),
+                )
+
+    async def test_settlement_transaction_rolls_back_trade_risk_and_lane(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = DatabaseRepository(str(Path(temp_dir) / "runtime.db"))
+            await repository.init_db()
+            snapshot = await repository.get_nexus_runtime_snapshot()
+            version_id = snapshot["runtime"]["champion_version_id"]
+            decision_id = "settlement-fault"
+            reserved = {
+                "position_status": "RESERVED",
+                "owner_decision_id": decision_id,
+                "contract_id": None,
+            }
+            await repository.record_nexus_decision(
+                {
+                    "id": decision_id,
+                    "decision_id": decision_id,
+                    "lane": Lane.CHAMPION.value,
+                    "signal_epoch": 0,
+                },
+                nexus_version_id=version_id,
+                state=reserved,
+            )
+            dispatcher = SharedDemoDispatcher(
+                FakeConnection(), repository, account_id="DOT-DEMO",
+                epoch_now=lambda: 60.25,
+            )
+            dispatcher.set_lane_context(
+                Lane.CHAMPION,
+                nexus_version_id=version_id,
+                campaign_id=None,
+            )
+            receipt = await dispatcher.submit(
+                pending_intent(decision_id, Lane.CHAMPION),
+            )
+            async with repository._connection() as db:
+                await db.execute(
+                    """
+                    CREATE TRIGGER fail_nexus_settlement
+                    BEFORE UPDATE ON nexus_decisions
+                    BEGIN
+                        SELECT RAISE(ABORT, 'settlement commit fault');
+                    END
+                    """,
+                )
+                await db.commit()
+
+            with self.assertRaisesRegex(Exception, "settlement commit fault"):
+                await repository.settle_nexus_trade_and_lane(
+                    {
+                        "bot_id": "nexus-trade",
+                        "session_id": None,
+                        "strategy_name": "nexus_trade",
+                        "symbol": "R_100",
+                        "contract_type": "CALL",
+                        "contract_id": receipt.contract_id,
+                        "stake": 0.35,
+                        "payout": 0.0,
+                        "profit": -0.35,
+                        "result": "lost",
+                        "status": "closed",
+                        "lane": Lane.CHAMPION.value,
+                        "nexus_version_id": version_id,
+                        "campaign_id": None,
+                        "decision_id": decision_id,
+                    },
+                    lane_state={"position_status": "IDLE"},
+                    apply_risk=True,
+                    money_management="martingale",
+                    money_config={"multiplier": 2, "max_levels": 3},
+                    risk_config={},
+                    initial_stake=0.35,
+                    settled_epoch=120.0,
+                )
+
+            self.assertEqual(await repository.list_trades("nexus-trade"), [])
+            restored = await repository.load_nexus_lane_states()
+            self.assertEqual(
+                restored[Lane.CHAMPION.value]["position_status"], "ACTIVE",
+            )
+            intent = await repository.get_order_intent(f"nexus-{decision_id}")
+            self.assertEqual(intent["state"], "owned")
 
 
 if __name__ == "__main__":

@@ -76,7 +76,20 @@ class OrderOwnershipReconciler:
 
         if len(matches) == 1:
             contract = next(iter(matches.values()))
-            await self.repository.mark_order_intent_owned(intent["id"], contract)
+            if (
+                intent.get("decision_id") is not None
+                and intent.get("lane") is not None
+                and hasattr(self.repository, "commit_nexus_known_ownership")
+            ):
+                metadata = intent.get("metadata") or {}
+                await self.repository.commit_nexus_known_ownership(
+                    intent["id"],
+                    contract,
+                    entry_intent=dict(metadata.get("entry_intent") or {}),
+                    entry_delay_ms=int(intent["entry_delay_ms"] or 0),
+                )
+            else:
+                await self.repository.mark_order_intent_owned(intent["id"], contract)
             logger.warning(
                 "Ownership recuperado para intent %s / contrato %s",
                 intent["id"],
@@ -101,6 +114,29 @@ class OrderOwnershipReconciler:
     def _matches(self, intent, candidate):
         if candidate.get("contract_id") is None:
             return False
+        # NexusTrade has concurrent lanes with deliberately identical orders.
+        # Price/time/contract shape therefore cannot establish ownership. Its
+        # candidates must carry both pieces of the passthrough identity.
+        if intent.get("decision_id") is not None or intent.get("lane") is not None:
+            evidence = candidate.get("passthrough")
+            if not isinstance(evidence, dict):
+                evidence = candidate.get("metadata")
+            if not isinstance(evidence, dict):
+                evidence = {}
+            candidate_correlation = (
+                candidate.get("correlation_id")
+                or candidate.get("order_intent_id")
+                or evidence.get("correlation_id")
+                or evidence.get("order_intent_id")
+            )
+            candidate_decision = (
+                candidate.get("decision_id") or evidence.get("decision_id")
+            )
+            if (
+                candidate_correlation != intent.get("id")
+                or candidate_decision != intent.get("decision_id")
+            ):
+                return False
         action = str(candidate.get("action_type") or candidate.get("action") or "buy").lower()
         if action not in {"buy", "purchase"}:
             return False

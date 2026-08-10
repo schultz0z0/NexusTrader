@@ -145,6 +145,18 @@ class AccountDispatcher:
         lane_value = Lane(lane).value
         if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:
             raise ValueError("contract_id must be a positive integer")
+        current_owner = next(
+            (
+                owner_lane
+                for owner_lane, owned_contract_id in self._active_contracts.items()
+                if owned_contract_id == contract_id and owner_lane != lane_value
+            ),
+            None,
+        )
+        if current_owner is not None:
+            raise ValueError(
+                f"contract_id {contract_id} is already owned by lane {current_owner}",
+            )
         self._blocked_lanes.add(lane_value)
         self._active_contracts[lane_value] = contract_id
 
@@ -284,20 +296,33 @@ class AccountDispatcher:
                         metadata=metadata,
                     )
                     raise
-                dispatch_epoch = float(self._epoch_now())
-                sent = intent.mark_dispatched(dispatch_epoch)
-                if sent.status == "STALE_BEFORE_DISPATCH":
-                    await self.repository.update_order_intent(
-                        correlation_id,
-                        "cancelled",
-                        metadata={**metadata, "entry_intent": sent.to_dict()},
-                    )
-                    raise StaleIntentError(sent)
-
-                sent_metadata = {**metadata, "entry_intent": sent.to_dict()}
+                planned = intent.mark_dispatched(float(self._epoch_now()))
+                sent_metadata = {**metadata, "entry_intent": planned.to_dict()}
                 await self.repository.update_order_intent(
                     correlation_id, "submitting", metadata=sent_metadata,
                 )
+                # The journal write above may yield for an arbitrary amount of time.
+                # Revalidate after it and make the transport call the very next await,
+                # while still holding the account buy lock.
+                try:
+                    self._ensure_trading_open()
+                    dispatch_epoch = float(self._epoch_now())
+                    sent = intent.mark_dispatched(dispatch_epoch)
+                    if sent.status == "STALE_BEFORE_DISPATCH":
+                        raise StaleIntentError(sent)
+                except (EmergencyStopError, StaleIntentError) as exc:
+                    blocked_intent = exc.intent if isinstance(exc, StaleIntentError) else intent
+                    await self.repository.update_order_intent(
+                        correlation_id,
+                        "cancelled",
+                        error=(
+                            "emergency stop activated before buy"
+                            if isinstance(exc, EmergencyStopError)
+                            else None
+                        ),
+                        metadata={**metadata, "entry_intent": blocked_intent.to_dict()},
+                    )
+                    raise
                 try:
                     contract = await self._executor.buy(
                         proposal["id"],
@@ -362,20 +387,23 @@ class AccountDispatcher:
                     accepted_epoch=accepted_epoch,
                 )
                 accepted = sent.apply_receipt(receipt)
-                await self.repository.mark_order_intent_owned(correlation_id, contract)
-                self._active_contracts[lane] = contract_id
-                # Ownership is now unequivocal even if a later metadata enrichment fails.
                 keep_reserved = True
-                accepted_metadata = {
-                    **metadata, "entry_intent": accepted.to_dict(), **contract,
-                }
-                if hasattr(self.repository, "finalize_nexus_order_intent"):
-                    await self.repository.finalize_nexus_order_intent(
+                self._claim_contract(lane, contract_id)
+                # The response establishes ownership before durable enrichment.
+                # Keep the lane blocked on any commit error; restart recovery will
+                # quarantine the still-submitting journal rather than buy again.
+                if hasattr(self.repository, "commit_nexus_known_ownership"):
+                    await self.repository.commit_nexus_known_ownership(
                         correlation_id,
+                        contract,
+                        entry_intent=accepted.to_dict(),
                         entry_delay_ms=int(round(accepted.entry_delay_ms)),
-                        metadata=accepted_metadata,
                     )
                 else:
+                    accepted_metadata = {
+                        **metadata, "entry_intent": accepted.to_dict(), **contract,
+                    }
+                    await self.repository.mark_order_intent_owned(correlation_id, contract)
                     await self.repository.update_order_intent(
                         correlation_id,
                         "owned",
@@ -397,6 +425,21 @@ class AccountDispatcher:
     def _ensure_trading_open(self) -> None:
         if self._emergency_stop:
             raise EmergencyStopError("emergency stop blocks new NexusTrade buys")
+
+    def _claim_contract(self, lane: str, contract_id: int) -> None:
+        current_owner = next(
+            (
+                owner_lane
+                for owner_lane, owned_contract_id in self._active_contracts.items()
+                if owned_contract_id == contract_id and owner_lane != lane
+            ),
+            None,
+        )
+        if current_owner is not None:
+            raise ValueError(
+                f"contract_id {contract_id} is already owned by lane {current_owner}",
+            )
+        self._active_contracts[lane] = contract_id
 
 
 class SharedDemoDispatcher(AccountDispatcher):
