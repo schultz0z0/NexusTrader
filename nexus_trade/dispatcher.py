@@ -86,6 +86,7 @@ class AccountDispatcher:
         ownership_coordinator=None,
         buy_lock=None,
         stake_provider=None,
+        management_active: bool = False,
     ):
         if type(account_id) is not str or not account_id.strip():
             raise ValueError("account_id must be configured")
@@ -94,11 +95,14 @@ class AccountDispatcher:
             raise ValueError("account_type must be demo or real")
         if isinstance(stake, bool) or not isinstance(stake, (int, float)) or float(stake) <= 0:
             raise ValueError("stake must be positive")
+        if type(management_active) is not bool:
+            raise TypeError("management_active must be boolean")
         self.connection = connection
         self.repository = repository
         self.account_id = account_id.strip()
         self.account_type = normalized_type
         self.stake = float(stake)
+        self.management_active = management_active
         self._stake_provider = stake_provider or (lambda: self.stake)
         self._epoch_now = epoch_now
         self._proposal_manager = proposal_manager or ProposalManager(connection)
@@ -227,8 +231,12 @@ class AccountDispatcher:
                 context = self._lane_context[lane]
                 metadata = {
                     "correlation_id": correlation_id,
+                    "order_intent_id": correlation_id,
+                    "decision_id": intent.decision_id,
                     "entry_intent": intent.to_dict(),
+                    "account_id": self.account_id,
                     "account_type": self.account_type,
+                    "management_active": self.management_active,
                 }
                 await self.repository.create_order_intent({
                     "id": correlation_id,
@@ -333,24 +341,28 @@ class AccountDispatcher:
                             "lane": lane,
                         },
                     )
+                except asyncio.CancelledError:
+                    quarantined = sent.mark_ownership_quarantine(
+                        "AMBIGUOUS_BUY_RESPONSE",
+                    )
+                    keep_reserved = True
+                    await self._persist_cancelled_quarantine(
+                        correlation_id, metadata, quarantined,
+                    )
+                    raise
                 except BaseException as exc:
-                    if isinstance(exc, asyncio.CancelledError):
-                        # Cancellation after entering transport is ownership-ambiguous too.
-                        cause = exc
-                    else:
-                        cause = exc
                     quarantined = sent.mark_ownership_quarantine(
                         "AMBIGUOUS_BUY_RESPONSE",
                     )
                     await self.repository.update_order_intent(
                         correlation_id,
                         "reconcile_pending",
-                        error=str(cause),
+                        error=str(exc),
                         metadata={**metadata, "entry_intent": quarantined.to_dict()},
                     )
                     keep_reserved = True
                     raise OwnershipQuarantineError(
-                        quarantined, correlation_id, cause,
+                        quarantined, correlation_id, exc,
                     ) from exc
 
                 if contract is None:
@@ -441,6 +453,27 @@ class AccountDispatcher:
             )
         self._active_contracts[lane] = contract_id
 
+    async def _persist_cancelled_quarantine(
+        self,
+        correlation_id: str,
+        metadata: dict,
+        quarantined: EntryIntent,
+    ) -> None:
+        persistence = asyncio.create_task(
+            self.repository.update_order_intent(
+                correlation_id,
+                "reconcile_pending",
+                error="buy task cancelled after transport became possible",
+                metadata={**metadata, "entry_intent": quarantined.to_dict()},
+            ),
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(persistence), timeout=1.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            if not persistence.done():
+                persistence.cancel()
+            await asyncio.gather(persistence, return_exceptions=True)
+
 
 class SharedDemoDispatcher(AccountDispatcher):
     """The one DEMO-account queue shared by Champion OFF and Trial."""
@@ -459,6 +492,9 @@ class SharedDemoDispatcher(AccountDispatcher):
             raise ValueError("SharedDemoDispatcher can only use a DEMO account")
         if isinstance(stake, bool) or type(stake) not in {int, float} or float(stake) != NEXUS_DEMO_STAKE:
             raise ValueError("SharedDemoDispatcher stake must be exactly 0.35")
+        if kwargs.get("management_active", False) is not False:
+            raise ValueError("SharedDemoDispatcher cannot enable money management")
+        kwargs["management_active"] = False
         super().__init__(
             connection,
             repository,

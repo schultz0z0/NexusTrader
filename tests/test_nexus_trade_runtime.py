@@ -21,28 +21,39 @@ class FakeRepository:
         self.heartbeats = 0
         self.trades = []
         self.restored_states = {}
+        self.restored_owners = {}
         self.risk_settlements = []
         self.recovery_intents = []
         self.runtime_snapshot = None
         self.risk_state = None
         self.fail_atomic_settlement = False
 
-    async def record_nexus_decision(self, decision, *, nexus_version_id, campaign_id, state):
+    async def record_nexus_decision(
+        self, decision, *, nexus_version_id, campaign_id, state, owner=None,
+    ):
         self.decisions.append({
             "decision": decision,
             "nexus_version_id": nexus_version_id,
             "campaign_id": campaign_id,
             "state": state,
+            "owner": dict(owner) if owner else None,
         })
 
-    async def save_nexus_lane_state(self, lane, state):
+    async def save_nexus_lane_state(self, lane, state, owner=None):
         self.lane_states[lane] = dict(state)
+        self.restored_owners[lane] = dict(owner) if owner else None
 
     async def touch_bot_heartbeat(self, bot_id):
         self.heartbeats += 1
 
     async def load_nexus_lane_states(self):
         return {lane: dict(state) for lane, state in self.restored_states.items()}
+
+    async def load_nexus_lane_owners(self):
+        return {
+            lane: dict(owner) if owner else None
+            for lane, owner in self.restored_owners.items()
+        }
 
     async def list_nexus_recovery_intents(self, bot_id):
         return [dict(intent) for intent in self.recovery_intents]
@@ -65,6 +76,7 @@ class FakeRepository:
             raise RuntimeError("atomic settlement fault")
         self.trades.append(dict(trade))
         self.lane_states[trade["lane"]] = dict(lane_state)
+        self.restored_owners[trade["lane"]] = None
         if configuration.get("apply_risk"):
             return await self.settle_trade_and_risk(trade, **configuration)
         return {"applied": False, "state": None}
@@ -87,16 +99,20 @@ class FakeRepository:
 
 class FakeDispatcher:
     def __init__(
-        self, contract_id=700, *, account_id="DOT-DEMO", account_type="demo"
+        self, contract_id=700, *, account_id="DOT-DEMO", account_type="demo",
+        management_active=False, monitor=None,
     ):
         self.contract_id = contract_id
         self.account_id = account_id
         self.account_type = account_type
+        self.management_active = management_active
+        self.monitor = monitor
         self.intents = []
         self.emergency_stop = False
         self.released = []
         self.restored = []
         self.reconciliation_result = None
+        self.reconciliation_calls = []
 
     async def submit(self, intent):
         self.intents.append(intent)
@@ -113,6 +129,7 @@ class FakeDispatcher:
         self.restored.append((Lane(lane).value, "QUARANTINED"))
 
     async def reconcile_quarantine(self, correlation_id, decision_id):
+        self.reconciliation_calls.append((correlation_id, decision_id))
         return self.reconciliation_result
 
     def release_position(self, lane, contract_id):
@@ -334,11 +351,104 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
         }
 
-        with self.assertRaisesRegex(ValueError, "safe boundary"):
-            runtime.apply_champion_mode(on_snapshot)
+        applied = runtime.apply_champion_mode(on_snapshot)
 
+        self.assertFalse(applied)
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    def test_same_identity_new_dispatcher_waits_for_idle_for_all_owned_states(self):
+        for position_status in ("RESERVED", "ACTIVE", "QUARANTINED"):
+            with self.subTest(position_status=position_status):
+                current = FakeDispatcher(
+                    811, account_id="DEMO-A", account_type="demo",
+                    management_active=True,
+                )
+                replacement = FakeDispatcher(
+                    812, account_id="DEMO-A", account_type="demo",
+                    management_active=True,
+                )
+                state = SetupState(
+                    position_status=position_status,
+                    owner_decision_id="owned",
+                    contract_id=811 if position_status == "ACTIVE" else None,
+                    quarantine_correlation_id=(
+                        "nexus-owned" if position_status == "QUARANTINED" else None
+                    ),
+                )
+                runtime = self.runtime(
+                    restored_lane_states={Lane.CHAMPION.value: state.to_dict()},
+                    champion_dispatcher_factory=lambda config: replacement,
+                )
+                runtime._champion_enabled = True
+                runtime.dispatchers[Lane.CHAMPION] = current
+                snapshot = {
+                    **self.snapshot,
+                    "runtime": {
+                        **self.snapshot["runtime"],
+                        "champion_enabled": 1,
+                        "champion_account_id": "DEMO-A",
+                    },
+                }
+
+                self.assertFalse(runtime.apply_champion_mode(snapshot))
+                self.assertIs(runtime.dispatchers[Lane.CHAMPION], current)
+
+    def test_same_identity_new_dispatcher_swaps_when_lane_is_idle(self):
+        current = FakeDispatcher(
+            811, account_id="DEMO-A", account_type="demo",
+            management_active=True,
+        )
+        replacement = FakeDispatcher(
+            812, account_id="DEMO-A", account_type="demo",
+            management_active=True,
+        )
+        runtime = self.runtime(
+            champion_dispatcher_factory=lambda config: replacement,
+        )
+        runtime._champion_enabled = True
+        runtime.dispatchers[Lane.CHAMPION] = current
+
+        applied = runtime.apply_champion_mode({
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "DEMO-A",
+            },
+        })
+
+        self.assertTrue(applied)
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], replacement)
+
+    def test_champion_dispatcher_factory_is_cached_by_exact_identity(self):
+        created = []
+
+        def factory(config):
+            dispatcher = FakeDispatcher(
+                820 + len(created),
+                account_id=config["account_id"],
+                account_type=config["account_type"],
+                management_active=True,
+            )
+            created.append(dispatcher)
+            return dispatcher
+
+        runtime = self.runtime(champion_dispatcher_factory=factory)
+        snapshot = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "DEMO-A",
+            },
+        }
+
+        runtime.apply_champion_mode(snapshot)
+        runtime.apply_champion_mode(snapshot)
+
+        self.assertEqual(len(created), 1)
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], created[0])
 
     def test_champion_account_change_uses_current_exact_config(self):
         account_a = FakeDispatcher(801, account_id="DEMO-A", account_type="demo")
@@ -470,6 +580,16 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
+    async def test_request_stop_before_run_finishes_without_scheduling_cycle(self):
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(cycle_source=source)
+
+        await runtime.request_stop()
+        await asyncio.wait_for(runtime.run(), timeout=1)
+
+        self.assertFalse(source.started.is_set())
+        self.assertEqual(self.shared.intents, [])
+
     async def test_stop_blocks_dispatchers_immediately_and_skips_returned_cycle(self):
         decision, intent = decision_and_intent(Lane.TRIAL)
         cycle = CausalCycleResult(60, object(), object(), (decision,), (intent,))
@@ -498,6 +618,11 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             contract_id=919,
         ).to_dict()
         self.repository.restored_states = {Lane.CHAMPION.value: champion_state}
+        self.repository.restored_owners = {Lane.CHAMPION.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
         source = WaitUntilStoppedCycleSource()
         runtime = self.runtime(cycle_source=source)
 
@@ -508,6 +633,250 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn((Lane.CHAMPION.value, 919), self.shared.restored)
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_fails_closed_when_non_idle_owner_identity_is_missing(self):
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="missing-owner",
+                contract_id=918,
+            ).to_dict(),
+        }
+        runtime = self.runtime(cycle_source=WaitUntilStoppedCycleSource())
+
+        with self.assertRaisesRegex(ValueError, "missing its durable owner"):
+            await runtime.run()
+
+        self.assertEqual(self.shared.restored, [])
+
+    async def test_restart_keeps_active_owner_until_settlement_then_applies_account_change(self):
+        owner_monitor = FakeMonitor()
+        owner_a = FakeDispatcher(
+            919, account_id="DEMO-A", account_type="demo",
+            management_active=True, monitor=owner_monitor,
+        )
+        desired_b = FakeDispatcher(
+            920, account_id="DEMO-B", account_type="demo",
+            management_active=True,
+        )
+        owner = {
+            "account_id": "DEMO-A",
+            "account_type": "demo",
+            "management_active": True,
+        }
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="owner-a-active",
+                contract_id=919,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.CHAMPION.value: owner}
+        desired = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "DEMO-B",
+            },
+        }
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(
+            cycle_source=source,
+            champion_dispatcher_factory=lambda config: {
+                "DEMO-A": owner_a,
+                "DEMO-B": desired_b,
+            }[config["account_id"]],
+        )
+        runtime._runtime_snapshot = desired
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], owner_a)
+        self.assertEqual(owner_monitor.contracts, [919])
+        await runtime.settle_contract(Lane.CHAMPION, "owner-a-active", {
+            "contract_id": 919,
+            "status": "lost",
+            "buy_price": 0.35,
+            "profit": -0.35,
+        })
+        self.assertEqual(owner_a.released, [(Lane.CHAMPION.value, 919)])
+        self.assertEqual(len(self.repository.risk_settlements), 1)
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], desired_b)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_uses_original_management_after_desired_turns_off(self):
+        owner_a = FakeDispatcher(
+            930, account_id="DEMO-A", account_type="demo",
+            management_active=True, monitor=FakeMonitor(),
+        )
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="owner-on-active",
+                contract_id=930,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.CHAMPION.value: {
+            "account_id": "DEMO-A",
+            "account_type": "demo",
+            "management_active": True,
+        }}
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(
+            cycle_source=source,
+            champion_dispatcher_factory=lambda config: owner_a,
+        )
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], owner_a)
+
+        await runtime.settle_contract(Lane.CHAMPION, "owner-on-active", {
+            "contract_id": 930,
+            "status": "won",
+            "buy_price": 0.35,
+            "profit": 0.32,
+        })
+
+        self.assertEqual(len(self.repository.risk_settlements), 1)
+        self.assertEqual(owner_a.released, [(Lane.CHAMPION.value, 930)])
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_real_owner_is_monitored_with_fake_before_desired_demo(self):
+        real_monitor = FakeMonitor()
+        real_owner = FakeDispatcher(
+            940, account_id="REAL-A", account_type="real",
+            management_active=True, monitor=real_monitor,
+        )
+        desired_demo = FakeDispatcher(
+            941, account_id="DEMO-B", account_type="demo",
+            management_active=True,
+        )
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="real-owner-active",
+                contract_id=940,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.CHAMPION.value: {
+            "account_id": "REAL-A",
+            "account_type": "real",
+            "management_active": True,
+        }}
+        desired = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "DEMO-B",
+            },
+        }
+        requested = []
+
+        def factory(config):
+            requested.append((config["account_id"], config["account_type"]))
+            return real_owner if config["account_type"] == "real" else desired_demo
+
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(
+            cycle_source=source, champion_dispatcher_factory=factory,
+        )
+        runtime._runtime_snapshot = desired
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        self.assertFalse(settings.ALLOW_REAL_TRADING)
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], real_owner)
+        self.assertEqual(real_monitor.contracts, [940])
+        self.assertEqual(requested[0], ("REAL-A", "real"))
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_restart_intermediate_journals_reconcile_only_on_persisted_owner(self):
+        cases = (
+            ("submitting", "DEMO-A", "demo", True, "DEMO-B", "demo", True),
+            ("reconcile_pending", "DEMO-A", "demo", True, "DOT-DEMO", "demo", False),
+            ("reconcile_pending", "REAL-A", "real", True, "DEMO-B", "demo", True),
+        )
+        for index, case in enumerate(cases):
+            with self.subTest(case=case):
+                journal_state, owner_id, owner_type, managed, desired_id, desired_type, desired_on = case
+                repository = FakeRepository()
+                decision_id = f"intermediate-{index}"
+                repository.restored_states = {
+                    Lane.CHAMPION.value: SetupState(
+                        position_status="RESERVED",
+                        owner_decision_id=decision_id,
+                    ).to_dict(),
+                }
+                repository.recovery_intents = [{
+                    "id": f"nexus-{decision_id}",
+                    "bot_id": "nexus-trade",
+                    "account_id": owner_id,
+                    "lane": Lane.CHAMPION.value,
+                    "decision_id": decision_id,
+                    "state": journal_state,
+                    "contract_id": None,
+                    "metadata": {
+                        "correlation_id": f"nexus-{decision_id}",
+                        "order_intent_id": f"nexus-{decision_id}",
+                        "decision_id": decision_id,
+                        "account_id": owner_id,
+                        "account_type": owner_type,
+                        "management_active": managed,
+                        "entry_intent": {"decision_id": decision_id},
+                    },
+                }]
+                owner_dispatcher = FakeDispatcher(
+                    950 + index, account_id=owner_id, account_type=owner_type,
+                    management_active=managed,
+                )
+                desired_dispatcher = FakeDispatcher(
+                    960 + index, account_id=desired_id, account_type=desired_type,
+                    management_active=desired_on,
+                )
+                desired = {
+                    **self.snapshot,
+                    "runtime": {
+                        **self.snapshot["runtime"],
+                        "champion_enabled": int(desired_on),
+                        "champion_account_id": desired_id,
+                        "champion_account_type": desired_type,
+                    },
+                }
+                source = WaitUntilStoppedCycleSource()
+
+                def factory(config):
+                    if (config["account_id"], config["account_type"]) == (owner_id, owner_type):
+                        return owner_dispatcher
+                    return desired_dispatcher
+
+                runtime = NexusTradeRuntime(
+                    repository,
+                    {"id": "nexus-trade", "strategy_id": "nexus_trade", "desired_state": "STOPPED"},
+                    shared_demo_dispatcher=self.shared,
+                    champion_dispatcher_factory=factory,
+                    runtime_snapshot=desired,
+                    cycle_source=source,
+                )
+                task = asyncio.create_task(runtime.run())
+                await asyncio.wait_for(source.started.wait(), timeout=1)
+
+                self.assertEqual(
+                    owner_dispatcher.reconciliation_calls,
+                    [(f"nexus-{decision_id}", decision_id)],
+                )
+                self.assertEqual(desired_dispatcher.reconciliation_calls, [])
+                self.assertIs(runtime.dispatchers[Lane.CHAMPION], owner_dispatcher)
+                await runtime.request_stop()
+                await asyncio.wait_for(task, timeout=1)
 
     async def test_restart_promotes_exact_owned_reserved_journal_to_active(self):
         decision_id = "owned-after-crash"
@@ -520,12 +889,18 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.repository.recovery_intents = [{
             "id": f"nexus-{decision_id}",
             "bot_id": "nexus-trade",
+            "account_id": "DOT-DEMO",
             "lane": Lane.CHAMPION.value,
             "decision_id": decision_id,
             "state": "owned",
             "contract_id": 921,
             "metadata": {
                 "correlation_id": f"nexus-{decision_id}",
+                "order_intent_id": f"nexus-{decision_id}",
+                "decision_id": decision_id,
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
                 "entry_intent": {"decision_id": decision_id},
             },
         }]
@@ -558,12 +933,18 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.repository.recovery_intents = [{
             "id": f"nexus-{decision_id}",
             "bot_id": "nexus-trade",
+            "account_id": "DOT-DEMO",
             "lane": Lane.TRIAL.value,
             "decision_id": decision_id,
             "state": "submitting",
             "contract_id": None,
             "metadata": {
                 "correlation_id": f"nexus-{decision_id}",
+                "order_intent_id": f"nexus-{decision_id}",
+                "decision_id": decision_id,
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
                 "entry_intent": {"decision_id": decision_id},
             },
         }]
@@ -590,6 +971,11 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 owner_decision_id=decision_id,
             ).to_dict(),
         }
+        self.repository.restored_owners = {Lane.TRIAL.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
         source = WaitUntilStoppedCycleSource()
         runtime = self.runtime(cycle_source=source)
 
@@ -689,6 +1075,11 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             quarantine_correlation_id="nexus-lost-owner",
         ).to_dict()
         self.repository.restored_states = {Lane.TRIAL.value: quarantined}
+        self.repository.restored_owners = {Lane.TRIAL.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
         self.shared.reconciliation_result = OwnershipReconciliation(
             correlation_id="nexus-lost-owner",
             decision_id="lost-owner",
@@ -752,6 +1143,74 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
         await runtime.close()
+
+    async def test_default_bootstrap_connects_durable_demo_owner_before_desired_account(self):
+        class TwoDemoAuth(FakeAuth):
+            async def list_accounts(self):
+                return [
+                    {"account_id": "DEMO-A", "account_type": "demo", "status": "active"},
+                    {"account_id": "DEMO-B", "account_type": "demo", "status": "active"},
+                ]
+
+        connections = []
+
+        def connection_factory(auth):
+            connection = FakeRuntimeConnection(auth)
+            connections.append(connection)
+            return connection
+
+        owner_dispatcher = FakeDispatcher(
+            970, account_id="DEMO-A", account_type="demo",
+            management_active=False,
+        )
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="shared-owner-a",
+                contract_id=970,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.CHAMPION.value: {
+            "account_id": "DEMO-A",
+            "account_type": "demo",
+            "management_active": False,
+        }}
+        desired = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+                "champion_account_id": "DEMO-B",
+            },
+        }
+        source = WaitUntilStoppedCycleSource()
+        runtime = NexusTradeRuntime(
+            self.repository,
+            {"id": "nexus-trade", "strategy_id": "nexus_trade", "desired_state": "STOPPED"},
+            runtime_snapshot=desired,
+            auth_factory=TwoDemoAuth,
+            connection_factory=connection_factory,
+            market_data_factory=FakeMarketData,
+            shared_dispatcher_factory=(
+                lambda connection, repository, **kwargs: owner_dispatcher
+            ),
+            account_dispatcher_factory=lambda *args, **kwargs: self.fail(
+                "desired account must remain pending while owner is ACTIVE"
+            ),
+            monitor_factory=lambda connection: FakeMonitor(),
+            cycle_source=source,
+        )
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        self.assertEqual(
+            [connection.connected_accounts for connection in connections],
+            [["DEMO-A"]],
+        )
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], owner_dispatcher)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
 
     async def test_bootstrap_restores_accumulated_champion_stake_before_factory(self):
         self.repository.risk_state = {

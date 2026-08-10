@@ -87,6 +87,8 @@ class NexusTradeRuntime:
         self._stop_event = asyncio.Event()
         self._emergency_stop = False
         self._champion_enabled = False
+        self._pending_runtime_snapshot = None
+        self._lane_owners = {lane: None for lane in Lane}
         money_config = dict(self.bot.get("money_config") or {})
         self._champion_money_manager = MoneyManager(
             mode=self.bot.get("money_management", "fixed"),
@@ -121,9 +123,9 @@ class NexusTradeRuntime:
         self.set_emergency_stop(True)
         self._stop_event.set()
 
-    async def bootstrap(self) -> None:
+    async def bootstrap(self, *, apply_snapshot: bool = True) -> None:
         if self._bootstrapped:
-            if self._runtime_snapshot is not None:
+            if apply_snapshot and self._runtime_snapshot is not None:
                 self.apply_champion_mode(self._runtime_snapshot)
             return
         if self._runtime_snapshot is None:
@@ -173,7 +175,20 @@ class NexusTradeRuntime:
             await auth.close()
             raise ValueError("NexusTrade requires an active DEMO account for Trial")
         runtime = self._runtime_snapshot.get("runtime") or {}
-        preferred_demo = str(runtime.get("champion_account_id") or "")
+        durable_demo_owners = [
+            owner["account_id"]
+            for lane in (Lane.TRIAL, Lane.CHAMPION)
+            for owner in [self._lane_owners.get(lane)]
+            if owner is not None
+            and owner["account_type"] == "demo"
+            and not owner["management_active"]
+            and self.strategies[lane].state.position_status != "IDLE"
+        ]
+        preferred_demo = (
+            durable_demo_owners[0]
+            if durable_demo_owners
+            else str(runtime.get("champion_account_id") or "")
+        )
         demo = next(
             (account for account in demos if account["account_id"] == preferred_demo),
             demos[0],
@@ -202,7 +217,7 @@ class NexusTradeRuntime:
 
         champion_enabled = bool(runtime.get("champion_enabled", 0))
         champion_dispatcher = None
-        if champion_enabled:
+        if champion_enabled and apply_snapshot:
             account_id = str(runtime.get("champion_account_id") or "")
             account_type = str(runtime.get("champion_account_type") or "").lower()
             ensure_account_allowed(account_type)
@@ -234,6 +249,7 @@ class NexusTradeRuntime:
                 stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
                 stake_provider=self._champion_money_manager.get_stake,
                 buy_lock=champion_lock,
+                management_active=True,
             )
             starter = getattr(champion_dispatcher, "start", None)
             if callable(starter):
@@ -274,7 +290,8 @@ class NexusTradeRuntime:
         if self._cycle_source is None:
             self._cycle_source = self._next_causal_cycle
         self._bootstrapped = True
-        self.apply_champion_mode(self._runtime_snapshot)
+        if apply_snapshot:
+            self.apply_champion_mode(self._runtime_snapshot)
 
     async def close(self) -> None:
         if self._market_data is not None:
@@ -348,7 +365,7 @@ class NexusTradeRuntime:
         self._last_boundary = target
         return cycle
 
-    def apply_champion_mode(self, snapshot: dict) -> None:
+    def apply_champion_mode(self, snapshot: dict) -> bool:
         runtime = snapshot.get("runtime") or {}
         lanes = snapshot.get("lanes") or []
         next_versions = {
@@ -391,18 +408,6 @@ class NexusTradeRuntime:
             if self._champion_dispatcher_factory is None:
                 raise ValueError("Champion ON dispatcher is not configured")
             desired_identity = (account_id, account_type)
-        route_changes = (
-            desired_enabled != self._champion_enabled
-            or current_identity != desired_identity
-        )
-        if (
-            route_changes
-            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
-        ):
-            raise ValueError(
-                "Champion dispatcher can only switch at a safe boundary with an IDLE lane",
-            )
-        if desired_enabled:
             config = {
                 "account_id": desired_identity[0],
                 "account_type": desired_identity[1],
@@ -410,12 +415,28 @@ class NexusTradeRuntime:
                 "money_management": self.bot.get("money_management", "fixed"),
                 "money_config": dict(self.bot.get("money_config") or {}),
                 "risk_config": dict(self.bot.get("risk_config") or {}),
+                "management_active": True,
             }
-            desired_dispatcher = self._champion_dispatcher_factory(config)
+            desired_dispatcher = self._champion_dispatchers.get(desired_identity)
+            if desired_dispatcher is None:
+                desired_dispatcher = self._champion_dispatcher_factory(config)
             if self._dispatcher_identity(desired_dispatcher) != desired_identity:
                 raise ValueError(
                     "Champion dispatcher identity mismatch for current configuration",
                 )
+            self._champion_dispatchers[desired_identity] = desired_dispatcher
+
+        route_changes = (
+            desired_enabled != self._champion_enabled
+            or current_identity != desired_identity
+            or desired_dispatcher is not current_dispatcher
+        )
+        if (
+            route_changes
+            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+        ):
+            self._pending_runtime_snapshot = snapshot
+            return False
 
         # Commit the route only after all validation/factory work succeeds.
         self.dispatchers[Lane.TRIAL] = self._shared_demo_dispatcher
@@ -428,6 +449,8 @@ class NexusTradeRuntime:
                 self.monitors[Lane.CHAMPION] = self._shared_demo_monitor
         else:
             champion_monitor = self._champion_monitors.get(desired_identity)
+            if champion_monitor is None:
+                champion_monitor = getattr(desired_dispatcher, "monitor", None)
             if champion_monitor is not None:
                 self.monitors[Lane.CHAMPION] = champion_monitor
             elif self._champion_monitor is not None:
@@ -444,6 +467,8 @@ class NexusTradeRuntime:
                     campaign_id=self._campaigns[lane],
                 )
             dispatcher.set_emergency_stop(self._emergency_stop)
+        self._pending_runtime_snapshot = None
+        return True
 
     @staticmethod
     def _dispatcher_identity(dispatcher) -> tuple[str, str]:
@@ -454,6 +479,137 @@ class NexusTradeRuntime:
         if not account_id or account_type not in {"demo", "real"}:
             raise ValueError("dispatcher must expose an exact account identity")
         return account_id, account_type
+
+    @staticmethod
+    def _normalize_lane_owner(owner) -> dict | None:
+        if owner is None:
+            return None
+        account_id = str(owner.get("account_id") or "").strip()
+        account_type = str(owner.get("account_type") or "").lower()
+        management_active = owner.get("management_active")
+        if not account_id or account_type not in {"demo", "real"}:
+            raise ValueError("lane owner requires an exact account identity")
+        if type(management_active) is not bool:
+            raise TypeError("lane owner management_active must be boolean")
+        return {
+            "account_id": account_id,
+            "account_type": account_type,
+            "management_active": management_active,
+        }
+
+    def _owner_for_dispatcher(self, dispatcher, *, management_active: bool) -> dict:
+        account_id, account_type = self._dispatcher_identity(dispatcher)
+        return self._normalize_lane_owner({
+            "account_id": account_id,
+            "account_type": account_type,
+            "management_active": management_active,
+        })
+
+    def _dispatcher_for_owner(self, owner: dict):
+        owner = self._normalize_lane_owner(owner)
+        identity = (owner["account_id"], owner["account_type"])
+        shared_identity = self._dispatcher_identity(self._shared_demo_dispatcher)
+        if not owner["management_active"]:
+            if identity != shared_identity:
+                raise ValueError("unmanaged Nexus ownership must remain on shared DEMO")
+            return self._shared_demo_dispatcher
+        dispatcher = self._champion_dispatchers.get(identity)
+        if dispatcher is None:
+            if self._champion_dispatcher_factory is None:
+                raise ValueError("owner dispatcher is unavailable during restart")
+            dispatcher = self._champion_dispatcher_factory({
+                "account_id": identity[0],
+                "account_type": identity[1],
+                "stake": float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
+                "money_management": self.bot.get("money_management", "fixed"),
+                "money_config": dict(self.bot.get("money_config") or {}),
+                "risk_config": dict(self.bot.get("risk_config") or {}),
+                "management_active": True,
+                "restoring_owner": True,
+            })
+            if self._dispatcher_identity(dispatcher) != identity:
+                raise ValueError("restored owner dispatcher identity mismatch")
+            self._champion_dispatchers[identity] = dispatcher
+        return dispatcher
+
+    async def _restore_lane_owners(self) -> None:
+        loader = getattr(self.repository, "load_nexus_lane_owners", None)
+        if callable(loader):
+            stored = await loader()
+            for lane in Lane:
+                raw = stored.get(lane.value) if isinstance(stored, dict) else None
+                if raw is not None:
+                    self._lane_owners[lane] = self._normalize_lane_owner(raw)
+
+        journal_loader = getattr(self.repository, "list_nexus_recovery_intents", None)
+        self._recovery_journals = (
+            await journal_loader(self.bot_id) if callable(journal_loader) else []
+        )
+        for lane, strategy in self.strategies.items():
+            if strategy.state.position_status == "IDLE":
+                continue
+            decision_id = strategy.state.owner_decision_id
+            expected_id = f"nexus-{decision_id}"
+            matches = [
+                item for item in (self._recovery_journals or [])
+                if item.get("lane") == lane.value
+                and item.get("decision_id") == decision_id
+                and item.get("id") == expected_id
+            ]
+            journal_owner = None
+            if len(matches) == 1:
+                if matches[0].get("nexus_version_id") is not None:
+                    self._versions[lane] = matches[0].get("nexus_version_id")
+                self._campaigns[lane] = matches[0].get("campaign_id")
+                metadata = matches[0].get("metadata") or {}
+                exact = (
+                    metadata.get("correlation_id") == expected_id
+                    and metadata.get("order_intent_id") == expected_id
+                    and metadata.get("decision_id") == decision_id
+                    and (metadata.get("entry_intent") or {}).get("decision_id") == decision_id
+                    and matches[0].get("account_id") == metadata.get("account_id")
+                )
+                if exact and all(
+                    key in metadata
+                    for key in ("account_id", "account_type", "management_active")
+                ):
+                    journal_owner = self._normalize_lane_owner(metadata)
+            durable_owner = self._lane_owners[lane]
+            if durable_owner is not None and journal_owner is not None:
+                if durable_owner != journal_owner:
+                    raise ValueError("lane and ownership journals disagree on owner identity")
+            elif journal_owner is not None:
+                self._lane_owners[lane] = journal_owner
+
+    async def _route_restored_owners(self) -> None:
+        for lane, strategy in self.strategies.items():
+            if strategy.state.position_status == "IDLE":
+                continue
+            owner = self._lane_owners[lane]
+            if owner is None:
+                raise ValueError("non-IDLE Nexus lane is missing its durable owner")
+            if lane is Lane.TRIAL and owner["management_active"]:
+                raise ValueError("Trial owner can never enable money management")
+            identity = (owner["account_id"], owner["account_type"])
+            if (
+                lane is Lane.CHAMPION
+                and owner["management_active"]
+                and self._managed_champion_factory
+                and identity not in self._champion_dispatchers
+            ):
+                await self._provision_champion_dispatcher(
+                    self._runtime_snapshot,
+                    restoring_owner=owner,
+                )
+            dispatcher = self._dispatcher_for_owner(owner)
+            self.dispatchers[lane] = dispatcher
+            if lane is Lane.CHAMPION:
+                self._champion_enabled = owner["management_active"]
+            monitor = self._champion_monitors.get(identity)
+            if monitor is None:
+                monitor = getattr(dispatcher, "monitor", None)
+            if monitor is not None:
+                self.monitors[lane] = monitor
 
     def set_emergency_stop(self, enabled: bool) -> None:
         if type(enabled) is not bool:
@@ -491,6 +647,14 @@ class NexusTradeRuntime:
                     position_status="RESERVED",
                     owner_decision_id=intent.decision_id,
                 )
+            if intent.status == "PENDING":
+                dispatcher = self.dispatchers.get(lane)
+                if dispatcher is None:
+                    raise ValueError(f"dispatcher for {lane.value} is not configured")
+                self._lane_owners[lane] = self._owner_for_dispatcher(
+                    dispatcher,
+                    management_active=(lane is Lane.CHAMPION and self._champion_enabled),
+                )
             await self._record_decision(decision, strategy)
             if intent.status != "PENDING":
                 await self._save_lane_state(lane)
@@ -510,6 +674,7 @@ class NexusTradeRuntime:
                     and strategy.state.owner_decision_id == intent.decision_id
                 ):
                     strategy.release_reservation(intent.decision_id)
+                    self._lane_owners[lane] = None
             else:
                 strategy.mark_position_active(
                     intent.decision_id, receipt.contract_id,
@@ -536,12 +701,17 @@ class NexusTradeRuntime:
             nexus_version_id=self._versions[Lane(decision.lane)],
             campaign_id=self._campaigns[Lane(decision.lane)],
             state=strategy.snapshot(),
+            owner=self._lane_owners[Lane(decision.lane)],
         )
 
     async def _save_lane_state(self, lane: Lane) -> None:
         saver = getattr(self.repository, "save_nexus_lane_state", None)
         if callable(saver):
-            await saver(lane.value, self.strategies[lane].snapshot())
+            await saver(
+                lane.value,
+                self.strategies[lane].snapshot(),
+                owner=self._lane_owners[lane],
+            )
 
     async def _start_monitor(
         self,
@@ -581,6 +751,13 @@ class NexusTradeRuntime:
             or strategy.state.contract_id != contract_id
         ):
             raise ValueError("settlement does not own the active lane")
+        owner = self._lane_owners[lane]
+        if owner is None:
+            owner = self._owner_for_dispatcher(
+                self.dispatchers[lane],
+                management_active=(lane is Lane.CHAMPION and self._champion_enabled),
+            )
+            self._lane_owners[lane] = owner
         stake = (
             NEXUS_DEMO_STAKE
             if lane is Lane.TRIAL
@@ -614,7 +791,7 @@ class NexusTradeRuntime:
             owner_decision_id=None,
             contract_id=None,
         ).to_dict()
-        apply_risk = lane is Lane.CHAMPION and self._champion_enabled
+        apply_risk = lane is Lane.CHAMPION and owner["management_active"]
         atomic_settler = getattr(
             self.repository, "settle_nexus_trade_and_lane", None,
         )
@@ -632,6 +809,7 @@ class NexusTradeRuntime:
                     or contract.get("date_expiry")
                     or time.time()
                 ),
+                owner=owner,
             )
         else:
             await self.repository.upsert_trade(trade)
@@ -659,8 +837,14 @@ class NexusTradeRuntime:
         strategy.mark_position_closed(owner_decision_id, contract_id)
         dispatcher = self.dispatchers[lane]
         dispatcher.release_position(lane, contract_id)
+        self._lane_owners[lane] = None
         if not callable(atomic_settler):
             await self._save_lane_state(lane)
+        if lane is Lane.CHAMPION and self._pending_runtime_snapshot is not None:
+            pending = self._pending_runtime_snapshot
+            if self._managed_champion_factory:
+                await self._provision_champion_dispatcher(pending)
+            self.apply_champion_mode(pending)
 
     async def _restore_lane_states(self) -> None:
         loader = getattr(self.repository, "load_nexus_lane_states", None)
@@ -672,10 +856,10 @@ class NexusTradeRuntime:
                     self.strategies[lane] = NexusTradeStrategy(lane=lane, state=state)
 
     async def _recover_reserved_lanes(self) -> None:
-        loader = getattr(self.repository, "list_nexus_recovery_intents", None)
-        if not callable(loader):
-            return
-        journals = await loader(self.bot_id)
+        journals = getattr(self, "_recovery_journals", None)
+        if journals is None:
+            loader = getattr(self.repository, "list_nexus_recovery_intents", None)
+            journals = await loader(self.bot_id) if callable(loader) else []
         for lane, strategy in self.strategies.items():
             state = strategy.state
             if state.position_status != "RESERVED":
@@ -691,6 +875,7 @@ class NexusTradeRuntime:
                 # The durable reservation precedes create_order_intent. With no
                 # transport journal, no buy could have been sent.
                 strategy.release_reservation(state.owner_decision_id)
+                self._lane_owners[lane] = None
                 await self._save_lane_state(lane)
                 continue
             if len(matches) != 1:
@@ -707,9 +892,17 @@ class NexusTradeRuntime:
                 metadata = intent.get("metadata") or {}
                 entry_intent = metadata.get("entry_intent") or {}
                 contract_id = intent.get("contract_id")
+                try:
+                    metadata_owner = self._normalize_lane_owner(metadata)
+                except (TypeError, ValueError):
+                    metadata_owner = None
                 exact = (
                     metadata.get("correlation_id") == correlation_id
+                    and metadata.get("order_intent_id") == correlation_id
+                    and metadata.get("decision_id") == state.owner_decision_id
                     and entry_intent.get("decision_id") == state.owner_decision_id
+                    and intent.get("account_id") == metadata.get("account_id")
+                    and metadata_owner == self._lane_owners[lane]
                     and not isinstance(contract_id, bool)
                     and type(contract_id) is int
                     and contract_id > 0
@@ -735,6 +928,7 @@ class NexusTradeRuntime:
                         error="restart occurred before Nexus buy transport",
                     )
                 strategy.release_reservation(state.owner_decision_id)
+                self._lane_owners[lane] = None
             else:
                 strategy.mark_position_quarantined(
                     state.owner_decision_id, correlation_id,
@@ -781,33 +975,44 @@ class NexusTradeRuntime:
         snapshot = await getter()
         if snapshot is None or snapshot == self._runtime_snapshot:
             return
+        if self.strategies[Lane.CHAMPION].state.position_status != "IDLE":
+            self._pending_runtime_snapshot = snapshot
+            self._runtime_snapshot = snapshot
+            return
         await self._provision_champion_dispatcher(snapshot)
         self.apply_champion_mode(snapshot)
         self._runtime_snapshot = snapshot
 
-    async def _provision_champion_dispatcher(self, snapshot: dict) -> None:
+    async def _provision_champion_dispatcher(
+        self, snapshot: dict, *, restoring_owner: dict = None,
+    ) -> None:
         if not self._managed_champion_factory:
             return
-        runtime = snapshot.get("runtime") or {}
-        if not bool(runtime.get("champion_enabled", 0)):
-            return
-        identity = (
-            str(runtime.get("champion_account_id") or "").strip(),
-            str(runtime.get("champion_account_type") or "").lower(),
-        )
-        ensure_account_allowed(identity[1])
+        if restoring_owner is not None:
+            owner = self._normalize_lane_owner(restoring_owner)
+            identity = (owner["account_id"], owner["account_type"])
+        else:
+            runtime = snapshot.get("runtime") or {}
+            if not bool(runtime.get("champion_enabled", 0)):
+                return
+            identity = (
+                str(runtime.get("champion_account_id") or "").strip(),
+                str(runtime.get("champion_account_type") or "").lower(),
+            )
+            ensure_account_allowed(identity[1])
         current = self.dispatchers.get(Lane.CHAMPION)
         current_identity = (
             self._dispatcher_identity(current) if current is not None else (None, None)
         )
         route_changes = not self._champion_enabled or current_identity != identity
         if (
+            restoring_owner is None
+            and
             route_changes
             and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
         ):
-            raise ValueError(
-                "Champion dispatcher can only switch at a safe boundary with an IDLE lane",
-            )
+            self._pending_runtime_snapshot = snapshot
+            return
         if identity in self._champion_dispatchers:
             return
         selected = next(
@@ -840,6 +1045,7 @@ class NexusTradeRuntime:
             stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
             stake_provider=self._champion_money_manager.get_stake,
             buy_lock=buy_lock,
+            management_active=True,
         )
         starter = getattr(dispatcher, "start", None)
         if callable(starter):
@@ -849,15 +1055,24 @@ class NexusTradeRuntime:
         self._champion_monitors[identity] = monitor
 
     async def run(self):
-        self._stop_event.clear()
+        if self._stop_event.is_set():
+            return
         try:
-            await self.bootstrap()
             await self._restore_lane_states()
-            self.apply_champion_mode(self._runtime_snapshot)
+            await self._restore_lane_owners()
+            await self.bootstrap(apply_snapshot=False)
+            await self._route_restored_owners()
             await self._recover_reserved_lanes()
             self._restore_dispatcher_ownership()
             await self._reconcile_quarantines()
             await self._resume_active_monitors()
+            if self._managed_champion_factory:
+                await self._provision_champion_dispatcher(self._runtime_snapshot)
+            if not (
+                self._managed_champion_factory
+                and self._pending_runtime_snapshot is self._runtime_snapshot
+            ):
+                self.apply_champion_mode(self._runtime_snapshot)
             while not self._stop_event.is_set():
                 if hasattr(self.repository, "touch_bot_heartbeat"):
                     await self.repository.touch_bot_heartbeat(self.bot_id)

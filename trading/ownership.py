@@ -112,7 +112,8 @@ class OrderOwnershipReconciler:
         return None
 
     def _matches(self, intent, candidate):
-        if candidate.get("contract_id") is None:
+        contract_id = candidate.get("contract_id")
+        if type(contract_id) is not int or contract_id <= 0:
             return False
         # NexusTrade has concurrent lanes with deliberately identical orders.
         # Price/time/contract shape therefore cannot establish ownership. Its
@@ -168,7 +169,7 @@ class OrderOwnershipReconciler:
     def _normalize(candidate, intent):
         return {
             **candidate,
-            "contract_id": int(candidate["contract_id"]),
+            "contract_id": candidate["contract_id"],
             "transaction_id": candidate.get("transaction_id"),
             "contract_type": candidate.get("contract_type") or intent["contract_type"],
             "underlying": candidate.get("underlying") or candidate.get("symbol") or intent["symbol"],

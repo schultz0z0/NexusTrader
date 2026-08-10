@@ -83,6 +83,13 @@ class FailingFinalJournalRepository(FakeRepository):
         raise RuntimeError("final journal unavailable")
 
 
+class FailingQuarantineRepository(FakeRepository):
+    async def update_order_intent(self, intent_id, state, **changes):
+        if state == "reconcile_pending":
+            raise RuntimeError("quarantine journal unavailable")
+        return await super().update_order_intent(intent_id, state, **changes)
+
+
 class FakeConnection:
     def __init__(self):
         self.parallel_buy_calls = 0
@@ -142,6 +149,36 @@ class ReconciliationConnection:
         if "statement" in request:
             return {"statement": {"transactions": list(self.candidates)}}
         raise AssertionError(f"unexpected request: {request}")
+
+
+class BlockingBuyConnection(FakeConnection):
+    def __init__(self):
+        super().__init__()
+        self.buy_started = asyncio.Event()
+        self.release_buy = asyncio.Event()
+
+    async def send(self, request):
+        if "buy" not in request:
+            return await super().send(request)
+        self.buy_calls += 1
+        self.buy_started.set()
+        await self.release_buy.wait()
+        return {"buy": {"contract_id": 444, "transaction_id": 1444}}
+
+
+class BlockingProposalConnection(FakeConnection):
+    def __init__(self):
+        super().__init__()
+        self.proposal_started = asyncio.Event()
+        self.release_proposal = asyncio.Event()
+
+    async def send(self, request):
+        if "proposal" not in request:
+            return await super().send(request)
+        self.send_calls += 1
+        self.proposal_started.set()
+        await self.release_proposal.wait()
+        return {"proposal": {"id": "late", "ask_price": 0.35}}
 
 
 def pending_intent(decision_id, lane, *, prepared_epoch=60.0):
@@ -229,6 +266,71 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
         stored = self.repository.intents["nexus-trial-lost"]
         self.assertEqual(stored["state"], "reconcile_pending")
         self.assertEqual(stored["metadata"]["correlation_id"], "nexus-trial-lost")
+
+    async def test_cancel_during_buy_persists_quarantine_and_repropagates_cancel(self):
+        connection = BlockingBuyConnection()
+        dispatcher = SharedDemoDispatcher(
+            connection,
+            self.repository,
+            account_id="DOT-DEMO",
+            epoch_now=lambda: self.now,
+        )
+        submit = asyncio.create_task(
+            dispatcher.submit(pending_intent("cancel-buy", Lane.TRIAL)),
+        )
+        await connection.buy_started.wait()
+
+        submit.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await submit
+        stored = self.repository.intents["nexus-cancel-buy"]
+        self.assertEqual(stored["state"], "reconcile_pending")
+        self.assertEqual(
+            stored["metadata"]["correlation_id"], "nexus-cancel-buy",
+        )
+        self.assertEqual(connection.buy_calls, 1)
+
+    async def test_cancel_before_buy_repropagates_without_ownership_quarantine(self):
+        connection = BlockingProposalConnection()
+        dispatcher = SharedDemoDispatcher(
+            connection,
+            self.repository,
+            account_id="DOT-DEMO",
+            epoch_now=lambda: self.now,
+        )
+        submit = asyncio.create_task(
+            dispatcher.submit(pending_intent("cancel-proposal", Lane.CHAMPION)),
+        )
+        await connection.proposal_started.wait()
+
+        submit.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await submit
+        stored = self.repository.intents["nexus-cancel-proposal"]
+        self.assertNotIn(stored["state"], {"reconcile_pending", "ambiguous"})
+        self.assertEqual(connection.buy_calls, 0)
+
+    async def test_cancel_during_buy_repropagates_even_if_quarantine_write_fails(self):
+        repository = FailingQuarantineRepository()
+        connection = BlockingBuyConnection()
+        dispatcher = SharedDemoDispatcher(
+            connection,
+            repository,
+            account_id="DOT-DEMO",
+            epoch_now=lambda: self.now,
+        )
+        submit = asyncio.create_task(
+            dispatcher.submit(pending_intent("cancel-write-fault", Lane.TRIAL)),
+        )
+        await connection.buy_started.wait()
+
+        submit.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await submit
+        self.assertEqual(connection.buy_calls, 1)
 
     async def test_malformed_contract_id_is_quarantined_instead_of_coerced_or_retried(self):
         self.connection.buy_response = {"buy": {"contract_id": "123"}}
@@ -327,6 +429,7 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             "contract_type": "CALL",
             "price": 0.35,
             "signal_epoch": 60,
+            "entry_delay_ms": None,
             "state": "reconcile_pending",
             "metadata": {
                 "correlation_id": lost_id,
@@ -375,6 +478,39 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(await reconciler.reconcile(intent))
+
+    async def test_reconciliation_rejects_non_exact_contract_id_types(self):
+        correlation_id = "nexus-strict-contract"
+        intent = {
+            "id": correlation_id,
+            "decision_id": "strict-contract",
+            "lane": Lane.TRIAL.value,
+            "symbol": "R_100",
+            "contract_type": "CALL",
+            "price": 0.35,
+            "signal_epoch": 60,
+            "entry_delay_ms": None,
+            "state": "reconcile_pending",
+            "metadata": {"correlation_id": correlation_id},
+        }
+        self.repository.intents[correlation_id] = intent
+        for malformed in (True, "7002", 7002.0):
+            with self.subTest(contract_id=malformed):
+                candidate = {
+                    "contract_id": malformed,
+                    "action": "buy",
+                    "symbol": "R_100",
+                    "contract_type": "CALL",
+                    "buy_price": 0.35,
+                    "passthrough": {
+                        "order_intent_id": correlation_id,
+                        "decision_id": "strict-contract",
+                    },
+                }
+                reconciler = OrderOwnershipReconciler(
+                    ReconciliationConnection([candidate]), self.repository,
+                )
+                self.assertIsNone(await reconciler.reconcile(intent))
 
     def test_shared_dispatcher_rejects_non_demo_accounts_and_non_exact_stake(self):
         with self.assertRaises(ValueError):
@@ -468,6 +604,12 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
                     "contract_id": receipt.contract_id,
                 },
             )
+            owners = await repository.load_nexus_lane_owners()
+            self.assertEqual(owners[Lane.CHAMPION.value], {
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
+            })
 
     async def test_known_ownership_and_lane_active_rollback_together(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -612,6 +754,85 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             )
             intent = await repository.get_order_intent(f"nexus-{decision_id}")
             self.assertEqual(intent["state"], "owned")
+            owners = await repository.load_nexus_lane_owners()
+            self.assertEqual(owners[Lane.CHAMPION.value], {
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
+            })
+
+    async def test_ambiguous_metadata_merge_preserves_nexus_owner_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = DatabaseRepository(str(Path(temp_dir) / "runtime.db"))
+            await repository.init_db()
+            snapshot = await repository.get_nexus_runtime_snapshot()
+            version_id = snapshot["runtime"]["champion_version_id"]
+            await repository.record_nexus_decision(
+                {
+                    "id": "metadata-owner",
+                    "decision_id": "metadata-owner",
+                    "lane": Lane.CHAMPION.value,
+                    "signal_epoch": 60,
+                },
+                nexus_version_id=version_id,
+                state={
+                    "position_status": "RESERVED",
+                    "owner_decision_id": "metadata-owner",
+                    "contract_id": None,
+                },
+            )
+            connection = FakeConnection()
+            connection.buy_exception = ConnectionError("response lost")
+            dispatcher = AccountDispatcher(
+                connection,
+                repository,
+                account_id="DEMO-A",
+                account_type="demo",
+                stake=0.35,
+                management_active=True,
+                epoch_now=lambda: 60.25,
+            )
+            dispatcher.set_lane_context(
+                Lane.CHAMPION,
+                nexus_version_id=version_id,
+                campaign_id=None,
+            )
+            with self.assertRaises(OwnershipQuarantineError):
+                await dispatcher.submit(
+                    pending_intent("metadata-owner", Lane.CHAMPION),
+                )
+
+            await repository.update_order_intent(
+                "nexus-metadata-owner",
+                "ambiguous",
+                metadata={
+                    "candidate_contract_ids": [11, 12],
+                    "correlation_id": "attacker-correlation",
+                    "order_intent_id": "attacker-intent",
+                    "decision_id": "attacker-decision",
+                    "account_id": "ATTACKER",
+                    "account_type": "real",
+                    "management_active": False,
+                    "entry_intent": {
+                        "decision_id": "attacker-decision",
+                        "lane": Lane.TRIAL.value,
+                    },
+                },
+            )
+
+            stored = await repository.get_order_intent("nexus-metadata-owner")
+            metadata = stored["metadata"]
+            self.assertEqual(metadata["correlation_id"], "nexus-metadata-owner")
+            self.assertEqual(metadata["account_id"], "DEMO-A")
+            self.assertEqual(metadata["account_type"], "demo")
+            self.assertTrue(metadata["management_active"])
+            self.assertEqual(
+                metadata["entry_intent"]["decision_id"], "metadata-owner",
+            )
+            self.assertEqual(
+                metadata["entry_intent"]["lane"], Lane.CHAMPION.value,
+            )
+            self.assertEqual(metadata["candidate_contract_ids"], [11, 12])
 
 
 if __name__ == "__main__":

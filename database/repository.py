@@ -583,6 +583,54 @@ class DatabaseRepository:
         data["metadata"] = json.loads(raw_metadata) if raw_metadata else {}
         return data
 
+    @staticmethod
+    def _merge_order_intent_metadata(existing: dict = None, external: dict = None) -> dict:
+        """Merge journal metadata without allowing ownership identity to drift."""
+        stored = dict(existing or {})
+        incoming = dict(external or {})
+        merged = {**stored, **incoming}
+        protected = (
+            "correlation_id",
+            "order_intent_id",
+            "decision_id",
+            "account_id",
+            "account_type",
+            "management_active",
+        )
+        for key in protected:
+            if key in stored:
+                merged[key] = stored[key]
+
+        stored_entry = stored.get("entry_intent")
+        incoming_entry = incoming.get("entry_intent")
+        if isinstance(stored_entry, dict) or isinstance(incoming_entry, dict):
+            entry = {
+                **(stored_entry if isinstance(stored_entry, dict) else {}),
+                **(incoming_entry if isinstance(incoming_entry, dict) else {}),
+            }
+            for key in ("decision_id", "lane"):
+                if isinstance(stored_entry, dict) and key in stored_entry:
+                    entry[key] = stored_entry[key]
+            merged["entry_intent"] = entry
+        return merged
+
+    @staticmethod
+    def _normalize_nexus_owner(owner: dict = None) -> dict | None:
+        if owner is None:
+            return None
+        account_id = str(owner.get("account_id") or "").strip()
+        account_type = str(owner.get("account_type") or "").lower()
+        management_active = owner.get("management_active")
+        if not account_id or account_type not in {"demo", "real"}:
+            raise ValueError("Nexus lane owner requires an exact account identity")
+        if type(management_active) is not bool:
+            raise TypeError("Nexus lane owner management_active must be boolean")
+        return {
+            "account_id": account_id,
+            "account_type": account_type,
+            "management_active": management_active,
+        }
+
     async def create_order_intent(self, data: dict) -> dict:
         intent_id = data.get("id") or str(uuid.uuid4())
         values = (
@@ -636,13 +684,24 @@ class DatabaseRepository:
         metadata: dict,
     ) -> dict:
         async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT metadata FROM order_intents WHERE id = ? AND state = 'prepared'",
+                (intent_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            merged = self._merge_order_intent_metadata(
+                json.loads(row["metadata"] or "{}") if row is not None else {},
+                metadata,
+            )
             await db.execute(
                 """
                 UPDATE order_intents
                 SET proposal_id = ?, price = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND state = 'prepared'
                 """,
-                (proposal_id, float(price), json.dumps(metadata), intent_id),
+                (proposal_id, float(price), json.dumps(merged), intent_id),
             )
             await db.commit()
         return await self.get_order_intent(intent_id)
@@ -657,13 +716,24 @@ class DatabaseRepository:
         if isinstance(entry_delay_ms, bool) or type(entry_delay_ms) is not int or entry_delay_ms < 0:
             raise ValueError("entry_delay_ms must be a non-negative integer")
         async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT metadata FROM order_intents WHERE id = ? AND state = 'owned'",
+                (intent_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            merged = self._merge_order_intent_metadata(
+                json.loads(row["metadata"] or "{}") if row is not None else {},
+                metadata,
+            )
             await db.execute(
                 """
                 UPDATE order_intents
                 SET entry_delay_ms = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND state = 'owned'
                 """,
-                (entry_delay_ms, json.dumps(metadata), intent_id),
+                (entry_delay_ms, json.dumps(merged), intent_id),
             )
             await db.commit()
         return await self.get_order_intent(intent_id)
@@ -707,11 +777,10 @@ class DatabaseRepository:
                     raise ValueError(
                         f"contract_id {contract_id} is already owned by {collision['id']}",
                     )
-                metadata = {
-                    **(stored.get("metadata") or {}),
-                    "entry_intent": dict(entry_intent),
-                    **dict(contract),
-                }
+                metadata = self._merge_order_intent_metadata(
+                    stored.get("metadata") or {},
+                    {**dict(contract), "entry_intent": dict(entry_intent)},
+                )
                 transaction_id = contract.get("transaction_id")
                 await db.execute(
                     """
@@ -738,6 +807,14 @@ class DatabaseRepository:
                 if decision is None:
                     raise ValueError("durable RESERVED Nexus decision was not found")
                 payload = json.loads(decision["payload"])
+                owner = self._normalize_nexus_owner({
+                    key: metadata.get(key)
+                    for key in ("account_id", "account_type", "management_active")
+                })
+                durable_owner = self._normalize_nexus_owner(payload.get("owner"))
+                if durable_owner is not None and durable_owner != owner:
+                    raise ValueError("Nexus ownership identity conflicts with lane journal")
+                payload["owner"] = owner
                 state = dict(payload.get("state") or {})
                 state.update(
                     position_status="ACTIVE",
@@ -767,8 +844,13 @@ class DatabaseRepository:
         nexus_version_id: str,
         campaign_id: str = None,
         state: dict,
+        owner: dict = None,
     ) -> None:
-        payload = {"decision": dict(decision), "state": dict(state)}
+        payload = {
+            "decision": dict(decision),
+            "state": dict(state),
+            "owner": self._normalize_nexus_owner(owner),
+        }
         async with self._connection() as db:
             await db.execute(
                 """
@@ -791,7 +873,9 @@ class DatabaseRepository:
             )
             await db.commit()
 
-    async def save_nexus_lane_state(self, lane: str, state: dict) -> None:
+    async def save_nexus_lane_state(
+        self, lane: str, state: dict, owner: dict = None,
+    ) -> None:
         async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -803,6 +887,7 @@ class DatabaseRepository:
                 return
             payload = json.loads(row["payload"])
             payload["state"] = dict(state)
+            payload["owner"] = self._normalize_nexus_owner(owner)
             await db.execute(
                 "UPDATE nexus_decisions SET payload = ? WHERE id = ?",
                 (json.dumps(payload, sort_keys=True, separators=(",", ":")), row["id"]),
@@ -824,6 +909,23 @@ class DatabaseRepository:
                     if isinstance(payload.get("state"), dict):
                         states[lane] = payload["state"]
         return states
+
+    async def load_nexus_lane_owners(self) -> dict:
+        owners = {}
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            for lane in ("champion_baseline", "challenger_trial"):
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (lane,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is not None:
+                    payload = json.loads(row["payload"] or "{}")
+                    owners[lane] = self._normalize_nexus_owner(
+                        payload.get("owner"),
+                    )
+        return owners
 
     async def get_nexus_runtime_snapshot(self) -> dict:
         return await NexusTradeRepository(self.db_path).get_runtime_snapshot()
@@ -915,6 +1017,18 @@ class DatabaseRepository:
     ) -> dict:
         terminal = state in {"owned", "rejected", "cancelled"}
         async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            merged = None
+            if metadata is not None:
+                async with db.execute(
+                    "SELECT metadata FROM order_intents WHERE id = ?", (intent_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                merged = self._merge_order_intent_metadata(
+                    json.loads(row["metadata"] or "{}") if row is not None else {},
+                    metadata,
+                )
             await db.execute("""
                 UPDATE order_intents
                 SET state = ?, error = ?,
@@ -925,7 +1039,7 @@ class DatabaseRepository:
             """, (
                 state,
                 error,
-                json.dumps(metadata) if metadata is not None else None,
+                json.dumps(merged) if merged is not None else None,
                 1 if terminal else 0,
                 intent_id,
             ))
@@ -933,7 +1047,9 @@ class DatabaseRepository:
         return await self.get_order_intent(intent_id)
 
     async def mark_order_intent_owned(self, intent_id: str, contract: dict) -> dict:
-        contract_id = int(contract["contract_id"])
+        contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
+        if type(contract_id) is not int or contract_id <= 0:
+            raise ValueError("contract_id must be a positive integer")
         transaction_id = contract.get("transaction_id")
         async with self._connection() as db:
             db.row_factory = aiosqlite.Row
@@ -945,10 +1061,10 @@ class DatabaseRepository:
                     row = await cursor.fetchone()
                 if row is None:
                     raise ValueError("order intent does not exist")
-                metadata = {
-                    **json.loads(row["metadata"] or "{}"),
-                    **dict(contract),
-                }
+                metadata = self._merge_order_intent_metadata(
+                    json.loads(row["metadata"] or "{}"),
+                    dict(contract),
+                )
                 await db.execute("""
                     UPDATE order_intents
                     SET state = 'owned', contract_id = ?, transaction_id = ?, error = NULL,
@@ -1101,6 +1217,7 @@ class DatabaseRepository:
         risk_config: dict,
         initial_stake: float,
         settled_epoch: float,
+        owner: dict = None,
     ) -> dict:
         """Commit Nexus trade, optional risk, ownership journal and IDLE lane together."""
         if type(apply_risk) is not bool:
@@ -1227,7 +1344,12 @@ class DatabaseRepository:
                 if decision is None:
                     raise ValueError("settlement Nexus decision journal was not found")
                 payload = json.loads(decision["payload"])
+                durable_owner = self._normalize_nexus_owner(payload.get("owner"))
+                expected_owner = self._normalize_nexus_owner(owner)
+                if expected_owner is not None and durable_owner != expected_owner:
+                    raise ValueError("settlement owner does not match durable lane owner")
                 payload["state"] = dict(lane_state)
+                payload["owner"] = None
                 await db.execute(
                     "UPDATE nexus_decisions SET payload = ? WHERE id = ?",
                     (
