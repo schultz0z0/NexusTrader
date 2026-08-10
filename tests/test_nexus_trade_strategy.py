@@ -4,7 +4,12 @@ from dataclasses import asdict
 
 from nexus_trade.domain import Lane
 from nexus_trade.indicators import IndicatorFrame
-from nexus_trade.strategy import Decision, NexusTradeStrategy, SetupState
+from nexus_trade.strategy import (
+    Decision,
+    NexusTradeStrategy,
+    OwnershipReconciliation,
+    SetupState,
+)
 
 
 def candle(epoch, opening, close, *, high=None, low=None):
@@ -196,16 +201,16 @@ class NexusTradeStrategyTests(unittest.TestCase):
         self.assertEqual(strategy.state.owner_decision_id, owner.decision_id)
 
         with self.assertRaisesRegex(ValueError, "owner"):
-            strategy.mark_position_active("wrong-owner", "contract-1")
-        strategy.mark_position_active(owner.decision_id, "contract-1")
+            strategy.mark_position_active("wrong-owner", 101)
+        strategy.mark_position_active(owner.decision_id, 101)
         self.assertEqual(strategy.state.position_status, "ACTIVE")
-        self.assertEqual(strategy.state.contract_id, "contract-1")
+        self.assertEqual(strategy.state.contract_id, 101)
 
         with self.assertRaisesRegex(ValueError, "owner"):
-            strategy.mark_position_closed("wrong-owner", "contract-1")
+            strategy.mark_position_closed("wrong-owner", 101)
         with self.assertRaisesRegex(ValueError, "contract"):
-            strategy.mark_position_closed(owner.decision_id, "wrong-contract")
-        strategy.mark_position_closed(owner.decision_id, "contract-1")
+            strategy.mark_position_closed(owner.decision_id, 102)
+        strategy.mark_position_closed(owner.decision_id, 101)
         self.assertEqual(strategy.state.position_status, "IDLE")
 
     def test_reservation_can_only_be_released_by_its_owner_before_send(self):
@@ -231,7 +236,73 @@ class NexusTradeStrategyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUARANTINED"):
             restarted.release_reservation(owner.decision_id)
         with self.assertRaisesRegex(ValueError, "QUARANTINED"):
-            restarted.mark_position_closed(owner.decision_id, "contract-unknown")
+            restarted.mark_position_closed(owner.decision_id, 101)
+
+    def test_quarantine_reconciliation_found_contract_is_owner_checked_and_idempotent(self):
+        strategy = NexusTradeStrategy()
+        owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
+        strategy.mark_position_quarantined(owner.decision_id)
+        found = OwnershipReconciliation(
+            correlation_id="reconcile-1",
+            decision_id=owner.decision_id,
+            outcome="CONTRACT_FOUND",
+            contract_id=707,
+        )
+
+        with self.assertRaisesRegex(ValueError, "owner"):
+            strategy.reconcile_quarantine(OwnershipReconciliation(
+                correlation_id="reconcile-wrong",
+                decision_id="wrong-owner",
+                outcome="CONTRACT_FOUND",
+                contract_id=707,
+            ))
+        strategy.reconcile_quarantine(found)
+        snapshot = strategy.snapshot()
+        strategy.reconcile_quarantine(found)
+
+        self.assertEqual(strategy.snapshot(), snapshot)
+        self.assertEqual(strategy.state.position_status, "ACTIVE")
+        self.assertEqual(strategy.state.contract_id, 707)
+        restarted = NexusTradeStrategy(state=json.loads(json.dumps(snapshot)))
+        restarted.reconcile_quarantine(found)
+        restarted.mark_position_closed(owner.decision_id, 707)
+        self.assertEqual(restarted.state.position_status, "IDLE")
+
+    def test_quarantine_reconciliation_confirmed_absent_is_strict_and_idempotent(self):
+        strategy = NexusTradeStrategy()
+        owner = strategy.on_closed_candle(candle(0, 99, 101), frame(0))[0]
+        strategy.mark_position_quarantined(owner.decision_id)
+        absent = OwnershipReconciliation(
+            correlation_id="reconcile-absent",
+            decision_id=owner.decision_id,
+            outcome="PURCHASE_ABSENT",
+            contract_id=None,
+        )
+
+        with self.assertRaises(TypeError):
+            strategy.reconcile_quarantine(False)
+        strategy.reconcile_quarantine(absent)
+        snapshot = strategy.snapshot()
+        strategy.reconcile_quarantine(absent)
+
+        self.assertEqual(strategy.snapshot(), snapshot)
+        self.assertEqual(strategy.state.position_status, "IDLE")
+        restarted = NexusTradeStrategy(state=json.loads(json.dumps(snapshot)))
+        restarted.reconcile_quarantine(absent)
+        self.assertEqual(restarted.state.position_status, "IDLE")
+
+    def test_reconciliation_rejects_invalid_outcome_contract_and_correlation(self):
+        cases = (
+            {"correlation_id": "", "decision_id": "owner", "outcome": "PURCHASE_ABSENT", "contract_id": None},
+            {"correlation_id": "r1", "decision_id": "owner", "outcome": "MAYBE", "contract_id": None},
+            {"correlation_id": "r1", "decision_id": "owner", "outcome": "CONTRACT_FOUND", "contract_id": None},
+            {"correlation_id": "r1", "decision_id": "owner", "outcome": "PURCHASE_ABSENT", "contract_id": 1},
+            {"correlation_id": "r1", "decision_id": "owner", "outcome": "CONTRACT_FOUND", "contract_id": "1"},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises((TypeError, ValueError)):
+                    OwnershipReconciliation.from_dict(payload)
 
     def test_decisions_and_state_are_json_serializable_and_replay_deterministic(self):
         candles = (
@@ -287,6 +358,43 @@ class NexusTradeStrategyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     NexusTradeStrategy().on_closed_candle(bar, frame(0))
 
+    def test_causal_epoch_rejects_a_candle_closed_after_the_cycle(self):
+        strategy = NexusTradeStrategy()
+        before = strategy.snapshot()
+
+        with self.assertRaisesRegex(ValueError, "causal_epoch"):
+            strategy.on_closed_candle(
+                candle(60, 99, 101), frame(60), causal_epoch=60,
+            )
+
+        self.assertEqual(strategy.snapshot(), before)
+        historical = strategy.on_closed_candle(candle(60, 99, 101), frame(60))[0]
+        self.assertEqual(historical.target_epoch, 120)
+
+    def test_adx_domain_fails_before_any_state_mutation(self):
+        for invalid in (-0.01, 100.01, float("nan"), float("inf"), -float("inf")):
+            with self.subTest(adx=invalid):
+                strategy = NexusTradeStrategy()
+                before = strategy.snapshot()
+                with self.assertRaises((TypeError, ValueError)):
+                    strategy.on_closed_candle(
+                        candle(0, 99, 101), frame(0, adx=invalid)
+                    )
+                self.assertEqual(strategy.snapshot(), before)
+
+        for valid in (0.0, 100.0):
+            with self.subTest(adx=valid):
+                value = Decision(
+                    decision_id="decision",
+                    contract_type="CALL",
+                    reason_codes=("center_cross_up",),
+                    signal_epoch=0,
+                    target_epoch=60,
+                    adx=valid,
+                    blocked_reason=None,
+                )
+                self.assertEqual(value.adx, valid)
+
     def test_setup_state_from_dict_is_strict_about_status_epochs_and_floats(self):
         valid = SetupState().to_dict()
         mutations = (
@@ -296,6 +404,7 @@ class NexusTradeStrategyTests(unittest.TestCase):
             {"position_status": "active"},
             {"position_status": "IDLE", "owner_decision_id": "owner"},
             {"unexpected": "field"},
+            {"contract_id": "101"},
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -310,6 +419,8 @@ class NexusTradeStrategyTests(unittest.TestCase):
             {"signal_epoch": "0"},
             {"target_epoch": 120},
             {"adx": float("nan")},
+            {"adx": -0.01},
+            {"adx": 100.01},
             {"contract_type": "BUY"},
             {"lane": "unknown"},
             {"blocked_reason": "STALE"},

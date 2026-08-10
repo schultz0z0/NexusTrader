@@ -1,5 +1,8 @@
+import asyncio
 import json
 import math
+import threading
+import time
 import unittest
 
 from nexus_trade.clock import DispatchReceipt, EntryClock, EntryIntent
@@ -81,6 +84,118 @@ class EntryClockBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(intent.dispatch_epoch)
         self.assertIsNone(intent.accepted_epoch)
 
+    async def test_causal_cycle_creates_indicators_only_after_finalization(self):
+        fake = FakeClock(epoch=119.5)
+        events = []
+        created = {"indicators": None, "decision": None}
+
+        class RecordingClock(EntryClock):
+            async def await_boundary(self, target_epoch):
+                result = await super().await_boundary(target_epoch)
+                events.append("boundary")
+                return result
+
+            def schedule(self, value):
+                result = super().schedule(value)
+                events.append("intent")
+                return result
+
+        clock = RecordingClock(
+            epoch_now=fake.epoch_now,
+            monotonic_now=fake.monotonic_now,
+            async_sleeper=fake.sleep,
+        )
+
+        def finalize(boundary_epoch):
+            self.assertEqual(boundary_epoch, 120)
+            self.assertIsNone(created["indicators"])
+            self.assertIsNone(created["decision"])
+            events.append("finalize")
+            return {
+                "time": 60, "open": 99, "high": 101, "low": 99, "close": 101,
+                "is_closed": True, "close_epoch": boundary_epoch,
+            }
+
+        async def calculate(closed_candle):
+            self.assertEqual(closed_candle["close_epoch"], 120)
+            events.append("indicators")
+            created["indicators"] = IndicatorFrame(
+                epoch=60, upper=110, middle=100, lower=90, adx=20, values={},
+            )
+            return created["indicators"]
+
+        class RecordingStrategy:
+            def __init__(self):
+                self.real = NexusTradeStrategy()
+
+            def on_closed_candle(self, closed_candle, indicators, *, causal_epoch):
+                self.assert_causal(causal_epoch, indicators)
+                events.append("strategy")
+                result = self.real.on_closed_candle(
+                    closed_candle, indicators, causal_epoch=causal_epoch,
+                )
+                created["decision"] = result[0]
+                return result
+
+            def assert_causal(self, causal_epoch, indicators):
+                self_outer.assertEqual(causal_epoch, 120)
+                self_outer.assertIs(indicators, created["indicators"])
+                self_outer.assertIsNone(created["decision"])
+
+        self_outer = self
+        cycle = await clock.await_and_prepare(
+            120,
+            finalize_candle=finalize,
+            calculate_indicators=calculate,
+            strategy=RecordingStrategy(),
+        )
+
+        self.assertEqual(events, [
+            "boundary", "finalize", "indicators", "strategy", "intent",
+        ])
+        self.assertIs(cycle.indicators, created["indicators"])
+        self.assertIs(cycle.decisions[0], created["decision"])
+        self.assertEqual(cycle.intents[0].status, "PENDING")
+
+    async def test_sync_cycle_callbacks_do_not_block_the_event_loop(self):
+        fake = FakeClock(epoch=120)
+        clock = EntryClock(
+            epoch_now=fake.epoch_now,
+            monotonic_now=fake.monotonic_now,
+            async_sleeper=fake.sleep,
+        )
+        release = threading.Event()
+        heartbeat = asyncio.Event()
+
+        def finalize(_boundary):
+            release.wait(timeout=1)
+            return {
+                "time": 60, "open": 99, "high": 101, "low": 99, "close": 101,
+                "is_closed": True, "close_epoch": 120,
+            }
+
+        async def beat():
+            await asyncio.sleep(0)
+            heartbeat.set()
+            release.set()
+
+        started_at = time.perf_counter()
+        beat_task = asyncio.create_task(beat())
+        cycle_task = asyncio.create_task(clock.await_and_prepare(
+            120,
+            finalize_candle=finalize,
+            calculate_indicators=lambda _candle: IndicatorFrame(
+                epoch=60, upper=110, middle=100, lower=90, adx=20, values={},
+            ),
+            strategy=NexusTradeStrategy(),
+        ))
+
+        await asyncio.wait_for(heartbeat.wait(), timeout=0.2)
+        self.assertLess(time.perf_counter() - started_at, 0.5)
+        await beat_task
+        cycle = await asyncio.wait_for(cycle_task, timeout=0.5)
+        self.assertEqual(cycle.intents[0].status, "PENDING")
+
     async def test_await_boundary_is_async_and_has_no_finalizer_or_dispatcher(self):
         fake = FakeClock(epoch=119.75)
         clock = EntryClock(
@@ -122,7 +237,7 @@ class EntryClockIntentTests(unittest.TestCase):
         dispatched = pending.mark_dispatched(120 + delay)
         receipt = DispatchReceipt(
             decision_id=pending.decision_id,
-            contract_id="contract-1",
+            contract_id=101,
             dispatch_epoch=120 + delay,
             accepted_epoch=120 + delay,
         )
@@ -157,7 +272,7 @@ class EntryClockIntentTests(unittest.TestCase):
                 intent = self.accepted(delay)
                 self.assertEqual(intent.status, status)
                 self.assertAlmostEqual(intent.entry_delay_ms, delay * 1000, places=6)
-                self.assertEqual(intent.contract_id, "contract-1")
+                self.assertEqual(intent.contract_id, 101)
 
     def test_2001ms_before_dispatch_is_stale_and_must_not_be_sent(self):
         _fake, clock = self.clock_at(122.001)
@@ -188,13 +303,13 @@ class EntryClockIntentTests(unittest.TestCase):
 
         accepted = sent.apply_receipt(DispatchReceipt(
             decision_id="decision-1",
-            contract_id="contract-late",
+            contract_id=202,
             dispatch_epoch=120.2,
             accepted_epoch=122.001,
         ))
 
         self.assertEqual(accepted.status, "ACCEPTED_LATE")
-        self.assertEqual(accepted.contract_id, "contract-late")
+        self.assertEqual(accepted.contract_id, 202)
         self.assertEqual(accepted.dispatch_epoch, 120.2)
         self.assertEqual(accepted.accepted_epoch, 122.001)
         self.assertAlmostEqual(accepted.entry_delay_ms, 2001.0, places=6)
@@ -234,14 +349,14 @@ class EntryClockIntentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decision_id"):
             sent.apply_receipt(DispatchReceipt(
                 decision_id="other",
-                contract_id="contract-1",
+                contract_id=101,
                 dispatch_epoch=120.2,
                 accepted_epoch=120.3,
             ))
         with self.assertRaisesRegex(ValueError, "dispatch_epoch"):
             sent.apply_receipt(DispatchReceipt(
                 decision_id="decision-1",
-                contract_id="contract-1",
+                contract_id=101,
                 dispatch_epoch=120.3,
                 accepted_epoch=120.4,
             ))
@@ -275,7 +390,7 @@ class EntryClockIntentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "accepted_epoch"):
             sent.apply_receipt(DispatchReceipt(
                 decision_id="decision-1",
-                contract_id="contract-1",
+                contract_id=101,
                 dispatch_epoch=120.2,
                 accepted_epoch=120.1,
             ))
@@ -287,7 +402,7 @@ class EntryClockIntentTests(unittest.TestCase):
 
         receipt = DispatchReceipt(
             decision_id="decision-1",
-            contract_id="contract-1",
+            contract_id=101,
             dispatch_epoch=120.25,
             accepted_epoch=120.25,
         )
@@ -308,12 +423,25 @@ class EntryClockIntentTests(unittest.TestCase):
             {"contract_type": "BUY"},
             {"lane": "unknown"},
             {"duration_seconds": "58"},
+            {"contract_id": "101"},
+            {"adx": 100.01},
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 payload = {**valid, **mutation}
                 with self.assertRaises((TypeError, ValueError)):
                     EntryIntent.from_dict(payload)
+
+    def test_deriv_contract_id_is_a_strict_positive_integer(self):
+        for invalid in (True, 0, -1, "101", 1.5):
+            with self.subTest(contract_id=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    DispatchReceipt(
+                        decision_id="decision-1",
+                        contract_id=invalid,
+                        dispatch_epoch=120.2,
+                        accepted_epoch=120.3,
+                    )
 
 
 if __name__ == "__main__":

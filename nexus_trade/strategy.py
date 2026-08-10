@@ -17,6 +17,7 @@ ADX_ENTRY_MAX = 22.0
 POSITION_STATUSES = frozenset({"IDLE", "RESERVED", "ACTIVE", "QUARANTINED"})
 DECISION_BLOCKS = frozenset({"NO_TRADE", "ADX_BLOCKED", "POSITION_ACTIVE"})
 CONTRACT_TYPES = frozenset({"CALL", "PUT"})
+RECONCILIATION_OUTCOMES = frozenset({"CONTRACT_FOUND", "PURCHASE_ABSENT"})
 
 
 def _exact_epoch(value: object, name: str, *, optional: bool = False) -> int | None:
@@ -48,6 +49,16 @@ def _nonempty_string(value: object, name: str, *, optional: bool = False) -> str
     return value
 
 
+def _positive_contract_id(value: object, name: str = "contract_id", *, optional: bool = False) -> int | None:
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or type(value) is not int:
+        raise TypeError(f"{name} must be an exact integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
 def _strict_keys(value: Mapping[str, Any], expected: frozenset[str], name: str) -> None:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -56,6 +67,35 @@ def _strict_keys(value: Mapping[str, Any], expected: frozenset[str], name: str) 
         missing = sorted(expected - keys)
         extra = sorted(keys - expected)
         raise ValueError(f"{name} keys mismatch; missing={missing}, extra={extra}")
+
+
+@dataclass(frozen=True)
+class OwnershipReconciliation:
+    """Correlated, unequivocal result from the ownership coordinator."""
+
+    correlation_id: str
+    decision_id: str
+    outcome: str
+    contract_id: int | None
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.correlation_id, "correlation_id")
+        _nonempty_string(self.decision_id, "decision_id")
+        if type(self.outcome) is not str or self.outcome not in RECONCILIATION_OUTCOMES:
+            raise ValueError("reconciliation outcome is invalid")
+        _positive_contract_id(self.contract_id, optional=True)
+        if self.outcome == "CONTRACT_FOUND" and self.contract_id is None:
+            raise ValueError("CONTRACT_FOUND requires contract_id")
+        if self.outcome == "PURCHASE_ABSENT" and self.contract_id is not None:
+            raise ValueError("PURCHASE_ABSENT cannot carry contract_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "OwnershipReconciliation":
+        _strict_keys(value, frozenset(cls.__dataclass_fields__), "OwnershipReconciliation")
+        return cls(**dict(value))
 
 
 @dataclass(frozen=True)
@@ -69,7 +109,10 @@ class SetupState:
     last_candle_epoch: int | None = None
     position_status: str = "IDLE"
     owner_decision_id: str | None = None
-    contract_id: str | None = None
+    contract_id: int | None = None
+    reconciliation_id: str | None = None
+    reconciliation_decision_id: str | None = None
+    reconciliation_outcome: str | None = None
 
     def __post_init__(self) -> None:
         _exact_epoch(self.upper_break_epoch, "upper_break_epoch", optional=True)
@@ -80,7 +123,27 @@ class SetupState:
         if type(self.position_status) is not str or self.position_status not in POSITION_STATUSES:
             raise ValueError("position_status is invalid")
         _nonempty_string(self.owner_decision_id, "owner_decision_id", optional=True)
-        _nonempty_string(self.contract_id, "contract_id", optional=True)
+        _positive_contract_id(self.contract_id, optional=True)
+        _nonempty_string(self.reconciliation_id, "reconciliation_id", optional=True)
+        _nonempty_string(
+            self.reconciliation_decision_id,
+            "reconciliation_decision_id",
+            optional=True,
+        )
+        if self.reconciliation_outcome is not None and (
+            type(self.reconciliation_outcome) is not str
+            or self.reconciliation_outcome not in RECONCILIATION_OUTCOMES
+        ):
+            raise ValueError("reconciliation_outcome is invalid")
+        reconciliation_values = (
+            self.reconciliation_id,
+            self.reconciliation_decision_id,
+            self.reconciliation_outcome,
+        )
+        if any(value is None for value in reconciliation_values) and any(
+            value is not None for value in reconciliation_values
+        ):
+            raise ValueError("reconciliation identity and outcome must be complete")
         if self.position_status == "IDLE":
             if self.owner_decision_id is not None or self.contract_id is not None:
                 raise ValueError("IDLE state cannot have an owner or contract")
@@ -132,7 +195,9 @@ class Decision:
         target_epoch = _exact_epoch(self.target_epoch, "target_epoch")
         if target_epoch != signal_epoch + NEXUS_TIMEFRAME_SECONDS:
             raise ValueError("target_epoch must equal signal_epoch plus one M1")
-        _finite_float(self.adx, "adx", optional=True)
+        adx = _finite_float(self.adx, "adx", optional=True)
+        if adx is not None and not 0.0 <= adx <= 100.0:
+            raise ValueError("adx must be between 0 and 100")
         if self.blocked_reason is not None and (
             type(self.blocked_reason) is not str or self.blocked_reason not in DECISION_BLOCKS
         ):
@@ -242,9 +307,9 @@ class NexusTradeStrategy:
             contract_id=None,
         )
 
-    def mark_position_active(self, owner_decision_id: str, contract_id: str) -> None:
+    def mark_position_active(self, owner_decision_id: str, contract_id: int) -> None:
         self._require_owner("RESERVED", owner_decision_id)
-        _nonempty_string(contract_id, "contract_id")
+        _positive_contract_id(contract_id)
         self.state = replace(
             self.state,
             position_status="ACTIVE",
@@ -255,11 +320,58 @@ class NexusTradeStrategy:
         self._require_owner("RESERVED", owner_decision_id)
         self.state = replace(self.state, position_status="QUARANTINED")
 
-    def mark_position_closed(self, owner_decision_id: str, contract_id: str) -> None:
+    def reconcile_quarantine(self, result: OwnershipReconciliation) -> None:
+        if type(result) is not OwnershipReconciliation:
+            raise TypeError("result must be an OwnershipReconciliation")
+        if self.state.reconciliation_id == result.correlation_id:
+            if (
+                self.state.reconciliation_decision_id != result.decision_id
+                or self.state.reconciliation_outcome != result.outcome
+            ):
+                raise ValueError("reconciliation correlation conflicts with persisted result")
+            if result.outcome == "CONTRACT_FOUND":
+                if (
+                    self.state.position_status == "ACTIVE"
+                    and self.state.owner_decision_id == result.decision_id
+                    and self.state.contract_id == result.contract_id
+                ):
+                    return
+            elif self.state.position_status == "IDLE":
+                return
+            raise ValueError("persisted reconciliation no longer matches ownership state")
+        if self.state.position_status != "QUARANTINED":
+            raise ValueError(
+                f"position is {self.state.position_status}, expected QUARANTINED"
+            )
+        if result.decision_id != self.state.owner_decision_id:
+            raise ValueError("owner decision does not match quarantined position")
+        common = {
+            "reconciliation_id": result.correlation_id,
+            "reconciliation_decision_id": result.decision_id,
+            "reconciliation_outcome": result.outcome,
+        }
+        if result.outcome == "CONTRACT_FOUND":
+            self.state = replace(
+                self.state,
+                position_status="ACTIVE",
+                contract_id=result.contract_id,
+                **common,
+            )
+        else:
+            self.state = replace(
+                self.state,
+                position_status="IDLE",
+                owner_decision_id=None,
+                contract_id=None,
+                **common,
+            )
+
+    def mark_position_closed(self, owner_decision_id: str, contract_id: int) -> None:
         if self.state.position_status == "QUARANTINED":
             raise ValueError("QUARANTINED ownership must be reconciled before close")
         self._require_owner("ACTIVE", owner_decision_id)
-        if type(contract_id) is not str or contract_id != self.state.contract_id:
+        _positive_contract_id(contract_id)
+        if contract_id != self.state.contract_id:
             raise ValueError("contract identity does not own the active position")
         self.state = replace(
             self.state,
@@ -281,6 +393,8 @@ class NexusTradeStrategy:
         self,
         candle: object,
         indicators: IndicatorFrame | Mapping[str, Any],
+        *,
+        causal_epoch: int | None = None,
     ) -> list[Decision]:
         epoch = _field(candle, "open_epoch", "time")
         epoch = _exact_epoch(epoch, "closed candle epoch")
@@ -288,6 +402,10 @@ class NexusTradeStrategy:
             if _field(candle, "open_epoch") != _field(candle, "time"):
                 raise ValueError("candle epoch fields conflict")
         _validate_closed_candle(candle, epoch)
+        if causal_epoch is not None:
+            causal_epoch = _exact_epoch(causal_epoch, "causal_epoch")
+            if epoch + NEXUS_TIMEFRAME_SECONDS > causal_epoch:
+                raise ValueError("candle closes after causal_epoch")
         if self.state.last_candle_epoch is not None and epoch <= self.state.last_candle_epoch:
             raise ValueError("closed candle epochs must be strictly increasing")
 
@@ -301,6 +419,8 @@ class NexusTradeStrategy:
         middle = _market_number(_field(indicators, "middle"), "middle", optional=True)
         lower = _market_number(_field(indicators, "lower"), "lower", optional=True)
         adx = _market_number(_field(indicators, "adx"), "adx", optional=True)
+        if adx is not None and not 0.0 <= adx <= 100.0:
+            raise ValueError("adx must be between 0 and 100")
 
         upper_break_epoch = self.state.upper_break_epoch
         lower_break_epoch = self.state.lower_break_epoch
@@ -386,6 +506,9 @@ class NexusTradeStrategy:
             position_status="RESERVED" if reserve else self.state.position_status,
             owner_decision_id=decision.decision_id if reserve else self.state.owner_decision_id,
             contract_id=self.state.contract_id,
+            reconciliation_id=self.state.reconciliation_id,
+            reconciliation_decision_id=self.state.reconciliation_decision_id,
+            reconciliation_outcome=self.state.reconciliation_outcome,
         )
         return [decision]
 

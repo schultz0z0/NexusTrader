@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import time
 from dataclasses import asdict, dataclass, replace
@@ -66,6 +67,16 @@ def _nonempty(value: object, name: str, *, optional: bool = False) -> str | None
     return value
 
 
+def _positive_contract_id(value: object, *, optional: bool = False) -> int | None:
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or type(value) is not int:
+        raise TypeError("contract_id must be an exact integer")
+    if value <= 0:
+        raise ValueError("contract_id must be positive")
+    return value
+
+
 def _strict_keys(value: Mapping[str, Any], expected: frozenset[str], name: str) -> None:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -82,13 +93,13 @@ class DispatchReceipt:
     """A real dispatcher acknowledgement correlated to one sent intent."""
 
     decision_id: str
-    contract_id: str
+    contract_id: int
     dispatch_epoch: float
     accepted_epoch: float
 
     def __post_init__(self) -> None:
         _nonempty(self.decision_id, "decision_id")
-        _nonempty(self.contract_id, "contract_id")
+        _positive_contract_id(self.contract_id)
         dispatch = _finite_epoch(self.dispatch_epoch, "dispatch_epoch")
         accepted = _finite_epoch(self.accepted_epoch, "accepted_epoch")
         if accepted < dispatch:
@@ -120,7 +131,7 @@ class EntryIntent:
     entry_delay_ms: float | None
     status: str
     error_code: str | None
-    contract_id: str | None
+    contract_id: int | None
     lane: str
     symbol: str = NEXUS_SYMBOL
     duration_seconds: int = NEXUS_DURATION_SECONDS
@@ -142,7 +153,9 @@ class EntryIntent:
         if target != signal + NEXUS_TIMEFRAME_SECONDS:
             raise ValueError("target_epoch must equal signal_epoch plus one M1")
         if self.adx is not None:
-            _finite_epoch(self.adx, "adx")
+            adx = _finite_epoch(self.adx, "adx")
+            if not 0.0 <= adx <= 100.0:
+                raise ValueError("adx must be between 0 and 100")
         prepared = _finite_epoch(self.prepared_epoch, "prepared_epoch")
         if prepared < target:
             raise ValueError("prepared_epoch cannot be before target_epoch")
@@ -161,7 +174,7 @@ class EntryIntent:
         if type(self.status) is not str or self.status not in ENTRY_STATUSES:
             raise ValueError("status is invalid")
         _nonempty(self.error_code, "error_code", optional=True)
-        _nonempty(self.contract_id, "contract_id", optional=True)
+        _positive_contract_id(self.contract_id, optional=True)
         if type(self.lane) is not str or self.lane not in {lane.value for lane in Lane}:
             raise ValueError("lane is invalid")
         if self.symbol != NEXUS_SYMBOL:
@@ -326,6 +339,24 @@ class EntryIntent:
             raise ValueError(f"intent is {self.status}, expected {expected}")
 
 
+@dataclass(frozen=True)
+class CausalCycleResult:
+    """Artifacts produced in order after one causal M1 boundary."""
+
+    boundary_epoch: int
+    closed_candle: object
+    indicators: object
+    decisions: tuple[Decision, ...]
+    intents: tuple[EntryIntent, ...]
+
+
+async def _call_without_blocking(callback: Callable[..., object], *args, **kwargs) -> object:
+    if inspect.iscoroutinefunction(callback):
+        return await callback(*args, **kwargs)
+    result = await asyncio.to_thread(callback, *args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
+
+
 class EntryClock:
     """Deriv-epoch/monotonic alignment without candle or dispatcher I/O."""
 
@@ -366,6 +397,41 @@ class EntryClock:
             if remaining <= 0:
                 return target
             await self._async_sleep(remaining)
+
+    async def await_and_prepare(
+        self,
+        target_epoch: int,
+        *,
+        finalize_candle: Callable[[int], object | Awaitable[object]],
+        calculate_indicators: Callable[[object], object | Awaitable[object]],
+        strategy: object,
+    ) -> CausalCycleResult:
+        """Run the causal, no-dispatch portion of one closed-candle cycle."""
+        boundary = await self.await_boundary(target_epoch)
+        closed_candle = await _call_without_blocking(finalize_candle, boundary)
+        indicators = await _call_without_blocking(calculate_indicators, closed_candle)
+        evaluator = getattr(strategy, "on_closed_candle", None)
+        if not callable(evaluator):
+            raise TypeError("strategy must expose on_closed_candle")
+        produced = await _call_without_blocking(
+            evaluator,
+            closed_candle,
+            indicators,
+            causal_epoch=boundary,
+        )
+        if not isinstance(produced, (list, tuple)) or not produced:
+            raise ValueError("strategy must produce at least one Decision")
+        decisions = tuple(produced)
+        if any(type(value) is not Decision for value in decisions):
+            raise TypeError("strategy produced an invalid Decision")
+        intents = tuple(self.schedule(value) for value in decisions)
+        return CausalCycleResult(
+            boundary_epoch=boundary,
+            closed_candle=closed_candle,
+            indicators=indicators,
+            decisions=decisions,
+            intents=intents,
+        )
 
     def schedule(self, decision: Decision) -> EntryIntent:
         if type(decision) is not Decision:
