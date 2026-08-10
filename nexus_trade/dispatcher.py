@@ -19,6 +19,10 @@ from nexus_trade.domain import Lane
 from nexus_trade.strategy import OwnershipReconciliation
 from trading.ownership import OrderOwnershipCoordinator
 from trading.proposal import ProposalManager
+from utils.logger import setup_logger
+
+
+logger = setup_logger("NexusTradeDispatcher")
 
 
 class DispatchBlockedError(RuntimeError):
@@ -114,6 +118,9 @@ class AccountDispatcher:
         self._lane_lock = asyncio.Lock()
         self._blocked_lanes: set[str] = set()
         self._active_contracts: dict[str, int] = {}
+        self._quarantine_persistence_tasks: set[asyncio.Task] = set()
+        self._quarantine_write_timeout = 1.0
+        self._quarantine_cancel_timeout = 0.1
         self._emergency_stop = False
         self._lane_context = {lane.value: LaneJournalContext() for lane in Lane}
 
@@ -121,7 +128,15 @@ class AccountDispatcher:
         await self._ownership.start()
 
     async def close(self) -> None:
-        return None
+        pending = list(self._quarantine_persistence_tasks)
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        if pending:
+            await asyncio.wait(
+                pending,
+                timeout=self._quarantine_cancel_timeout,
+            )
 
     @property
     def active_contracts(self) -> dict[str, int]:
@@ -332,6 +347,9 @@ class AccountDispatcher:
                     )
                     raise
                 try:
+                    # Entering the transport await makes ownership ambiguous.
+                    # No later persistence outcome may release this lane.
+                    keep_reserved = True
                     contract = await self._executor.buy(
                         proposal["id"],
                         ask_price,
@@ -345,34 +363,41 @@ class AccountDispatcher:
                     quarantined = sent.mark_ownership_quarantine(
                         "AMBIGUOUS_BUY_RESPONSE",
                     )
-                    keep_reserved = True
-                    await self._persist_cancelled_quarantine(
-                        correlation_id, metadata, quarantined,
-                    )
+                    try:
+                        await self._persist_quarantine_bounded(
+                            correlation_id,
+                            metadata,
+                            quarantined,
+                            error="buy task cancelled after transport became possible",
+                        )
+                    except asyncio.CancelledError:
+                        pass
                     raise
                 except BaseException as exc:
                     quarantined = sent.mark_ownership_quarantine(
                         "AMBIGUOUS_BUY_RESPONSE",
                     )
-                    await self.repository.update_order_intent(
+                    await self._persist_quarantine_bounded(
                         correlation_id,
-                        "reconcile_pending",
+                        metadata,
+                        quarantined,
                         error=str(exc),
-                        metadata={**metadata, "entry_intent": quarantined.to_dict()},
                     )
-                    keep_reserved = True
                     raise OwnershipQuarantineError(
                         quarantined, correlation_id, exc,
                     ) from exc
 
                 if contract is None:
-                    await self.repository.update_order_intent(
-                        correlation_id,
-                        "rejected",
-                        error="buy rejected",
-                        metadata=sent_metadata,
+                    quarantined = sent.mark_ownership_quarantine(
+                        "EMPTY_BUY_RESPONSE",
                     )
-                    raise BuyRejectedError("buy rejected")
+                    await self._persist_quarantine_bounded(
+                        correlation_id,
+                        metadata,
+                        quarantined,
+                        error="buy response did not establish rejection or ownership",
+                    )
+                    raise OwnershipQuarantineError(quarantined, correlation_id)
                 contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
                 if (
                     isinstance(contract_id, bool)
@@ -382,13 +407,12 @@ class AccountDispatcher:
                     quarantined = sent.mark_ownership_quarantine(
                         "MALFORMED_BUY_RESPONSE",
                     )
-                    await self.repository.update_order_intent(
+                    await self._persist_quarantine_bounded(
                         correlation_id,
-                        "reconcile_pending",
+                        metadata,
+                        quarantined,
                         error="buy response has no numeric contract_id",
-                        metadata={**metadata, "entry_intent": quarantined.to_dict()},
                     )
-                    keep_reserved = True
                     raise OwnershipQuarantineError(quarantined, correlation_id)
 
                 accepted_epoch = float(self._epoch_now())
@@ -453,26 +477,61 @@ class AccountDispatcher:
             )
         self._active_contracts[lane] = contract_id
 
-    async def _persist_cancelled_quarantine(
+    async def _persist_quarantine_bounded(
         self,
         correlation_id: str,
         metadata: dict,
         quarantined: EntryIntent,
-    ) -> None:
+        *,
+        error: str,
+    ) -> bool:
         persistence = asyncio.create_task(
             self.repository.update_order_intent(
                 correlation_id,
                 "reconcile_pending",
-                error="buy task cancelled after transport became possible",
+                error=error,
                 metadata={**metadata, "entry_intent": quarantined.to_dict()},
             ),
         )
+        self._quarantine_persistence_tasks.add(persistence)
+        persistence.add_done_callback(self._quarantine_persistence_done)
         try:
-            await asyncio.wait_for(asyncio.shield(persistence), timeout=1.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            if not persistence.done():
-                persistence.cancel()
-            await asyncio.gather(persistence, return_exceptions=True)
+            await asyncio.wait_for(
+                asyncio.shield(persistence),
+                timeout=self._quarantine_write_timeout,
+            )
+            return True
+        except asyncio.CancelledError:
+            if persistence.cancelled():
+                return False
+            await self._cancel_quarantine_persistence_bounded(persistence)
+            raise
+        except Exception:
+            await self._cancel_quarantine_persistence_bounded(persistence)
+            return False
+
+    async def _cancel_quarantine_persistence_bounded(self, task) -> None:
+        if task.done():
+            return
+        task.cancel()
+        await asyncio.wait(
+            {task},
+            timeout=self._quarantine_cancel_timeout,
+        )
+
+    def _quarantine_persistence_done(self, task) -> None:
+        self._quarantine_persistence_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.warning(
+                "Falha ao persistir quarantine NexusTrade: %s",
+                error,
+            )
 
 
 class SharedDemoDispatcher(AccountDispatcher):

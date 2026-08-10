@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -88,6 +89,50 @@ class FailingQuarantineRepository(FakeRepository):
         if state == "reconcile_pending":
             raise RuntimeError("quarantine journal unavailable")
         return await super().update_order_intent(intent_id, state, **changes)
+
+
+class ControlledQuarantineRepository(FakeRepository):
+    def __init__(self, mode):
+        super().__init__()
+        self.mode = mode
+        self.quarantine_started = asyncio.Event()
+        self.release_quarantine = asyncio.Event()
+
+    async def update_order_intent(self, intent_id, state, **changes):
+        if state != "reconcile_pending":
+            return await super().update_order_intent(intent_id, state, **changes)
+        self.quarantine_started.set()
+        if self.mode == "failing":
+            raise RuntimeError("quarantine write failed")
+        if self.mode == "cancelled":
+            raise asyncio.CancelledError()
+        if self.mode == "blocked":
+            await self.release_quarantine.wait()
+        return await super().update_order_intent(intent_id, state, **changes)
+
+
+class StubbornQuarantineRepository(FakeRepository):
+    def __init__(self):
+        super().__init__()
+        self.quarantine_started = asyncio.Event()
+        self.cancel_ignored = asyncio.Event()
+        self.cleanup = asyncio.Event()
+
+    async def update_order_intent(self, intent_id, state, **changes):
+        if state != "reconcile_pending":
+            return await super().update_order_intent(intent_id, state, **changes)
+        self.quarantine_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancel_ignored.set()
+            await self.cleanup.wait()
+        return await super().update_order_intent(intent_id, state, **changes)
+
+
+class NoneContractExecutor:
+    async def buy(self, proposal_id, price, passthrough=None):
+        return None
 
 
 class FakeConnection:
@@ -341,6 +386,106 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.intent.status, "OWNERSHIP_QUARANTINE")
         self.assertEqual(self.connection.buy_calls, 1)
         self.assertNotIn(Lane.CHAMPION.value, self.dispatcher.active_contracts)
+
+    async def test_post_transport_quarantine_write_outcomes_never_release_lane(self):
+        cases = (
+            ("exception", "failing"),
+            ("exception", "cancelled"),
+            ("exception", "blocked"),
+            ("malformed", "failing"),
+            ("malformed", "cancelled"),
+            ("malformed", "blocked"),
+        )
+        for index, (response_kind, write_mode) in enumerate(cases):
+            with self.subTest(response_kind=response_kind, write_mode=write_mode):
+                repository = ControlledQuarantineRepository(write_mode)
+                connection = FakeConnection()
+                if response_kind == "exception":
+                    connection.buy_exception = ConnectionError("response lost")
+                else:
+                    connection.buy_response = {"buy": {"contract_id": "invalid"}}
+                dispatcher = SharedDemoDispatcher(
+                    connection,
+                    repository,
+                    account_id="DOT-DEMO",
+                    epoch_now=lambda: self.now,
+                )
+                dispatcher._quarantine_write_timeout = 0.02
+                dispatcher._quarantine_cancel_timeout = 0.02
+
+                submit = asyncio.create_task(dispatcher.submit(
+                    pending_intent(f"post-transport-{index}", Lane.TRIAL),
+                ))
+                done, _ = await asyncio.wait({submit}, timeout=0.15)
+                if submit not in done:
+                    repository.release_quarantine.set()
+                    submit.cancel()
+                    await asyncio.gather(submit, return_exceptions=True)
+                    self.fail("post-transport quarantine persistence exceeded its bound")
+                with self.assertRaises(OwnershipQuarantineError):
+                    await submit
+                with self.assertRaises(LanePositionActiveError):
+                    await dispatcher.submit(
+                        pending_intent(f"blocked-again-{index}", Lane.TRIAL),
+                    )
+                self.assertEqual(connection.buy_calls, 1)
+
+    async def test_none_contract_with_failed_quarantine_write_keeps_lane_reserved(self):
+        repository = ControlledQuarantineRepository("failing")
+        connection = FakeConnection()
+        dispatcher = SharedDemoDispatcher(
+            connection,
+            repository,
+            account_id="DOT-DEMO",
+            epoch_now=lambda: self.now,
+            executor=NoneContractExecutor(),
+        )
+
+        with self.assertRaises(OwnershipQuarantineError):
+            await dispatcher.submit(pending_intent("none-contract", Lane.CHAMPION))
+
+        with self.assertRaises(LanePositionActiveError):
+            await dispatcher.submit(pending_intent("none-contract-again", Lane.CHAMPION))
+
+    async def test_quarantine_persistence_is_strictly_bounded_when_writer_ignores_cancel(self):
+        repository = StubbornQuarantineRepository()
+        connection = FakeConnection()
+        connection.buy_exception = ConnectionError("response lost")
+        dispatcher = SharedDemoDispatcher(
+            connection,
+            repository,
+            account_id="DOT-DEMO",
+            epoch_now=lambda: self.now,
+        )
+        dispatcher._quarantine_write_timeout = 0.02
+        dispatcher._quarantine_cancel_timeout = 0.02
+        started = time.perf_counter()
+        submit = asyncio.create_task(
+            dispatcher.submit(pending_intent("stubborn-write", Lane.TRIAL)),
+        )
+
+        done, _ = await asyncio.wait({submit}, timeout=0.15)
+        elapsed = time.perf_counter() - started
+        if submit not in done:
+            repository.cleanup.set()
+            submit.cancel()
+            await asyncio.gather(submit, return_exceptions=True)
+            self.fail("submit waited indefinitely for a cancellation-resistant writer")
+        with self.assertRaises(OwnershipQuarantineError):
+            await submit
+        self.assertLess(elapsed, 0.15)
+        self.assertTrue(repository.cancel_ignored.is_set())
+        with self.assertRaises(LanePositionActiveError):
+            await dispatcher.submit(
+                pending_intent("stubborn-write-again", Lane.TRIAL),
+            )
+
+        repository.cleanup.set()
+        for _ in range(20):
+            if not dispatcher._quarantine_persistence_tasks:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(dispatcher._quarantine_persistence_tasks, set())
 
     async def test_known_contract_keeps_lane_owned_when_final_metadata_write_fails(self):
         repository = FailingFinalJournalRepository()
@@ -673,6 +818,139 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
                     pending_intent("atomic-fault-duplicate", Lane.CHAMPION),
                 )
 
+    async def test_settlement_writes_latest_idle_snapshot_before_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = str(Path(temp_dir) / "runtime.db")
+            repository = DatabaseRepository(db_path)
+            await repository.init_db()
+            snapshot = await repository.get_nexus_runtime_snapshot()
+            version_id = snapshot["runtime"]["champion_version_id"]
+            decision_id = "settlement-latest"
+            owner = {
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
+            }
+            active_state = {
+                "position_status": "RESERVED",
+                "owner_decision_id": decision_id,
+                "contract_id": None,
+            }
+            await repository.record_nexus_decision(
+                {
+                    "id": decision_id,
+                    "decision_id": decision_id,
+                    "lane": Lane.CHAMPION.value,
+                    "signal_epoch": 0,
+                },
+                nexus_version_id=version_id,
+                state=active_state,
+                owner=owner,
+            )
+            dispatcher = SharedDemoDispatcher(
+                FakeConnection(), repository, account_id="DOT-DEMO",
+                epoch_now=lambda: 60.25,
+            )
+            dispatcher.set_lane_context(
+                Lane.CHAMPION,
+                nexus_version_id=version_id,
+                campaign_id=None,
+            )
+            receipt = await dispatcher.submit(
+                pending_intent(decision_id, Lane.CHAMPION),
+            )
+            active_state = {
+                "position_status": "ACTIVE",
+                "owner_decision_id": decision_id,
+                "contract_id": receipt.contract_id,
+            }
+            for index in range(2):
+                later_id = f"zz-later-active-{index}"
+                await repository.record_nexus_decision(
+                    {
+                        "id": later_id,
+                        "decision_id": later_id,
+                        "lane": Lane.CHAMPION.value,
+                        "signal_epoch": 61 + index,
+                    },
+                    nexus_version_id=version_id,
+                    state=active_state,
+                    owner=owner,
+                )
+
+            await repository.settle_nexus_trade_and_lane(
+                {
+                    "bot_id": "nexus-trade",
+                    "session_id": None,
+                    "strategy_name": "nexus_trade",
+                    "symbol": "R_100",
+                    "contract_type": "CALL",
+                    "contract_id": receipt.contract_id,
+                    "stake": 0.35,
+                    "payout": 0.67,
+                    "profit": 0.32,
+                    "result": "won",
+                    "status": "closed",
+                    "lane": Lane.CHAMPION.value,
+                    "nexus_version_id": version_id,
+                    "campaign_id": None,
+                    "decision_id": decision_id,
+                },
+                lane_state={
+                    "position_status": "IDLE",
+                    "owner_decision_id": None,
+                    "contract_id": None,
+                },
+                apply_risk=False,
+                money_management="fixed",
+                money_config={},
+                risk_config={},
+                initial_stake=0.35,
+                settled_epoch=120.0,
+                owner=owner,
+            )
+
+            restarted = DatabaseRepository(db_path)
+            states = await restarted.load_nexus_lane_states()
+            owners = await restarted.load_nexus_lane_owners()
+            self.assertEqual(states[Lane.CHAMPION.value]["position_status"], "IDLE")
+            self.assertIsNone(states[Lane.CHAMPION.value]["owner_decision_id"])
+            self.assertIsNone(states[Lane.CHAMPION.value]["contract_id"])
+            self.assertIsNone(owners[Lane.CHAMPION.value])
+
+            next_decision = "after-settlement"
+            await restarted.record_nexus_decision(
+                    {
+                        "id": next_decision,
+                    "decision_id": next_decision,
+                    "lane": Lane.CHAMPION.value,
+                        "signal_epoch": 0,
+                },
+                nexus_version_id=version_id,
+                state={
+                    "position_status": "RESERVED",
+                    "owner_decision_id": next_decision,
+                    "contract_id": None,
+                },
+                owner=owner,
+            )
+            next_connection = FakeConnection()
+            next_connection.next_contract_id = 200
+            next_dispatcher = SharedDemoDispatcher(
+                next_connection, restarted, account_id="DOT-DEMO",
+                epoch_now=lambda: 60.25,
+            )
+            next_dispatcher.set_lane_context(
+                Lane.CHAMPION,
+                nexus_version_id=version_id,
+                campaign_id=None,
+            )
+
+            next_receipt = await next_dispatcher.submit(
+                pending_intent(next_decision, Lane.CHAMPION),
+            )
+            self.assertEqual(next_receipt.contract_id, 201)
+
     async def test_settlement_transaction_rolls_back_trade_risk_and_lane(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repository = DatabaseRepository(str(Path(temp_dir) / "runtime.db"))
@@ -707,11 +985,34 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
             receipt = await dispatcher.submit(
                 pending_intent(decision_id, Lane.CHAMPION),
             )
+            owner = {
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "management_active": False,
+            }
+            for index in range(2):
+                later_id = f"settlement-fault-later-{index}"
+                await repository.record_nexus_decision(
+                    {
+                        "id": later_id,
+                        "decision_id": later_id,
+                        "lane": Lane.CHAMPION.value,
+                        "signal_epoch": 61 + index,
+                    },
+                    nexus_version_id=version_id,
+                    state={
+                        "position_status": "ACTIVE",
+                        "owner_decision_id": decision_id,
+                        "contract_id": receipt.contract_id,
+                    },
+                    owner=owner,
+                )
             async with repository._connection() as db:
                 await db.execute(
                     """
                     CREATE TRIGGER fail_nexus_settlement
-                    BEFORE UPDATE ON nexus_decisions
+                    BEFORE INSERT ON nexus_decisions
+                    WHEN NEW.id LIKE 'settlement:%'
                     BEGIN
                         SELECT RAISE(ABORT, 'settlement commit fault');
                     END
@@ -745,6 +1046,7 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
                     risk_config={},
                     initial_stake=0.35,
                     settled_epoch=120.0,
+                    owner=owner,
                 )
 
             self.assertEqual(await repository.list_trades("nexus-trade"), [])

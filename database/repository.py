@@ -879,7 +879,7 @@ class DatabaseRepository:
         async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                "SELECT id, payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (lane,),
             ) as cursor:
                 row = await cursor.fetchone()
@@ -900,7 +900,7 @@ class DatabaseRepository:
             db.row_factory = aiosqlite.Row
             for lane in ("champion_baseline", "challenger_trial"):
                 async with db.execute(
-                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (lane,),
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -916,7 +916,7 @@ class DatabaseRepository:
             db.row_factory = aiosqlite.Row
             for lane in ("champion_baseline", "challenger_trial"):
                 async with db.execute(
-                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (lane,),
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -1337,7 +1337,10 @@ class DatabaseRepository:
                         risk_applied = True
 
                 async with db.execute(
-                    "SELECT payload FROM nexus_decisions WHERE id = ? AND lane = ?",
+                    """
+                    SELECT payload, nexus_version_id, campaign_id, symbol
+                    FROM nexus_decisions WHERE id = ? AND lane = ?
+                    """,
                     (decision_id, lane),
                 ) as cursor:
                     decision = await cursor.fetchone()
@@ -1355,6 +1358,55 @@ class DatabaseRepository:
                     (
                         json.dumps(payload, sort_keys=True, separators=(",", ":")),
                         decision_id,
+                    ),
+                )
+                settlement_id = f"settlement:{decision_id}:{contract_id}"
+                settlement_payload = {
+                    "decision": {
+                        "id": settlement_id,
+                        "decision_id": settlement_id,
+                        "lane": lane,
+                        "signal_epoch": int(settled_epoch),
+                        "owner_decision_id": decision_id,
+                        "outcome": "SETTLED",
+                    },
+                    "state": dict(lane_state),
+                    "owner": None,
+                    "settlement": {
+                        "owner_decision_id": decision_id,
+                        "contract_id": contract_id,
+                        "result": trade_data.get("result"),
+                        "profit": trade_data.get("profit"),
+                    },
+                }
+                await db.execute(
+                    """
+                    INSERT INTO nexus_decisions (
+                        id, lane, nexus_version_id, campaign_id, symbol,
+                        signal_epoch, entry_delay_ms, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        entry_delay_ms = excluded.entry_delay_ms,
+                        payload = excluded.payload
+                    """,
+                    (
+                        settlement_id,
+                        lane,
+                        trade_data.get("nexus_version_id")
+                        or decision["nexus_version_id"],
+                        (
+                            trade_data.get("campaign_id")
+                            if "campaign_id" in trade_data
+                            else decision["campaign_id"]
+                        ),
+                        trade_data.get("symbol") or decision["symbol"] or "R_100",
+                        int(settled_epoch),
+                        trade_data.get("entry_delay_ms"),
+                        json.dumps(
+                            settlement_payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     ),
                 )
                 intent_id = f"nexus-{decision_id}"
