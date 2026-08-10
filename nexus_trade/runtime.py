@@ -89,6 +89,10 @@ class NexusTradeRuntime:
         self._champion_enabled = False
         self._pending_runtime_snapshot = None
         self._lane_owners = {lane: None for lane in Lane}
+        # Lock order is strict: runtime lane -> dispatcher internals (lane/buy)
+        # -> repository transaction. Repository and dispatcher internals never
+        # call back into the runtime while holding their locks, avoiding inversion.
+        self._lane_locks = {lane: asyncio.Lock() for lane in Lane}
         money_config = dict(self.bot.get("money_config") or {})
         self._champion_money_manager = MoneyManager(
             mode=self.bot.get("money_management", "fixed"),
@@ -639,56 +643,73 @@ class NexusTradeRuntime:
         for intent in cycle.intents:
             decision = decisions[intent.decision_id]
             lane = Lane(intent.lane)
-            strategy = self.strategies[lane]
-            if intent.status == "PENDING" and strategy.state.position_status == "IDLE":
-                # This also supports restoration from a fully persisted causal result.
-                strategy.state = replace(
-                    strategy.state,
-                    position_status="RESERVED",
-                    owner_decision_id=intent.decision_id,
+            async with self._lane_locks[lane]:
+                monitor_request = await self._process_lane_intent(
+                    lane,
+                    decision,
+                    intent,
                 )
-            if intent.status == "PENDING":
-                dispatcher = self.dispatchers.get(lane)
-                if dispatcher is None:
-                    raise ValueError(f"dispatcher for {lane.value} is not configured")
-                self._lane_owners[lane] = self._owner_for_dispatcher(
-                    dispatcher,
-                    management_active=(lane is Lane.CHAMPION and self._champion_enabled),
+            if monitor_request is not None:
+                owner_decision_id, contract_id, entry_delay_ms = monitor_request
+                await self._start_monitor(
+                    lane,
+                    owner_decision_id,
+                    contract_id,
+                    entry_delay_ms=entry_delay_ms,
                 )
-            await self._record_decision(decision, strategy)
-            if intent.status != "PENDING":
-                await self._save_lane_state(lane)
-                continue
+
+    async def _process_lane_intent(self, lane, decision, intent):
+        """Mutate and persist one lane while its runtime lock is held."""
+        strategy = self.strategies[lane]
+        if intent.status == "PENDING" and strategy.state.position_status == "IDLE":
+            # This also supports restoration from a fully persisted causal result.
+            strategy.state = replace(
+                strategy.state,
+                position_status="RESERVED",
+                owner_decision_id=intent.decision_id,
+            )
+        if intent.status == "PENDING":
             dispatcher = self.dispatchers.get(lane)
             if dispatcher is None:
                 raise ValueError(f"dispatcher for {lane.value} is not configured")
-            try:
-                receipt = await dispatcher.submit(intent)
-            except OwnershipQuarantineError as exc:
-                strategy.mark_position_quarantined(
-                    intent.decision_id, exc.correlation_id,
-                )
-            except (StaleIntentError, BuyRejectedError, DispatchBlockedError):
-                if (
-                    strategy.state.position_status == "RESERVED"
-                    and strategy.state.owner_decision_id == intent.decision_id
-                ):
-                    strategy.release_reservation(intent.decision_id)
-                    self._lane_owners[lane] = None
-            else:
-                strategy.mark_position_active(
-                    intent.decision_id, receipt.contract_id,
-                )
+            self._lane_owners[lane] = self._owner_for_dispatcher(
+                dispatcher,
+                management_active=(lane is Lane.CHAMPION and self._champion_enabled),
+            )
+        await self._record_decision(decision, strategy)
+        if intent.status != "PENDING":
             await self._save_lane_state(lane)
-            if strategy.state.position_status == "ACTIVE":
-                await self._start_monitor(
-                    lane,
-                    intent.decision_id,
-                    receipt.contract_id,
-                    entry_delay_ms=int(round(
-                        (receipt.accepted_epoch - intent.target_epoch) * 1000.0,
-                    )),
-                )
+            return None
+        dispatcher = self.dispatchers.get(lane)
+        if dispatcher is None:
+            raise ValueError(f"dispatcher for {lane.value} is not configured")
+        try:
+            receipt = await dispatcher.submit(intent)
+        except OwnershipQuarantineError as exc:
+            strategy.mark_position_quarantined(
+                intent.decision_id, exc.correlation_id,
+            )
+        except (StaleIntentError, BuyRejectedError, DispatchBlockedError):
+            if (
+                strategy.state.position_status == "RESERVED"
+                and strategy.state.owner_decision_id == intent.decision_id
+            ):
+                strategy.release_reservation(intent.decision_id)
+                self._lane_owners[lane] = None
+        else:
+            strategy.mark_position_active(
+                intent.decision_id, receipt.contract_id,
+            )
+        await self._save_lane_state(lane)
+        if strategy.state.position_status != "ACTIVE":
+            return None
+        return (
+            intent.decision_id,
+            receipt.contract_id,
+            int(round(
+                (receipt.accepted_epoch - intent.target_epoch) * 1000.0,
+            )),
+        )
 
     async def _record_decision(self, decision, strategy) -> None:
         recorder = getattr(self.repository, "record_nexus_decision", None)
@@ -744,6 +765,40 @@ class NexusTradeRuntime:
         contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
         if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:
             raise ValueError("settlement requires a numeric contract_id")
+        async with self._lane_locks[lane]:
+            settlement = asyncio.create_task(
+                self._settle_contract_locked(
+                    lane,
+                    owner_decision_id,
+                    contract,
+                    contract_id,
+                ),
+            )
+            cancellation = None
+            while True:
+                try:
+                    await asyncio.shield(settlement)
+                    break
+                except asyncio.CancelledError as exc:
+                    # Once settlement persistence starts, keep the runtime lock
+                    # until durable and in-memory ownership converge. The caller's
+                    # cancellation is re-raised only after that barrier completes.
+                    if cancellation is None:
+                        cancellation = exc
+                    if settlement.done():
+                        settlement.result()
+                        break
+            if cancellation is not None:
+                raise cancellation
+
+    async def _settle_contract_locked(
+        self,
+        lane: Lane,
+        owner_decision_id: str,
+        contract: dict,
+        contract_id: int,
+    ) -> None:
+        """Persist and close a settlement while the lane lock remains held."""
         strategy = self.strategies[lane]
         if (
             strategy.state.position_status != "ACTIVE"

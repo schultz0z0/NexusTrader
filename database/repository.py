@@ -14,6 +14,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger("Database")
 
+_NEXUS_LANE_MATERIALIZATION_KEY = "nexus_lane_heads_v1"
+
 
 class ActiveOrderIntentError(RuntimeError):
     """The account is quarantined until its previous buy outcome is resolved."""
@@ -54,11 +56,127 @@ class DatabaseRepository:
                 await self._ensure_default_bot(db)
                 await self._backfill_risk_states(db)
                 await NexusTradeRepository.ensure_singleton_in_transaction(db)
+                await self._ensure_nexus_lane_materialization(db)
                 await db.commit()
             except Exception:
                 await db.rollback()
                 raise
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
+
+    async def _ensure_nexus_lane_materialization(self, db) -> None:
+        """One-time linear upgrade from the append-only decision journal."""
+        async with db.execute(
+            "SELECT value FROM nexus_repository_meta WHERE key = ?",
+            (_NEXUS_LANE_MATERIALIZATION_KEY,),
+        ) as cursor:
+            if await cursor.fetchone() is not None:
+                return
+
+        async with db.execute(
+            """
+            SELECT id, lane, payload
+            FROM nexus_decisions
+            ORDER BY rowid
+            """,
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        settled_owners = {
+            "champion_baseline": set(),
+            "challenger_trial": set(),
+        }
+        heads = {}
+        for decision_id, lane, raw_payload in rows:
+            payload = json.loads(raw_payload or "{}")
+            settlement = payload.get("settlement")
+            if decision_id.startswith("settlement:") and isinstance(settlement, dict):
+                owner_decision_id = settlement.get("owner_decision_id")
+                contract_id = settlement.get("contract_id")
+                if (
+                    type(owner_decision_id) is not str
+                    or not owner_decision_id
+                    or isinstance(contract_id, bool)
+                    or type(contract_id) is not int
+                    or contract_id <= 0
+                ):
+                    raise ValueError("legacy Nexus settlement barrier is malformed")
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO nexus_lane_settlements (
+                        owner_decision_id, lane, contract_id, settlement_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (owner_decision_id, lane, contract_id, decision_id),
+                )
+                async with db.execute(
+                    """
+                    SELECT lane, contract_id, settlement_id
+                    FROM nexus_lane_settlements
+                    WHERE owner_decision_id = ?
+                    """,
+                    (owner_decision_id,),
+                ) as cursor:
+                    stored = await cursor.fetchone()
+                stored_barrier = (
+                    None
+                    if stored is None
+                    else (
+                        stored["lane"],
+                        stored["contract_id"],
+                        stored["settlement_id"],
+                    )
+                )
+                if stored_barrier != (lane, contract_id, decision_id):
+                    raise ValueError("legacy Nexus settlement barrier conflicts")
+                settled_owners[lane].add(owner_decision_id)
+                heads[lane] = decision_id
+                continue
+
+            state = payload.get("state") or {}
+            owner_decision_id = state.get("owner_decision_id")
+            if owner_decision_id in settled_owners[lane]:
+                continue
+            heads[lane] = decision_id
+
+        for lane, snapshot_id in heads.items():
+            await self._set_nexus_lane_head(db, lane, snapshot_id)
+        await db.execute(
+            """
+            INSERT INTO nexus_repository_meta (key, value)
+            VALUES (?, 'complete')
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (_NEXUS_LANE_MATERIALIZATION_KEY,),
+        )
+
+    @staticmethod
+    async def _set_nexus_lane_head(db, lane: str, snapshot_id: str) -> None:
+        await db.execute(
+            """
+            INSERT INTO nexus_lane_heads (lane, snapshot_id)
+            VALUES (?, ?)
+            ON CONFLICT(lane) DO UPDATE SET
+                snapshot_id = excluded.snapshot_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (lane, snapshot_id),
+        )
+
+    @staticmethod
+    async def _nexus_owner_is_settled(
+        db, lane: str, owner_decision_id: str,
+    ) -> bool:
+        async with db.execute(
+            """
+            SELECT 1 FROM nexus_lane_settlements
+            WHERE owner_decision_id = ? AND lane = ?
+            LIMIT 1
+            """,
+            (owner_decision_id, lane),
+        ) as cursor:
+            return await cursor.fetchone() is not None
 
     async def _migrate_trade_columns(self, db):
         async with db.execute("PRAGMA table_info(trades)") as cursor:
@@ -768,6 +886,8 @@ class DatabaseRepository:
                 decision_id = stored.get("decision_id")
                 if not lane or not decision_id:
                     raise ValueError("Nexus ownership requires lane and decision_id")
+                if await self._nexus_owner_is_settled(db, lane, decision_id):
+                    raise ValueError("settled Nexus ownership cannot become ACTIVE")
                 async with db.execute(
                     "SELECT id FROM order_intents WHERE contract_id = ? AND id != ?",
                     (contract_id, intent_id),
@@ -831,6 +951,7 @@ class DatabaseRepository:
                         decision_id,
                     ),
                 )
+                await self._set_nexus_lane_head(db, lane, decision_id)
                 await db.commit()
             except BaseException:
                 await db.rollback()
@@ -851,63 +972,162 @@ class DatabaseRepository:
             "state": dict(state),
             "owner": self._normalize_nexus_owner(owner),
         }
+        decision_id = decision.get("id") or decision["decision_id"]
+        owner_decision_id = payload["state"].get("owner_decision_id")
         async with self._connection() as db:
-            await db.execute(
-                """
-                INSERT INTO nexus_decisions (
-                    id, lane, nexus_version_id, campaign_id, symbol,
-                    signal_epoch, entry_delay_ms, payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
-                """,
-                (
-                    decision.get("id") or decision["decision_id"],
-                    decision["lane"],
-                    nexus_version_id,
-                    campaign_id,
-                    "R_100",
-                    int(decision["signal_epoch"]),
-                    None,
-                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
-                ),
-            )
-            await db.commit()
+            await db.execute("PRAGMA busy_timeout=30000")
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    """
+                    INSERT INTO nexus_decisions (
+                        id, lane, nexus_version_id, campaign_id, symbol,
+                        signal_epoch, entry_delay_ms, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                    """,
+                    (
+                        decision_id,
+                        decision["lane"],
+                        nexus_version_id,
+                        campaign_id,
+                        "R_100",
+                        int(decision["signal_epoch"]),
+                        None,
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+                owner_is_settled = (
+                    owner_decision_id is not None
+                    and await self._nexus_owner_is_settled(
+                        db,
+                        decision["lane"],
+                        owner_decision_id,
+                    )
+                )
+                if not owner_is_settled:
+                    await self._set_nexus_lane_head(
+                        db,
+                        decision["lane"],
+                        decision_id,
+                    )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def save_nexus_lane_state(
         self, lane: str, state: dict, owner: dict = None,
-    ) -> None:
+    ) -> bool:
+        """Append a lane snapshot unless its exact owner already settled.
+
+        The settlement row is a terminal, immutable barrier for one owner
+        decision. A later operation with a distinct owner remains valid.
+        """
+        snapshot_state = dict(state)
+        normalized_owner = self._normalize_nexus_owner(owner)
+        owner_decision_id = snapshot_state.get("owner_decision_id")
         async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT id, payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                (lane,),
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
-                return
-            payload = json.loads(row["payload"])
-            payload["state"] = dict(state)
-            payload["owner"] = self._normalize_nexus_owner(owner)
-            await db.execute(
-                "UPDATE nexus_decisions SET payload = ? WHERE id = ?",
-                (json.dumps(payload, sort_keys=True, separators=(",", ":")), row["id"]),
-            )
-            await db.commit()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                if (
+                    owner_decision_id is not None
+                    and await self._nexus_owner_is_settled(
+                        db, lane, owner_decision_id,
+                    )
+                ):
+                    await db.commit()
+                    return False
+
+                async with db.execute(
+                    """
+                    SELECT decision.id, decision.nexus_version_id,
+                           decision.campaign_id, decision.symbol,
+                           decision.signal_epoch, decision.entry_delay_ms,
+                           decision.payload
+                    FROM nexus_lane_heads AS head
+                    JOIN nexus_decisions AS decision
+                      ON decision.id = head.snapshot_id
+                    WHERE head.lane = ?
+                    """,
+                    (lane,),
+                ) as cursor:
+                    source = await cursor.fetchone()
+                if source is None:
+                    await db.commit()
+                    return False
+
+                payload = json.loads(source["payload"])
+                payload["state"] = snapshot_state
+                payload["owner"] = normalized_owner
+                payload["snapshot"] = {
+                    "source_id": source["id"],
+                    "owner_decision_id": owner_decision_id,
+                }
+                snapshot_id = f"snapshot:{lane}:{uuid.uuid4().hex}"
+                await db.execute(
+                    """
+                    INSERT INTO nexus_decisions (
+                        id, lane, nexus_version_id, campaign_id, symbol,
+                        signal_epoch, entry_delay_ms, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        lane,
+                        source["nexus_version_id"],
+                        source["campaign_id"],
+                        source["symbol"],
+                        source["signal_epoch"],
+                        source["entry_delay_ms"],
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+                await self._set_nexus_lane_head(db, lane, snapshot_id)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return True
+
+    @staticmethod
+    async def _load_canonical_nexus_lane_payload(db, lane: str):
+        """Load one materialized lane head without scanning the audit journal."""
+        async with db.execute(
+            """
+            SELECT decision.payload
+            FROM nexus_lane_heads AS head
+            JOIN nexus_decisions AS decision
+              ON decision.id = head.snapshot_id
+            WHERE head.lane = ?
+            """,
+            (lane,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return json.loads(row["payload"] or "{}")
 
     async def load_nexus_lane_states(self) -> dict:
         states = {}
         async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             for lane in ("champion_baseline", "challenger_trial"):
-                async with db.execute(
-                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                    (lane,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                if row is not None:
-                    payload = json.loads(row["payload"])
-                    if isinstance(payload.get("state"), dict):
-                        states[lane] = payload["state"]
+                payload = await self._load_canonical_nexus_lane_payload(
+                    db, lane,
+                )
+                if payload is not None and isinstance(payload.get("state"), dict):
+                    states[lane] = payload["state"]
         return states
 
     async def load_nexus_lane_owners(self) -> dict:
@@ -915,13 +1135,10 @@ class DatabaseRepository:
         async with self._connection() as db:
             db.row_factory = aiosqlite.Row
             for lane in ("champion_baseline", "challenger_trial"):
-                async with db.execute(
-                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                    (lane,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                if row is not None:
-                    payload = json.loads(row["payload"] or "{}")
+                payload = await self._load_canonical_nexus_lane_payload(
+                    db, lane,
+                )
+                if payload is not None:
                     owners[lane] = self._normalize_nexus_owner(
                         payload.get("owner"),
                     )
@@ -1385,9 +1602,6 @@ class DatabaseRepository:
                         id, lane, nexus_version_id, campaign_id, symbol,
                         signal_epoch, entry_delay_ms, payload
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        entry_delay_ms = excluded.entry_delay_ms,
-                        payload = excluded.payload
                     """,
                     (
                         settlement_id,
@@ -1409,6 +1623,15 @@ class DatabaseRepository:
                         ),
                     ),
                 )
+                await db.execute(
+                    """
+                    INSERT INTO nexus_lane_settlements (
+                        owner_decision_id, lane, contract_id, settlement_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (decision_id, lane, contract_id, settlement_id),
+                )
+                await self._set_nexus_lane_head(db, lane, settlement_id)
                 intent_id = f"nexus-{decision_id}"
                 async with db.execute(
                     "SELECT metadata FROM order_intents WHERE id = ? AND contract_id = ?",

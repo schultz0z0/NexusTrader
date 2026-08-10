@@ -910,6 +910,49 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
                 owner=owner,
             )
 
+            settlement_id = (
+                f"settlement:{decision_id}:{receipt.contract_id}"
+            )
+            async with repository._connection() as db:
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE id = ?",
+                    (settlement_id,),
+                ) as cursor:
+                    settlement_payload_before = (await cursor.fetchone())[0]
+
+            # A late saver from the settled owner must be rejected as stale and
+            # must never rewrite the canonical settlement event.
+            stale_saved = await repository.save_nexus_lane_state(
+                Lane.CHAMPION.value,
+                active_state,
+                owner=owner,
+            )
+            self.assertFalse(stale_saved)
+            async with repository._connection() as db:
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE id = ?",
+                    (settlement_id,),
+                ) as cursor:
+                    settlement_payload_after = (await cursor.fetchone())[0]
+            self.assertEqual(
+                settlement_payload_after,
+                settlement_payload_before,
+            )
+
+            # Even a stale decision row committed after the settlement cannot
+            # outrank the terminal barrier for this exact owner.
+            await repository.record_nexus_decision(
+                {
+                    "id": "stale-after-settlement",
+                    "decision_id": "stale-after-settlement",
+                    "lane": Lane.CHAMPION.value,
+                    "signal_epoch": 121,
+                },
+                nexus_version_id=version_id,
+                state=active_state,
+                owner=owner,
+            )
+
             restarted = DatabaseRepository(db_path)
             states = await restarted.load_nexus_lane_states()
             owners = await restarted.load_nexus_lane_owners()
@@ -920,11 +963,11 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
             next_decision = "after-settlement"
             await restarted.record_nexus_decision(
-                    {
-                        "id": next_decision,
+                {
+                    "id": next_decision,
                     "decision_id": next_decision,
                     "lane": Lane.CHAMPION.value,
-                        "signal_epoch": 0,
+                    "signal_epoch": 0,
                 },
                 nexus_version_id=version_id,
                 state={
@@ -950,6 +993,98 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
                 pending_intent(next_decision, Lane.CHAMPION),
             )
             self.assertEqual(next_receipt.contract_id, 201)
+            next_active = {
+                "position_status": "ACTIVE",
+                "owner_decision_id": next_decision,
+                "contract_id": next_receipt.contract_id,
+            }
+            await restarted.save_nexus_lane_state(
+                Lane.CHAMPION.value,
+                next_active,
+                owner=owner,
+            )
+            states = await restarted.load_nexus_lane_states()
+            owners = await restarted.load_nexus_lane_owners()
+            self.assertEqual(states[Lane.CHAMPION.value], next_active)
+            self.assertEqual(owners[Lane.CHAMPION.value], owner)
+
+            for index in range(64):
+                await restarted.record_nexus_decision(
+                    {
+                        "id": f"stale-tail-{index}",
+                        "decision_id": f"stale-tail-{index}",
+                        "lane": Lane.CHAMPION.value,
+                        "signal_epoch": 200 + index,
+                    },
+                    nexus_version_id=version_id,
+                    state=active_state,
+                    owner=owner,
+                )
+            self.assertEqual(
+                (await restarted.load_nexus_lane_states())[
+                    Lane.CHAMPION.value
+                ],
+                next_active,
+            )
+
+            # Simulate an existing database from before the materialized tables.
+            # The journal is scanned exactly once to rebuild the canonical head;
+            # a second init is idempotent and does not duplicate the barrier.
+            async with restarted._connection() as db:
+                await db.execute("DELETE FROM nexus_lane_heads")
+                await db.execute("DELETE FROM nexus_lane_settlements")
+                await db.execute("DELETE FROM nexus_repository_meta")
+                await db.commit()
+            await restarted.init_db()
+            await restarted.init_db()
+            self.assertEqual(
+                (await restarted.load_nexus_lane_states())[
+                    Lane.CHAMPION.value
+                ],
+                next_active,
+            )
+
+            async with restarted._connection() as db:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM nexus_lane_settlements",
+                ) as cursor:
+                    self.assertEqual((await cursor.fetchone())[0], 1)
+                async with db.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table' AND name = 'nexus_lane_heads'
+                    """,
+                ) as cursor:
+                    materialized_head = await cursor.fetchone()
+                self.assertEqual(materialized_head, ("nexus_lane_heads",))
+                async with db.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT decision.payload
+                    FROM nexus_lane_heads AS head
+                    JOIN nexus_decisions AS decision
+                      ON decision.id = head.snapshot_id
+                    WHERE head.lane = ?
+                    """,
+                    (Lane.CHAMPION.value,),
+                ) as cursor:
+                    plan = " ".join(
+                        str(row[-1]) for row in await cursor.fetchall()
+                    )
+                async with db.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT 1 FROM nexus_lane_settlements
+                    WHERE owner_decision_id = ? AND lane = ? LIMIT 1
+                    """,
+                    (decision_id, Lane.CHAMPION.value),
+                ) as cursor:
+                    barrier_plan = " ".join(
+                        str(row[-1]) for row in await cursor.fetchall()
+                    )
+            self.assertIn("nexus_lane_heads", plan)
+            self.assertNotIn("SCAN nexus_decisions", plan)
+            self.assertNotIn("SCAN nexus_lane_settlements", barrier_plan)
 
     async def test_settlement_transaction_rolls_back_trade_risk_and_lane(self):
         with tempfile.TemporaryDirectory() as temp_dir:

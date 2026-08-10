@@ -97,6 +97,30 @@ class FakeRepository:
         }
 
 
+class PausingSettlementRepository(FakeRepository):
+    """Expose the post-commit/pre-runtime-close settlement interleaving."""
+
+    def __init__(self):
+        super().__init__()
+        self.settlement_committed = asyncio.Event()
+        self.allow_settlement_return = asyncio.Event()
+        self.lane_save_attempted = asyncio.Event()
+
+    async def save_nexus_lane_state(self, lane, state, owner=None):
+        self.lane_save_attempted.set()
+        await super().save_nexus_lane_state(lane, state, owner=owner)
+
+    async def settle_nexus_trade_and_lane(self, trade, *, lane_state, **configuration):
+        result = await super().settle_nexus_trade_and_lane(
+            trade,
+            lane_state=lane_state,
+            **configuration,
+        )
+        self.settlement_committed.set()
+        await self.allow_settlement_return.wait()
+        return result
+
+
 class FakeDispatcher:
     def __init__(
         self, contract_id=700, *, account_id="DOT-DEMO", account_type="demo",
@@ -1067,6 +1091,207 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.shared.released, [])
         self.assertEqual(self.repository.trades, [])
+
+    async def test_settlement_serializes_cycle_save_until_in_memory_close(self):
+        self.repository = PausingSettlementRepository()
+        active = SetupState(
+            position_status="ACTIVE",
+            owner_decision_id="race-owner",
+            contract_id=838,
+        ).to_dict()
+        runtime = self.runtime(restored_lane_states={
+            Lane.TRIAL.value: active,
+        })
+        runtime.apply_champion_mode(self.snapshot)
+        decision, pending = decision_and_intent(Lane.TRIAL)
+        stale = pending.mark_dispatched(63.0)
+        cycle = CausalCycleResult(
+            60,
+            object(),
+            object(),
+            (decision,),
+            (stale,),
+        )
+
+        settlement = asyncio.create_task(runtime.settle_contract(
+            Lane.TRIAL,
+            "race-owner",
+            {
+                "contract_id": 838,
+                "status": "won",
+                "buy_price": 0.35,
+                "profit": 0.32,
+            },
+        ))
+        await asyncio.wait_for(
+            self.repository.settlement_committed.wait(),
+            timeout=1,
+        )
+        cycle_task = asyncio.create_task(runtime.process_cycle(cycle))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(self.repository.lane_save_attempted.is_set())
+            self.assertFalse(cycle_task.done())
+        finally:
+            self.repository.allow_settlement_return.set()
+            task_results = await asyncio.gather(
+                settlement,
+                cycle_task,
+                return_exceptions=True,
+            )
+        self.assertEqual(task_results, [None, None])
+
+        restored = self.repository.lane_states[Lane.TRIAL.value]
+        self.assertEqual(restored["position_status"], "IDLE")
+        self.assertIsNone(restored["owner_decision_id"])
+        self.assertIsNone(restored["contract_id"])
+        self.repository.restored_states = {Lane.TRIAL.value: restored}
+        self.repository.restored_owners = {Lane.TRIAL.value: None}
+
+        restarted_dispatcher = FakeDispatcher(839)
+        restarted_monitor = FakeMonitor()
+        restarted_source = WaitUntilStoppedCycleSource()
+        restarted = NexusTradeRuntime(
+            self.repository,
+            {
+                "id": "nexus-trade",
+                "strategy_id": "nexus_trade",
+                "desired_state": "STOPPED",
+            },
+            shared_demo_dispatcher=restarted_dispatcher,
+            champion_dispatcher_factory=lambda config: self.separate,
+            runtime_snapshot=self.snapshot,
+            cycle_source=restarted_source,
+            monitors={Lane.TRIAL: restarted_monitor},
+        )
+        restarted_task = asyncio.create_task(restarted.run())
+        await asyncio.wait_for(restarted_source.started.wait(), timeout=1)
+        self.assertEqual(
+            restarted.strategies[Lane.TRIAL].state.position_status,
+            "IDLE",
+        )
+        self.assertEqual(restarted_dispatcher.restored, [])
+        self.assertEqual(restarted_monitor.contracts, [])
+
+        next_decision, next_intent = decision_and_intent(Lane.TRIAL)
+        next_decision = Decision(
+            **{
+                **next_decision.to_dict(),
+                "decision_id": "after-race",
+            },
+        )
+        next_intent = EntryIntent(
+            **{
+                **next_intent.to_dict(),
+                "decision_id": "after-race",
+            },
+        )
+        await restarted.process_cycle(CausalCycleResult(
+            60,
+            object(),
+            object(),
+            (next_decision,),
+            (next_intent,),
+        ))
+        self.assertEqual(
+            restarted.strategies[Lane.TRIAL].state.contract_id,
+            839,
+        )
+        await restarted.request_stop()
+        await asyncio.wait_for(restarted_task, timeout=1)
+
+    async def test_cancelling_cycle_waiter_does_not_poison_lane_serialization(self):
+        self.repository = PausingSettlementRepository()
+        runtime = self.runtime(restored_lane_states={
+            Lane.TRIAL.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="cancel-race-owner",
+                contract_id=848,
+            ).to_dict(),
+        })
+        runtime.apply_champion_mode(self.snapshot)
+        decision, pending = decision_and_intent(Lane.TRIAL)
+        stale = pending.mark_dispatched(63.0)
+        cycle = CausalCycleResult(
+            60,
+            object(),
+            object(),
+            (decision,),
+            (stale,),
+        )
+        settlement = asyncio.create_task(runtime.settle_contract(
+            Lane.TRIAL,
+            "cancel-race-owner",
+            {
+                "contract_id": 848,
+                "status": "won",
+                "buy_price": 0.35,
+                "profit": 0.32,
+            },
+        ))
+        await asyncio.wait_for(
+            self.repository.settlement_committed.wait(),
+            timeout=1,
+        )
+        waiter = asyncio.create_task(runtime.process_cycle(cycle))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(waiter.done())
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(waiter, timeout=1)
+        finally:
+            self.repository.allow_settlement_return.set()
+            await asyncio.gather(settlement, waiter, return_exceptions=True)
+
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].state.position_status,
+            "IDLE",
+        )
+        follow_up = asyncio.create_task(runtime.process_cycle(cycle))
+        await asyncio.wait_for(follow_up, timeout=1)
+
+    async def test_cancel_after_settlement_commit_finishes_in_memory_close(self):
+        self.repository = PausingSettlementRepository()
+        runtime = self.runtime(restored_lane_states={
+            Lane.TRIAL.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="cancel-settlement-owner",
+                contract_id=858,
+            ).to_dict(),
+        })
+        runtime.apply_champion_mode(self.snapshot)
+        settlement = asyncio.create_task(runtime.settle_contract(
+            Lane.TRIAL,
+            "cancel-settlement-owner",
+            {
+                "contract_id": 858,
+                "status": "won",
+                "buy_price": 0.35,
+                "profit": 0.32,
+            },
+        ))
+        await asyncio.wait_for(
+            self.repository.settlement_committed.wait(),
+            timeout=1,
+        )
+        settlement.cancel()
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(settlement.done())
+        finally:
+            self.repository.allow_settlement_return.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(settlement, timeout=1)
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].state.position_status,
+            "IDLE",
+        )
+        self.assertEqual(
+            self.shared.released,
+            [(Lane.TRIAL.value, 858)],
+        )
 
     async def test_restart_reconciles_quarantine_only_with_persisted_correlation(self):
         quarantined = SetupState(

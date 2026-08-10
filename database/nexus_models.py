@@ -87,6 +87,30 @@ class NexusModels:
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS nexus_lane_settlements (
+            owner_decision_id TEXT PRIMARY KEY,
+            lane TEXT NOT NULL CHECK (lane IN ('champion_baseline', 'challenger_trial')),
+            contract_id INTEGER NOT NULL CHECK (contract_id > 0),
+            settlement_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (settlement_id) REFERENCES nexus_decisions(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_lane_settlements_lane_contract
+        ON nexus_lane_settlements(lane, contract_id);
+
+        CREATE TABLE IF NOT EXISTS nexus_lane_heads (
+            lane TEXT PRIMARY KEY CHECK (lane IN ('champion_baseline', 'challenger_trial')),
+            snapshot_id TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (snapshot_id) REFERENCES nexus_decisions(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS nexus_repository_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS nexus_candidates (
             id TEXT PRIMARY KEY,
             nexus_version_id TEXT,
