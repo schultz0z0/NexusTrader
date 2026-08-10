@@ -116,8 +116,21 @@ class NexusModels:
             id TEXT PRIMARY KEY,
             nexus_version_id TEXT,
             artifact_hash TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('TRIAL', 'SHADOW')),
             metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_candidates_single_trial
+        ON nexus_candidates(status) WHERE status = 'TRIAL';
+
+        CREATE TABLE IF NOT EXISTS nexus_training_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attempt_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('SUCCEEDED', 'REJECTED', 'FAILED')),
+            dataset_hash TEXT,
+            provenance_hash TEXT,
+            seed INTEGER,
+            payload TEXT NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -206,6 +219,24 @@ class NexusModels:
         WHEN NEW.lane NOT IN ('champion_baseline', 'challenger_trial')
           OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus decision values'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_values_insert
+        BEFORE INSERT ON nexus_candidates
+        WHEN NEW.status NOT IN ('TRIAL', 'SHADOW')
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus candidate status'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_immutable_artifact
+        BEFORE UPDATE OF id, artifact_hash, metadata, nexus_version_id ON nexus_candidates
+        BEGIN SELECT RAISE(ABORT, 'Nexus candidate artifact is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_no_delete
+        BEFORE DELETE ON nexus_candidates
+        BEGIN SELECT RAISE(ABORT, 'Nexus candidate history is append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_training_attempts_no_update
+        BEFORE UPDATE ON nexus_training_attempts
+        BEGIN SELECT RAISE(ABORT, 'Nexus training attempts are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_training_attempts_no_delete
+        BEFORE DELETE ON nexus_training_attempts
+        BEGIN SELECT RAISE(ABORT, 'Nexus training attempts are append-only'); END;
         """
 
     @staticmethod
