@@ -177,6 +177,62 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     "INSERT INTO bot_instances (id, name, strategy_id, account_id) VALUES ('nexus-trade', 'Other', 'donchian', '')"
                 )
 
+    async def test_corrupted_champion_identity_fails_with_domain_error(self):
+        await self.repo.init_db()
+        version = (await self.nexus.get_runtime_snapshot())["lanes"][0]["version"]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE nexus_versions SET name = 'Corrupted', version_hash = 'wrong-hash' WHERE id = ?",
+                (version["id"],),
+            )
+            await db.commit()
+
+        with self.assertRaises(NexusTradeSingletonError):
+            await self.repo.init_db()
+
+    async def test_journal_migrations_reject_invalid_nexus_values_on_insert_and_update(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        version_id = snapshot["lanes"][0]["version"]["id"]
+        campaign_id = snapshot["active_campaigns"][0]["id"]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute(
+                """
+                INSERT INTO nexus_decisions (id, lane, nexus_version_id, campaign_id, symbol, signal_epoch)
+                VALUES ('decision-ok', 'champion_baseline', ?, ?, 'R_100', 1)
+                """,
+                (version_id, campaign_id),
+            )
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute("INSERT INTO trades (lane) VALUES ('invalid')")
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute(
+                    """
+                    INSERT INTO order_intents (
+                        id, bot_id, account_id, proposal_id, symbol, contract_type, stake, price,
+                        duration, duration_unit, entry_delay_ms
+                    ) VALUES ('intent-negative', 'nexus-trade', 'demo', 'proposal', 'R_100', 'CALL', 0.35, 0.35, 58, 's', -1)
+                    """
+                )
+            await db.execute(
+                "INSERT INTO trades (lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms) VALUES ('champion_baseline', ?, ?, 'decision-ok', 0)",
+                (version_id, campaign_id),
+            )
+            await db.execute(
+                """
+                INSERT INTO order_intents (
+                    id, bot_id, account_id, proposal_id, symbol, contract_type, stake, price,
+                    duration, duration_unit, lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms
+                ) VALUES ('intent-ok', 'nexus-trade', 'demo', 'proposal', 'R_100', 'CALL', 0.35, 0.35, 58, 's', 'champion_baseline', ?, ?, 'decision-ok', 0)
+                """,
+                (version_id, campaign_id),
+            )
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute("UPDATE trades SET nexus_version_id = 'missing' WHERE lane = 'champion_baseline'")
+            with self.assertRaises(aiosqlite.IntegrityError):
+                await db.execute("UPDATE order_intents SET campaign_id = 'missing' WHERE id = 'intent-ok'")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,7 @@ class DatabaseRepository:
             await db.executescript(DatabaseModels.create_tables_sql())
             await self._migrate_trade_columns(db)
             await db.executescript(NexusModels.create_tables_sql())
+            await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
             try:
                 # Insere configuracao inicial de risco se tabela estiver vazia

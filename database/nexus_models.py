@@ -177,3 +177,43 @@ class NexusModels:
           OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus decision values'); END;
         """
+
+    @staticmethod
+    def create_journal_guards_sql() -> str:
+        return """
+        CREATE TRIGGER IF NOT EXISTS trg_trades_nexus_values_insert
+        BEFORE INSERT ON trades
+        WHEN (NEW.lane IS NOT NULL AND NEW.lane NOT IN ('champion_baseline', 'challenger_trial'))
+          OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
+          OR (NEW.nexus_version_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_versions WHERE id = NEW.nexus_version_id))
+          OR (NEW.campaign_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_campaigns WHERE id = NEW.campaign_id))
+          OR (NEW.decision_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_decisions WHERE id = NEW.decision_id))
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus trade journal values'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_trades_nexus_values_update
+        BEFORE UPDATE OF lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms ON trades
+        WHEN (NEW.lane IS NOT NULL AND NEW.lane NOT IN ('champion_baseline', 'challenger_trial'))
+          OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
+          OR (NEW.nexus_version_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_versions WHERE id = NEW.nexus_version_id))
+          OR (NEW.campaign_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_campaigns WHERE id = NEW.campaign_id))
+          OR (NEW.decision_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_decisions WHERE id = NEW.decision_id))
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus trade journal values'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_order_intents_nexus_values_insert
+        BEFORE INSERT ON order_intents
+        WHEN (NEW.lane IS NOT NULL AND NEW.lane NOT IN ('champion_baseline', 'challenger_trial'))
+          OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
+          OR (NEW.nexus_version_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_versions WHERE id = NEW.nexus_version_id))
+          OR (NEW.campaign_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_campaigns WHERE id = NEW.campaign_id))
+          OR (NEW.decision_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_decisions WHERE id = NEW.decision_id))
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus order intent values'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_order_intents_nexus_values_update
+        BEFORE UPDATE OF lane, nexus_version_id, campaign_id, decision_id, entry_delay_ms ON order_intents
+        WHEN (NEW.lane IS NOT NULL AND NEW.lane NOT IN ('champion_baseline', 'challenger_trial'))
+          OR (NEW.entry_delay_ms IS NOT NULL AND NEW.entry_delay_ms < 0)
+          OR (NEW.nexus_version_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_versions WHERE id = NEW.nexus_version_id))
+          OR (NEW.campaign_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_campaigns WHERE id = NEW.campaign_id))
+          OR (NEW.decision_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nexus_decisions WHERE id = NEW.decision_id))
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus order intent values'); END;
+        """

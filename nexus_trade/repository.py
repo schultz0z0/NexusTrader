@@ -69,26 +69,23 @@ class NexusTradeRepository:
         encoded_snapshot = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         version_hash = hashlib.sha256(encoded_snapshot.encode("utf-8")).hexdigest()
         version_id = f"nexus-v1-{version_hash[:12]}"
-        cursor = await db.execute(
-            """
-            INSERT INTO nexus_versions (id, name, status, version_hash, snapshot)
-            VALUES (?, 'Champion V1', ?, ?, ?)
-            ON CONFLICT(version_hash) DO NOTHING
-            """,
-            (version_id, VersionStatus.CHAMPION.value, version_hash, encoded_snapshot),
-        )
-        if cursor.rowcount == 0:
-            async with db.execute("SELECT * FROM nexus_versions WHERE version_hash = ?", (version_hash,)) as version_cursor:
-                existing_version = await version_cursor.fetchone()
-            if existing_version is None or (
-                existing_version["id"] != version_id
-                or existing_version["name"] != "Champion V1"
-                or existing_version["status"] != VersionStatus.CHAMPION.value
-                or existing_version["snapshot"] != encoded_snapshot
-            ):
-                raise NexusTradeSingletonError("Champion V1 snapshot is corrupted")
-        async with db.execute("SELECT id FROM nexus_versions WHERE version_hash = ?", (version_hash,)) as cursor:
-            version_id = (await cursor.fetchone())["id"]
+        async with db.execute(
+            "SELECT * FROM nexus_versions WHERE id = ? OR version_hash = ?",
+            (version_id, version_hash),
+        ) as version_cursor:
+            versions = await version_cursor.fetchall()
+        if versions:
+            if len(versions) != 1:
+                raise NexusTradeSingletonError("Champion V1 identity is ambiguous")
+            cls._validate_champion_v1(versions[0], version_id, version_hash, encoded_snapshot)
+        else:
+            await db.execute(
+                """
+                INSERT INTO nexus_versions (id, name, status, version_hash, snapshot)
+                VALUES (?, 'Champion V1', ?, ?, ?)
+                """,
+                (version_id, VersionStatus.CHAMPION.value, version_hash, encoded_snapshot),
+            )
 
         await db.execute(
             """
@@ -146,6 +143,26 @@ class NexusTradeRepository:
         if mismatches:
             raise NexusTradeSingletonError(
                 f"NexusTrade singleton has incompatible fields: {', '.join(mismatches)}"
+            )
+
+    @staticmethod
+    def _validate_champion_v1(
+        version: aiosqlite.Row,
+        version_id: str,
+        version_hash: str,
+        snapshot: str,
+    ) -> None:
+        expected = {
+            "id": version_id,
+            "name": "Champion V1",
+            "status": VersionStatus.CHAMPION.value,
+            "version_hash": version_hash,
+            "snapshot": snapshot,
+        }
+        mismatches = [key for key, value in expected.items() if version[key] != value]
+        if mismatches:
+            raise NexusTradeSingletonError(
+                f"Champion V1 has incompatible fields: {', '.join(mismatches)}"
             )
 
     @classmethod
