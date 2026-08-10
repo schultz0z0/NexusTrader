@@ -172,8 +172,100 @@ class NexusTradeApiTests(unittest.TestCase):
                 self.assertEqual(bool(data), should_have_rows)
                 self.assertNotIn("path", json.dumps(data).lower())
 
+    def test_internal_ingress_reports_incomplete_nexus_envelope_as_rejected(self):
+        previous = settings.INTERNAL_API_TOKEN
+        settings.INTERNAL_API_TOKEN = "dummy-internal"
+        try:
+            response = self.client.post(
+                "/api/v1/internal/events",
+                json={
+                    "event_id": "missing-revision",
+                    "schema_version": 1,
+                    "type": "nexus.decision",
+                    "bot_id": "nexus-trade",
+                    "payload": {"id": "decision-invalid"},
+                },
+                headers={"X-Internal-Token": "dummy-internal"},
+            )
+        finally:
+            settings.INTERNAL_API_TOKEN = previous
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["accepted"], False)
+        self.assertEqual(
+            self.live_store.snapshot("nexus-trade")["nexus_events"],
+            [],
+        )
+
 
 class NexusLiveStoreTests(unittest.TestCase):
+    def test_incomplete_or_duplicate_nexus_envelopes_are_rejected_fail_closed(self):
+        store = LiveStore()
+        complete = {
+            "event_id": "decision:one",
+            "schema_version": 1,
+            "snapshot_version": 4,
+            "type": "nexus.decision",
+            "bot_id": "nexus-trade",
+            "epoch": 104,
+            "payload": {"id": "decision-one", "decision_id": "decision-one"},
+        }
+
+        for missing in ("event_id", "schema_version", "snapshot_version"):
+            with self.subTest(missing=missing):
+                malformed = dict(complete)
+                malformed.pop(missing)
+                self.assertFalse(store.apply(malformed))
+        self.assertFalse(store.apply({**complete, "schema_version": True}))
+        self.assertFalse(store.apply({**complete, "snapshot_version": 0}))
+        self.assertEqual(store.snapshot("nexus-trade")["nexus_events"], [])
+
+        self.assertTrue(store.apply(complete))
+        same_identity_revision = {
+            **complete,
+            "event_id": "different-transport-id",
+        }
+        self.assertFalse(store.apply(same_identity_revision))
+        self.assertEqual(len(store.snapshot("nexus-trade")["nexus_events"]), 1)
+
+    def test_sensitive_values_and_local_paths_are_removed_recursively(self):
+        store = LiveStore()
+        event = {
+            "event_id": "report:sanitized",
+            "schema_version": 1,
+            "snapshot_version": 5,
+            "type": "nexus.report",
+            "bot_id": "nexus-trade",
+            "epoch": 105,
+            "payload": {
+                "id": "report-safe",
+                "summary": "safe summary",
+                "unsafe_message": "Bearer secret-value",
+                "nested": {
+                    "items": [
+                        "safe-value",
+                        "C:\\Users\\operator\\private-report.json",
+                        "file:///app/storage/private-report.json",
+                        "https://example.test/export?ticket=secret-value",
+                        "super-secret-token",
+                        "stored at C:\\Users\\operator\\nested-private.json",
+                    ],
+                },
+            },
+        }
+
+        self.assertTrue(store.apply(event))
+
+        serialized = json.dumps(store.snapshot("nexus-trade"))
+        self.assertIn("safe summary", serialized)
+        self.assertIn("safe-value", serialized)
+        self.assertNotIn("secret-value", serialized)
+        self.assertNotIn("C:\\\\Users", serialized)
+        self.assertNotIn("file:///app", serialized)
+        self.assertNotIn("ticket=", serialized)
+        self.assertNotIn("super-secret-token", serialized)
+        self.assertNotIn("nested-private.json", serialized)
+
     def test_all_nexus_events_are_idempotent_versioned_and_sanitized(self):
         store = LiveStore()
         event_types = (

@@ -97,3 +97,51 @@ implementado treino, candidato, promoção, relatório ou geração de export ne
 O modo persistido é aplicado pelo runtime no próximo boundary causal, e a parada de
 emergência é verificada antes de qualquer processamento/compra. A trilha REAL não
 recebeu smoke test por restrição explícita e continua protegida pelos gates atuais.
+
+## Fix round 1/5 — hardening do realtime
+
+### RED reproduzido
+
+Os três achados Important foram reproduzidos antes da implementação. O primeiro
+comando focado terminou em 5 failures e 2 errors: emergency persistido não chegava
+aos dois dispatchers quando o Champion estava ACTIVE; o runtime ainda não aceitava
+publisher; envelopes Nexus incompletos eram aceitos; identidade/revisão duplicada
+era aplicada; e segredos/caminhos em valores continuavam no snapshot. REDs isolados
+confirmaram ainda restart com snapshot igual sem rearmar emergency e o ingress
+interno reportando envelope incompleto como aceito. Um último RED cobriu token e
+caminho Windows embutidos em texto, antes do matcher final.
+
+### GREEN e contratos
+
+- O refresh aplica `emergency_stop` antes de qualquer defer ou comparação com o
+  snapshot em cache e propaga a trava também para dispatchers Champion preparados.
+- O runtime publica, depois da persistência, `nexus.decision` e `nexus.trade` em ordem
+  causal. Mudanças realmente observadas no snapshot publicam `nexus.runtime`,
+  `nexus.campaign`, `nexus.version_changed` e `nexus.trial_changed`; report/proposal
+  não são fabricados antes das Tasks 7–9.
+- O publisher HTTP é criado e fechado somente pelo `run()` que possui seu ciclo de
+  vida; publishers injetados permanecem sob responsabilidade do chamador.
+- `LiveStore` rejeita fail-closed todo `nexus.*` fora dos oito tipos ou sem
+  `event_id`, `schema_version=1`, `snapshot_version>=1`, payload e identidade. A
+  deduplicação usa tipo + revisão + identidade, além do `event_id` legado.
+- Sanitização recursiva remove chaves e valores sensíveis, inclusive Bearer/JWT,
+  tokens/tickets/secrets, URLs com credenciais e caminhos locais absolutos/embutidos.
+  O ingress não transmite eventos Nexus rejeitados. Eventos não-Nexus mantêm o
+  contrato anterior.
+
+### Verificação final do fix
+
+| Verificação | Resultado |
+| --- | --- |
+| novos testes de regressão | 7 testes, PASS |
+| Task 6 + regressão crítica API/runtime/repository/orchestrator/publisher | 123 testes, PASS em 15,853s |
+| suíte Python completa | 357 testes, PASS em 26,835s |
+| testes JavaScript | 17 testes, PASS |
+| `python -m compileall -q api backtest core data database risk strategies trading nexus_trade` | PASS |
+| `python -m pip check` | PASS (`No broken requirements found`) |
+| `git diff --check` | PASS |
+| diff protegido Donchian/Nexus Speed/`utils/indicators.py` | vazio |
+
+Ambiente dos testes: `.venv`, credenciais dummy, `DEV_MODE=false`,
+`ALLOW_REAL_TRADING=false`, `REAL_MAX_STAKE_USD=0`, sem rede externa ou operação
+REAL. Commit local do fix: `fix: harden NexusTrade realtime control plane`.

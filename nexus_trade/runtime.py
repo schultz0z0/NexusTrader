@@ -8,6 +8,7 @@ import time
 from dataclasses import replace
 
 from core.accounts import normalize_account
+from core.events import runtime_event
 from nexus_trade.clock import CausalCycleResult, EntryClock
 from nexus_trade.constants import (
     NEXUS_DEMO_STAKE,
@@ -52,6 +53,7 @@ class NexusTradeRuntime:
         feature_builder=None,
         monitors=None,
         monitor_factory=None,
+        publisher=None,
     ):
         self.repository = repository
         self.bot = dict(bot)
@@ -71,6 +73,8 @@ class NexusTradeRuntime:
         self._feature_builder = feature_builder
         self._market_data = None
         self._monitor_factory = monitor_factory
+        self.publisher = publisher
+        self._owns_publisher = False
         self._shared_demo_monitor = None
         self._champion_monitor = None
         self.monitors = dict(monitors or {})
@@ -126,6 +130,126 @@ class NexusTradeRuntime:
         # current boundary wait.
         self.set_emergency_stop(True)
         self._stop_event.set()
+
+    async def _start_event_publisher(self) -> None:
+        if self.publisher is None:
+            from core.event_publisher import HttpEventPublisher
+
+            self.publisher = HttpEventPublisher()
+            self._owns_publisher = True
+        starter = getattr(self.publisher, "start", None)
+        if callable(starter):
+            result = starter()
+            if inspect.isawaitable(result):
+                await result
+
+    def _snapshot_version(self, snapshot: dict | None = None) -> int:
+        source = snapshot if snapshot is not None else self._runtime_snapshot
+        bot = (source or {}).get("bot") or {}
+        revision = bot.get("config_revision", 1)
+        if isinstance(revision, bool) or type(revision) is not int or revision < 1:
+            return 1
+        return revision
+
+    async def _publish_nexus_event(
+        self,
+        event_type: str,
+        event_id: str,
+        payload: dict,
+        *,
+        snapshot: dict | None = None,
+    ) -> bool:
+        if self.publisher is None:
+            return False
+        event = runtime_event(
+            event_type,
+            self.bot_id,
+            event_id=event_id,
+            schema_version=1,
+            snapshot_version=self._snapshot_version(snapshot),
+            payload=payload,
+        )
+        return bool(await self.publisher.publish(event))
+
+    async def _publish_snapshot_transitions(
+        self,
+        previous: dict | None,
+        current: dict,
+        *,
+        applied: bool,
+    ) -> None:
+        previous = previous or {}
+        revision = self._snapshot_version(current)
+        previous_runtime = previous.get("runtime") or {}
+        current_runtime = current.get("runtime") or {}
+        if current_runtime != previous_runtime:
+            await self._publish_nexus_event(
+                "nexus.runtime",
+                f"nexus.runtime:{revision}",
+                {"runtime": current_runtime, "applied": bool(applied)},
+                snapshot=current,
+            )
+
+        previous_campaigns = {
+            item.get("id"): item
+            for item in (previous.get("active_campaigns") or [])
+            if item.get("id")
+        }
+        current_campaigns = {
+            item.get("id"): item
+            for item in (current.get("active_campaigns") or [])
+            if item.get("id")
+        }
+        for campaign_id, campaign in current_campaigns.items():
+            if previous_campaigns.get(campaign_id) != campaign:
+                await self._publish_nexus_event(
+                    "nexus.campaign",
+                    f"nexus.campaign:{campaign_id}:{campaign.get('status', 'ACTIVE')}",
+                    campaign,
+                    snapshot=current,
+                )
+
+        def lane_versions(snapshot):
+            return {
+                item.get("lane"): (item.get("version") or {})
+                for item in (snapshot.get("lanes") or [])
+                if item.get("lane")
+            }
+
+        previous_versions = lane_versions(previous)
+        current_versions = lane_versions(current)
+        for lane, version in current_versions.items():
+            if previous_versions.get(lane) != version:
+                version_id = version.get("id", "missing")
+                await self._publish_nexus_event(
+                    "nexus.version_changed",
+                    f"nexus.version_changed:{lane}:{version_id}",
+                    {"lane": lane, "version": version},
+                    snapshot=current,
+                )
+
+        trial_lane = Lane.TRIAL.value
+        previous_trial = (
+            previous_versions.get(trial_lane),
+            next(iter(previous_campaigns), None),
+        )
+        current_trial = (
+            current_versions.get(trial_lane),
+            next(iter(current_campaigns), None),
+        )
+        if current_trial != previous_trial:
+            trial_version = (current_versions.get(trial_lane) or {}).get("id", "missing")
+            campaign_id = current_trial[1] or "none"
+            await self._publish_nexus_event(
+                "nexus.trial_changed",
+                f"nexus.trial_changed:{trial_version}:{campaign_id}",
+                {
+                    "lane": trial_lane,
+                    "version": current_versions.get(trial_lane),
+                    "campaign": current_campaigns.get(current_trial[1]),
+                },
+                snapshot=current,
+            )
 
     async def bootstrap(self, *, apply_snapshot: bool = True) -> None:
         if self._bootstrapped:
@@ -322,6 +446,9 @@ class NexusTradeRuntime:
         for connection in reversed(self._connections):
             await connection.disconnect()
         self._connections.clear()
+        if self._owns_publisher and self.publisher is not None:
+            await self.publisher.close()
+            self.publisher = None
 
     async def _next_causal_cycle(self, runtime):
         target = self._clock.next_boundary_epoch(after_epoch=self._last_boundary)
@@ -371,11 +498,7 @@ class NexusTradeRuntime:
 
     def apply_champion_mode(self, snapshot: dict) -> bool:
         runtime = snapshot.get("runtime") or {}
-        if "emergency_stop" in runtime:
-            emergency_stop = runtime["emergency_stop"]
-            if emergency_stop not in {0, 1, False, True}:
-                raise ValueError("emergency_stop must be boolean")
-            self.set_emergency_stop(bool(emergency_stop))
+        self._apply_persisted_emergency_stop(runtime)
         lanes = snapshot.get("lanes") or []
         next_versions = {
             Lane(item["lane"]): (item.get("version") or {}).get("id")
@@ -479,6 +602,14 @@ class NexusTradeRuntime:
             dispatcher.set_emergency_stop(self._emergency_stop)
         self._pending_runtime_snapshot = None
         return True
+
+    def _apply_persisted_emergency_stop(self, runtime: dict) -> None:
+        if "emergency_stop" not in runtime:
+            return
+        emergency_stop = runtime["emergency_stop"]
+        if emergency_stop not in {0, 1, False, True}:
+            raise ValueError("emergency_stop must be boolean")
+        self.set_emergency_stop(bool(emergency_stop))
 
     @staticmethod
     def _dispatcher_identity(dispatcher) -> tuple[str, str]:
@@ -626,7 +757,10 @@ class NexusTradeRuntime:
             raise TypeError("emergency_stop must be boolean")
         self._emergency_stop = enabled
         seen = set()
-        for dispatcher in self.dispatchers.values():
+        for dispatcher in [
+            *self.dispatchers.values(),
+            *self._champion_dispatchers.values(),
+        ]:
             if dispatcher is not None and id(dispatcher) not in seen:
                 dispatcher.set_emergency_stop(enabled)
                 seen.add(id(dispatcher))
@@ -723,12 +857,24 @@ class NexusTradeRuntime:
             return
         payload = decision.to_dict()
         payload["id"] = payload["decision_id"]
+        lane = Lane(decision.lane)
+        state = strategy.snapshot()
         await recorder(
             payload,
-            nexus_version_id=self._versions[Lane(decision.lane)],
-            campaign_id=self._campaigns[Lane(decision.lane)],
-            state=strategy.snapshot(),
-            owner=self._lane_owners[Lane(decision.lane)],
+            nexus_version_id=self._versions[lane],
+            campaign_id=self._campaigns[lane],
+            state=state,
+            owner=self._lane_owners[lane],
+        )
+        await self._publish_nexus_event(
+            "nexus.decision",
+            f"nexus.decision:{decision.decision_id}",
+            {
+                **payload,
+                "nexus_version_id": self._versions[lane],
+                "campaign_id": self._campaigns[lane],
+                "state": state,
+            },
         )
 
     async def _save_lane_state(self, lane: Lane) -> None:
@@ -906,6 +1052,11 @@ class NexusTradeRuntime:
             if self._managed_champion_factory:
                 await self._provision_champion_dispatcher(pending)
             self.apply_champion_mode(pending)
+        await self._publish_nexus_event(
+            "nexus.trade",
+            f"nexus.trade:{lane.value}:{contract_id}",
+            trade,
+        )
 
     async def _restore_lane_states(self) -> None:
         loader = getattr(self.repository, "load_nexus_lane_states", None)
@@ -1033,16 +1184,28 @@ class NexusTradeRuntime:
         getter = getattr(self.repository, "get_nexus_runtime_snapshot", None)
         if not callable(getter):
             return
+        previous = self._runtime_snapshot
         snapshot = await getter()
-        if snapshot is None or snapshot == self._runtime_snapshot:
+        if snapshot is None:
+            return
+        # Emergency is a total buy gate, not a route change. It must take
+        # effect even while Champion ownership defers account/version changes.
+        self._apply_persisted_emergency_stop(snapshot.get("runtime") or {})
+        if snapshot == self._runtime_snapshot:
             return
         if self.strategies[Lane.CHAMPION].state.position_status != "IDLE":
             self._pending_runtime_snapshot = snapshot
             self._runtime_snapshot = snapshot
+            await self._publish_snapshot_transitions(
+                previous, snapshot, applied=False,
+            )
             return
         await self._provision_champion_dispatcher(snapshot)
-        self.apply_champion_mode(snapshot)
+        applied = self.apply_champion_mode(snapshot)
         self._runtime_snapshot = snapshot
+        await self._publish_snapshot_transitions(
+            previous, snapshot, applied=applied,
+        )
 
     async def _provision_champion_dispatcher(
         self, snapshot: dict, *, restoring_owner: dict = None,
@@ -1119,6 +1282,7 @@ class NexusTradeRuntime:
         if self._stop_event.is_set():
             return
         try:
+            await self._start_event_publisher()
             await self._restore_lane_states()
             await self._restore_lane_owners()
             await self.bootstrap(apply_snapshot=False)
@@ -1129,11 +1293,15 @@ class NexusTradeRuntime:
             await self._resume_active_monitors()
             if self._managed_champion_factory:
                 await self._provision_champion_dispatcher(self._runtime_snapshot)
+            applied = False
             if not (
                 self._managed_champion_factory
                 and self._pending_runtime_snapshot is self._runtime_snapshot
             ):
-                self.apply_champion_mode(self._runtime_snapshot)
+                applied = self.apply_champion_mode(self._runtime_snapshot)
+            await self._publish_snapshot_transitions(
+                None, self._runtime_snapshot, applied=applied,
+            )
             while not self._stop_event.is_set():
                 if hasattr(self.repository, "touch_bot_heartbeat"):
                     await self.repository.touch_bot_heartbeat(self.bot_id)

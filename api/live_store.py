@@ -1,9 +1,22 @@
 from collections import deque
 from copy import deepcopy
+import re
 
 
 class LiveStore:
     """Small bounded in-memory read model rebuilt continuously by runtime events."""
+
+    NEXUS_EVENT_TYPES = {
+        "nexus.runtime",
+        "nexus.decision",
+        "nexus.trade",
+        "nexus.campaign",
+        "nexus.report",
+        "nexus.trial_changed",
+        "nexus.proposal",
+        "nexus.version_changed",
+    }
+    _REDACTED = object()
 
     def __init__(self, history_limit=1000, trade_limit=100, event_limit=10000):
         self.history_limit = history_limit
@@ -12,6 +25,8 @@ class LiveStore:
         self._event_order = deque(maxlen=event_limit)
         self._event_ids = set()
         self.nexus_event_limit = min(int(event_limit), 1000)
+        self._nexus_key_order = deque(maxlen=event_limit)
+        self._nexus_keys = set()
 
     def _state(self, bot_id):
         return self._bots.setdefault(bot_id, {
@@ -24,11 +39,17 @@ class LiveStore:
             "active_trade": None,
             "recent_trades": [],
             "last_event_epoch": None,
+            "nexus_events": [],
+            "decisions": [],
+            "trades": [],
+            "reports": [],
+            "proposals": [],
         })
 
     @classmethod
     def sanitize_event(cls, event):
-        return cls._redact(deepcopy(event))
+        sanitized = cls._redact(deepcopy(event))
+        return None if sanitized is cls._REDACTED else sanitized
 
     @classmethod
     def _redact(cls, value):
@@ -48,13 +69,106 @@ class LiveStore:
                     or normalized.endswith("_path")
                 )
                 if not sensitive:
-                    sanitized[key] = cls._redact(item)
+                    redacted = cls._redact(item)
+                    if redacted is not cls._REDACTED:
+                        sanitized[key] = redacted
             return sanitized
         if isinstance(value, list):
-            return [cls._redact(item) for item in value]
+            sanitized = [cls._redact(item) for item in value]
+            return [item for item in sanitized if item is not cls._REDACTED]
         if isinstance(value, tuple):
-            return [cls._redact(item) for item in value]
+            sanitized = [cls._redact(item) for item in value]
+            return [item for item in sanitized if item is not cls._REDACTED]
+        if isinstance(value, str) and cls._is_sensitive_value(value):
+            return cls._REDACTED
         return value
+
+    @staticmethod
+    def _is_sensitive_value(value: str) -> bool:
+        stripped = value.strip()
+        lowered = stripped.lower()
+        if not stripped:
+            return False
+        if lowered.startswith("bearer ") or "file://" in lowered or "\\\\" in stripped:
+            return True
+        if re.search(r"[a-zA-Z]:[\\/]", stripped):
+            return True
+        if re.search(r"(?:^|\s)/(?:app|etc|home|mnt|opt|root|tmp|users|var)(?:/|$)", lowered):
+            return True
+        if re.search(
+            r"(?:^|[?&\s])(api[_-]?key|authorization|otp|password|secret|ticket|token)=",
+            lowered,
+        ):
+            return True
+        if re.search(
+            r"(?:^|[-_\s])(otp|password|secret|ticket|token)(?:[-_\s]|$)",
+            lowered,
+        ):
+            return True
+        if lowered.startswith("sk-") and len(stripped) >= 16:
+            return True
+        if lowered.count(".") == 2 and lowered.startswith("eyj"):
+            return True
+        return False
+
+    @classmethod
+    def is_valid_nexus_event(cls, event) -> bool:
+        if not isinstance(event, dict):
+            return False
+        if event.get("type") not in cls.NEXUS_EVENT_TYPES:
+            return False
+        if event.get("bot_id") != "nexus-trade":
+            return False
+        event_id = event.get("event_id")
+        if type(event_id) is not str or not event_id.strip():
+            return False
+        if type(event.get("schema_version")) is not int or event["schema_version"] != 1:
+            return False
+        revision = event.get("snapshot_version")
+        if type(revision) is not int or revision < 1:
+            return False
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        return cls._nexus_identity(event) is not None
+
+    @staticmethod
+    def _nexus_identity(event):
+        payload = event.get("payload") or {}
+        event_type = event.get("type")
+        if event_type == "nexus.runtime":
+            if payload.get("id"):
+                return payload["id"]
+            return "runtime" if isinstance(payload.get("runtime"), dict) else None
+        if event_type == "nexus.decision":
+            return payload.get("id") or payload.get("decision_id")
+        if event_type == "nexus.trade":
+            return payload.get("id") or payload.get("contract_id")
+        if event_type in {"nexus.campaign", "nexus.report", "nexus.proposal"}:
+            return payload.get("id")
+        if event_type == "nexus.version_changed":
+            if payload.get("id"):
+                return payload["id"]
+            version = payload.get("version") or {}
+            lane = payload.get("lane")
+            return f"{lane}:{version.get('id')}" if lane and version.get("id") else None
+        if event_type == "nexus.trial_changed":
+            version = payload.get("version") or {}
+            campaign = payload.get("campaign") or {}
+            identity = payload.get("id")
+            if identity:
+                return identity
+            if version.get("id") or campaign.get("id"):
+                return f"{version.get('id')}:{campaign.get('id')}"
+        return None
+
+    @classmethod
+    def nexus_event_key(cls, event):
+        return (
+            event["type"],
+            event["snapshot_version"],
+            str(cls._nexus_identity(event)),
+        )
 
     def hydrate_nexus(self, durable_snapshot):
         durable = self._redact(deepcopy(durable_snapshot or {}))
@@ -81,6 +195,17 @@ class LiveStore:
 
     def apply(self, event):
         event = self.sanitize_event(event)
+        if not isinstance(event, dict):
+            return False
+        event_type = event.get("type")
+        is_nexus = isinstance(event_type, str) and event_type.startswith("nexus.")
+        nexus_key = None
+        if is_nexus:
+            if not self.is_valid_nexus_event(event):
+                return False
+            nexus_key = self.nexus_event_key(event)
+            if nexus_key in self._nexus_keys:
+                return False
         event_id = event.get("event_id")
         if event_id and event_id in self._event_ids:
             return False
@@ -91,18 +216,14 @@ class LiveStore:
             self._event_ids.add(event_id)
 
         state = self._state(event["bot_id"])
-        event_type = event.get("type")
-        if event_type in {
-            "nexus.runtime",
-            "nexus.decision",
-            "nexus.trade",
-            "nexus.campaign",
-            "nexus.report",
-            "nexus.trial_changed",
-            "nexus.proposal",
-            "nexus.version_changed",
-        }:
-            return self._apply_nexus_event(state, event)
+        if event_type in self.NEXUS_EVENT_TYPES:
+            accepted = self._apply_nexus_event(state, event)
+            if accepted:
+                if len(self._nexus_key_order) == self._nexus_key_order.maxlen:
+                    self._nexus_keys.discard(self._nexus_key_order[0])
+                self._nexus_key_order.append(nexus_key)
+                self._nexus_keys.add(nexus_key)
+            return accepted
         if event_type == "market.tick":
             market = state["market"]
             event_symbol = event.get("symbol")

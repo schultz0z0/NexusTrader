@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from config.settings import settings
+from api.live_store import LiveStore
 from nexus_trade.clock import CausalCycleResult, DispatchReceipt, EntryIntent
 from nexus_trade.domain import Lane
 from nexus_trade.runtime import NexusTradeRuntime
@@ -95,6 +96,23 @@ class FakeRepository:
                 "consecutive_losses": 1,
             },
         }
+
+
+class LiveStorePublisher:
+    def __init__(self, repository):
+        self.repository = repository
+        self.store = LiveStore()
+        self.events = []
+        self.persistence_observations = []
+
+    async def publish(self, event):
+        self.events.append(dict(event))
+        self.persistence_observations.append({
+            "type": event["type"],
+            "decisions": len(self.repository.decisions),
+            "trades": len(self.repository.trades),
+        })
+        return self.store.apply(event)
 
 
 class PausingSettlementRepository(FakeRepository):
@@ -304,12 +322,14 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         champion_factory = kwargs.pop(
             "champion_dispatcher_factory", lambda config: self.separate,
         )
+        publisher = kwargs.pop("publisher", LiveStorePublisher(self.repository))
         return NexusTradeRuntime(
             self.repository,
             {"id": "nexus-trade", "strategy_id": "nexus_trade", "desired_state": "STOPPED"},
             shared_demo_dispatcher=self.shared,
             champion_dispatcher_factory=champion_factory,
             runtime_snapshot=self.snapshot,
+            publisher=publisher,
             **kwargs,
         )
 
@@ -570,6 +590,52 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], updated)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
 
+    async def test_runtime_refresh_applies_emergency_before_deferring_active_champion(self):
+        runtime = self.runtime(restored_lane_states={
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id="active-owner",
+                contract_id=801,
+            ).to_dict(),
+        })
+        runtime.apply_champion_mode({
+            **self.snapshot,
+            "runtime": {**self.snapshot["runtime"], "champion_enabled": 1},
+        })
+        self.repository.runtime_snapshot = {
+            **self.snapshot,
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 0,
+                "emergency_stop": 1,
+            },
+        }
+        decision, intent = decision_and_intent(Lane.TRIAL)
+
+        await runtime._refresh_runtime_snapshot()
+        await runtime.process_cycle(CausalCycleResult(
+            60, object(), object(), (decision,), (intent,),
+        ))
+
+        self.assertTrue(self.shared.emergency_stop)
+        self.assertTrue(self.separate.emergency_stop)
+        self.assertIs(runtime._pending_runtime_snapshot, self.repository.runtime_snapshot)
+        self.assertEqual(self.shared.intents, [])
+        self.assertEqual(self.separate.intents, [])
+
+    async def test_runtime_refresh_reapplies_emergency_from_equal_restart_snapshot(self):
+        stopped_snapshot = {
+            **self.snapshot,
+            "runtime": {**self.snapshot["runtime"], "emergency_stop": 1},
+        }
+        runtime = self.runtime()
+        runtime._runtime_snapshot = stopped_snapshot
+        self.repository.runtime_snapshot = stopped_snapshot
+
+        await runtime._refresh_runtime_snapshot()
+
+        self.assertTrue(self.shared.emergency_stop)
+
     async def test_decision_and_active_lifecycle_are_persisted_for_restart(self):
         monitor = FakeMonitor()
         runtime = self.runtime(monitors={Lane.CHAMPION: monitor, Lane.TRIAL: monitor})
@@ -591,6 +657,80 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             restarted.strategies[Lane.CHAMPION].state,
             SetupState.from_dict(state),
+        )
+
+    async def test_persisted_decision_and_trade_are_published_in_causal_order(self):
+        publisher = LiveStorePublisher(self.repository)
+        runtime = self.runtime(publisher=publisher)
+        runtime.apply_champion_mode(self.snapshot)
+        decision, intent = decision_and_intent(Lane.CHAMPION)
+
+        await runtime.process_cycle(CausalCycleResult(
+            60, object(), object(), (decision,), (intent,),
+        ))
+        await runtime.settle_contract(Lane.CHAMPION, decision.decision_id, {
+            "contract_id": 701,
+            "contract_type": "CALL",
+            "status": "won",
+            "buy_price": 0.35,
+            "payout": 0.67,
+            "profit": 0.32,
+        })
+
+        self.assertEqual(
+            [event["type"] for event in publisher.events],
+            ["nexus.decision", "nexus.trade"],
+        )
+        for event in publisher.events:
+            self.assertIsInstance(event["event_id"], str)
+            self.assertEqual(event["schema_version"], 1)
+            self.assertGreaterEqual(event["snapshot_version"], 1)
+        self.assertEqual(publisher.persistence_observations, [
+            {"type": "nexus.decision", "decisions": 1, "trades": 0},
+            {"type": "nexus.trade", "decisions": 1, "trades": 1},
+        ])
+        live = publisher.store.snapshot("nexus-trade")
+        self.assertEqual(live["decisions"][0]["decision_id"], decision.decision_id)
+        self.assertEqual(live["trades"][0]["contract_id"], 701)
+
+    async def test_runtime_refresh_publishes_existing_snapshot_transitions_only(self):
+        publisher = LiveStorePublisher(self.repository)
+        runtime = self.runtime(publisher=publisher)
+        runtime.apply_champion_mode(self.snapshot)
+        self.repository.runtime_snapshot = {
+            **self.snapshot,
+            "bot": {"config_revision": 2},
+            "runtime": {
+                **self.snapshot["runtime"],
+                "champion_enabled": 1,
+            },
+            "lanes": [
+                self.snapshot["lanes"][0],
+                {"lane": Lane.TRIAL.value, "version": {"id": "trial-v2"}},
+            ],
+            "active_campaigns": [
+                {"id": "campaign-2", "lane": Lane.TRIAL.value, "status": "ACTIVE"},
+            ],
+        }
+
+        await runtime._refresh_runtime_snapshot()
+
+        self.assertEqual(
+            [event["type"] for event in publisher.events],
+            [
+                "nexus.runtime",
+                "nexus.campaign",
+                "nexus.version_changed",
+                "nexus.trial_changed",
+            ],
+        )
+        self.assertNotIn(
+            "nexus.report",
+            {event["type"] for event in publisher.events},
+        )
+        self.assertNotIn(
+            "nexus.proposal",
+            {event["type"] for event in publisher.events},
         )
 
     async def test_run_remains_alive_when_desired_state_is_stopped(self):
@@ -889,6 +1029,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     champion_dispatcher_factory=factory,
                     runtime_snapshot=desired,
                     cycle_source=source,
+                    publisher=LiveStorePublisher(repository),
                 )
                 task = asyncio.create_task(runtime.run())
                 await asyncio.wait_for(source.started.wait(), timeout=1)
@@ -1163,6 +1304,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime_snapshot=self.snapshot,
             cycle_source=restarted_source,
             monitors={Lane.TRIAL: restarted_monitor},
+            publisher=LiveStorePublisher(self.repository),
         )
         restarted_task = asyncio.create_task(restarted.run())
         await asyncio.wait_for(restarted_source.started.wait(), timeout=1)
@@ -1447,6 +1589,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
             monitor_factory=lambda connection: FakeMonitor(),
             cycle_source=source,
+            publisher=LiveStorePublisher(self.repository),
         )
 
         task = asyncio.create_task(runtime.run())

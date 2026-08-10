@@ -11,6 +11,12 @@ async def ingest_event(event: dict, request: Request):
     if not event.get("type") or not event.get("bot_id"):
         return {"accepted": False, "error": "evento invalido"}
     event = request.app.state.live_store.sanitize_event(event)
+    if (
+        isinstance(event, dict)
+        and str(event.get("type", "")).startswith("nexus.")
+        and not request.app.state.live_store.is_valid_nexus_event(event)
+    ):
+        return {"accepted": False, "error": "envelope Nexus invalido"}
     accepted = request.app.state.live_store.apply(event)
     if accepted:
         await ws_manager.broadcast(event["bot_id"], event)
