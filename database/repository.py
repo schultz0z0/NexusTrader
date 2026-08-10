@@ -485,6 +485,8 @@ class DatabaseRepository:
             "bot_id", "session_id", "strategy_name", "symbol", "contract_type",
             "contract_id", "stake", "payout", "profit", "result", "status",
             "entry_spot", "exit_spot", "purchase_time", "expiry_time",
+            "lane", "nexus_version_id", "campaign_id", "decision_id",
+            "entry_delay_ms",
         )
         values = [trade_data.get(column) for column in columns]
         async with self._connection() as db:
@@ -495,7 +497,9 @@ class DatabaseRepository:
                     UPDATE trades SET
                         session_id = ?, strategy_name = ?, symbol = ?, contract_type = ?,
                         stake = ?, payout = ?, profit = ?, result = ?, status = ?,
-                        entry_spot = ?, exit_spot = ?, purchase_time = ?, expiry_time = ?
+                        entry_spot = ?, exit_spot = ?, purchase_time = ?, expiry_time = ?,
+                        lane = ?, nexus_version_id = ?, campaign_id = ?, decision_id = ?,
+                        entry_delay_ms = ?
                     WHERE bot_id = ? AND contract_id = ?
                 """, (
                     trade_data.get("session_id"), trade_data.get("strategy_name"),
@@ -504,7 +508,10 @@ class DatabaseRepository:
                     trade_data.get("profit"), trade_data.get("result"),
                     trade_data.get("status"), trade_data.get("entry_spot"),
                     trade_data.get("exit_spot"), trade_data.get("purchase_time"),
-                    trade_data.get("expiry_time"), trade_data.get("bot_id"),
+                    trade_data.get("expiry_time"), trade_data.get("lane"),
+                    trade_data.get("nexus_version_id"), trade_data.get("campaign_id"),
+                    trade_data.get("decision_id"), trade_data.get("entry_delay_ms"),
+                    trade_data.get("bot_id"),
                     trade_data.get("contract_id"),
                 ))
                 updated = cursor.rowcount
@@ -592,6 +599,11 @@ class DatabaseRepository:
             data["duration_unit"],
             int(data.get("signal_epoch") or 0),
             json.dumps(data.get("metadata") or {}),
+            data.get("lane"),
+            data.get("nexus_version_id"),
+            data.get("campaign_id"),
+            data.get("decision_id"),
+            data.get("entry_delay_ms"),
         )
         async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
@@ -601,8 +613,9 @@ class DatabaseRepository:
                     INSERT INTO order_intents (
                         id, bot_id, account_id, session_id, proposal_id, symbol,
                         contract_type, stake, price, duration, duration_unit,
-                        signal_epoch, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        signal_epoch, metadata, lane, nexus_version_id,
+                        campaign_id, decision_id, entry_delay_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, values)
                 await db.commit()
             except aiosqlite.IntegrityError as exc:
@@ -613,6 +626,115 @@ class DatabaseRepository:
                     ) from exc
                 raise
         return await self.get_order_intent(intent_id)
+
+    async def prepare_nexus_order_intent(
+        self,
+        intent_id: str,
+        *,
+        proposal_id: str,
+        price: float,
+        metadata: dict,
+    ) -> dict:
+        async with self._connection() as db:
+            await db.execute(
+                """
+                UPDATE order_intents
+                SET proposal_id = ?, price = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND state = 'prepared'
+                """,
+                (proposal_id, float(price), json.dumps(metadata), intent_id),
+            )
+            await db.commit()
+        return await self.get_order_intent(intent_id)
+
+    async def finalize_nexus_order_intent(
+        self,
+        intent_id: str,
+        *,
+        entry_delay_ms: int,
+        metadata: dict,
+    ) -> dict:
+        if isinstance(entry_delay_ms, bool) or type(entry_delay_ms) is not int or entry_delay_ms < 0:
+            raise ValueError("entry_delay_ms must be a non-negative integer")
+        async with self._connection() as db:
+            await db.execute(
+                """
+                UPDATE order_intents
+                SET entry_delay_ms = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND state = 'owned'
+                """,
+                (entry_delay_ms, json.dumps(metadata), intent_id),
+            )
+            await db.commit()
+        return await self.get_order_intent(intent_id)
+
+    async def record_nexus_decision(
+        self,
+        decision: dict,
+        *,
+        nexus_version_id: str,
+        campaign_id: str = None,
+        state: dict,
+    ) -> None:
+        payload = {"decision": dict(decision), "state": dict(state)}
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO nexus_decisions (
+                    id, lane, nexus_version_id, campaign_id, symbol,
+                    signal_epoch, entry_delay_ms, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                """,
+                (
+                    decision.get("id") or decision["decision_id"],
+                    decision["lane"],
+                    nexus_version_id,
+                    campaign_id,
+                    "R_100",
+                    int(decision["signal_epoch"]),
+                    None,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+            await db.commit()
+
+    async def save_nexus_lane_state(self, lane: str, state: dict) -> None:
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                (lane,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return
+            payload = json.loads(row["payload"])
+            payload["state"] = dict(state)
+            await db.execute(
+                "UPDATE nexus_decisions SET payload = ? WHERE id = ?",
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")), row["id"]),
+            )
+            await db.commit()
+
+    async def load_nexus_lane_states(self) -> dict:
+        states = {}
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            for lane in ("champion_baseline", "challenger_trial"):
+                async with db.execute(
+                    "SELECT payload FROM nexus_decisions WHERE lane = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (lane,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is not None:
+                    payload = json.loads(row["payload"])
+                    if isinstance(payload.get("state"), dict):
+                        states[lane] = payload["state"]
+        return states
+
+    async def get_nexus_runtime_snapshot(self) -> dict:
+        return await NexusTradeRepository(self.db_path).get_runtime_snapshot()
 
     async def get_order_intent(self, intent_id: str):
         async with self._connection() as db:

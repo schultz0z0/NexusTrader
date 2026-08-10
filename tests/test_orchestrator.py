@@ -43,6 +43,26 @@ class FakeSessionFactory:
 
 
 class BotOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nexus_trade_starts_and_remains_running_while_desired_state_is_stopped(self):
+        bot = {
+            "id": "nexus-trade",
+            "strategy_id": "nexus_trade",
+            "desired_state": "STOPPED",
+            "config_revision": 1,
+        }
+        repo = FakeRepository([bot])
+        factory = FakeSessionFactory()
+        orchestrator = BotOrchestrator(repo, session_factory=factory)
+
+        await orchestrator.reconcile_once()
+        bot["config_revision"] = 2
+        await orchestrator.reconcile_once()
+
+        self.assertEqual(len(factory.sessions), 1)
+        self.assertEqual(factory.sessions[0].stop_requests, 0)
+        self.assertIn("nexus-trade", orchestrator.running_bot_ids)
+        await orchestrator.stop()
+
     async def test_running_desired_state_starts_exactly_one_session(self):
         repo = FakeRepository([{
             "id": "bot-a",

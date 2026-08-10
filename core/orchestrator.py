@@ -24,6 +24,9 @@ class BotOrchestrator:
 
     def _default_session_factory(self, bot):
         from core.bot_session import BotSession
+        if bot.get("strategy_id") == "nexus_trade":
+            from nexus_trade.runtime import NexusTradeRuntime
+            return NexusTradeRuntime(repository=self.repository, bot=bot)
         return BotSession(repository=self.repository, bot=bot)
 
     @property
@@ -37,10 +40,15 @@ class BotOrchestrator:
         for bot_id, bot in bots.items():
             desired = bot.get("desired_state", "STOPPED")
             running = self._sessions.get(bot_id)
-            if desired == "RUNNING":
+            continuous = bot.get("strategy_id") == "nexus_trade"
+            if desired == "RUNNING" or continuous:
                 if running is None:
                     await self._start_session(bot)
-                elif bot.get("config_revision", 1) != running.config_revision and not running.stop_requested:
+                elif (
+                    not continuous
+                    and bot.get("config_revision", 1) != running.config_revision
+                    and not running.stop_requested
+                ):
                     running.stop_requested = True
                     await running.session.request_stop()
             elif running and not running.stop_requested:
