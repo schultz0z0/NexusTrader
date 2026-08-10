@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from pathlib import Path
 
@@ -23,6 +24,63 @@ class TickArchiveTests(unittest.TestCase):
 
     def _child(self, program: str) -> list[str]:
         return [sys.executable, "-c", textwrap.dedent(program), str(self.root), str(self.db_path)]
+
+    def _start_child(self, program: str) -> subprocess.Popen:
+        return subprocess.Popen(
+            self._child(program),
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def _read_child_line(self, process: subprocess.Popen, expected: str) -> None:
+        lines = []
+        completed = threading.Event()
+
+        def read_line() -> None:
+            lines.append(process.stdout.readline())
+            completed.set()
+
+        threading.Thread(target=read_line, daemon=True).start()
+        self.assertTrue(
+            completed.wait(timeout=5),
+            f"child did not emit {expected!r} before timeout (returncode={process.poll()})",
+        )
+        self.assertEqual(lines[0].strip(), expected)
+
+    def _send_child_command(self, process: subprocess.Popen, command: str) -> None:
+        self.assertIsNone(process.poll(), f"child exited before command {command!r}")
+        process.stdin.write(f"{command}\n")
+        process.stdin.flush()
+
+    def _assert_child_exits_cleanly(self, process: subprocess.Popen) -> None:
+        try:
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.fail("child did not exit before timeout")
+        stdout = process.stdout.read()
+        stderr = process.stderr.read()
+        self.assertEqual(returncode, 0, f"{stdout}\n{stderr}")
+
+    @staticmethod
+    def _cleanup_child(process: subprocess.Popen) -> None:
+        if process.poll() is None:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
 
     def _start_lock_holder(self, *, context_manager: bool) -> subprocess.Popen:
         constructor = (
@@ -42,15 +100,8 @@ class TickArchiveTests(unittest.TestCase):
             "root, db_path = Path(sys.argv[1]), Path(sys.argv[2])\n"
             f"{constructor}\n"
         )
-        process = subprocess.Popen(
-            self._child(program),
-            cwd=Path(__file__).resolve().parents[1],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self.assertEqual(process.stdout.readline().strip(), "LOCKED")
+        process = self._start_child(program)
+        self._read_child_line(process, "LOCKED")
         return process
 
     def _assert_child_can_acquire_writer(self):
@@ -316,41 +367,82 @@ class TickArchiveTests(unittest.TestCase):
             self.assertEqual(holder.returncode, 0, f"{stdout}\n{stderr}")
 
     def test_context_manager_releases_the_os_lock_for_a_later_process(self):
-        holder = self._start_lock_holder(context_manager=True)
-        stdout, stderr = holder.communicate("\n", timeout=5)
-        self.assertEqual(holder.returncode, 0, f"{stdout}\n{stderr}")
+        holder = self._start_child("""
+            import sys
+            from pathlib import Path
+            from nexus_trade.tick_archive import TickArchive
 
-        self._assert_child_can_acquire_writer()
+            def expect(command):
+                received = sys.stdin.readline().strip()
+                if received != command:
+                    raise RuntimeError(f"expected {command!r}, received {received!r}")
+
+            root, db_path = Path(sys.argv[1]), Path(sys.argv[2])
+            with TickArchive(root, db_path) as archive:
+                print("LOCKED", flush=True)
+                expect("RELEASE")
+            print("READY_AFTER_RELEASE", flush=True)
+            expect("FINISH")
+        """)
+        try:
+            self._read_child_line(holder, "LOCKED")
+            self._send_child_command(holder, "RELEASE")
+            self._read_child_line(holder, "READY_AFTER_RELEASE")
+            self.assertIsNone(holder.poll(), "lock holder exited before the contender ran")
+
+            self._assert_child_can_acquire_writer()
+
+            self.assertIsNone(holder.poll(), "lock holder exited while the contender ran")
+            self._send_child_command(holder, "FINISH")
+            self._assert_child_exits_cleanly(holder)
+        finally:
+            self._cleanup_child(holder)
 
     def test_initialization_error_releases_the_os_lock_for_a_later_process(self):
-        directory = self.root / "R_100" / "1970" / "01" / "01"
-        directory.mkdir(parents=True)
-        first = directory / "legacy-a.jsonl.gz"
-        second = directory / "legacy-b.jsonl.gz"
-        TickArchive._append_member(first, {"epoch": 100, "quote": 1.0})
-        TickArchive._append_member(second, {"epoch": 101, "quote": 1.1})
-        result = subprocess.run(
-            self._child("""
-                import sys
-                from pathlib import Path
-                from nexus_trade.tick_archive import TickArchive
-                try:
-                    TickArchive(Path(sys.argv[1]), Path(sys.argv[2]))
-                except ValueError:
-                    sys.exit(0)
-                sys.exit(1)
-            """),
-            cwd=Path(__file__).resolve().parents[1],
-            text=True,
-            capture_output=True,
-            timeout=5,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(list(self.root.rglob("*.partial")), [])
-        first.unlink()
-        second.unlink()
+        holder = self._start_child("""
+            import sys
+            from pathlib import Path
+            from nexus_trade.tick_archive import TickArchive
 
-        self._assert_child_can_acquire_writer()
+            def expect(command):
+                received = sys.stdin.readline().strip()
+                if received != command:
+                    raise RuntimeError(f"expected {command!r}, received {received!r}")
+
+            # Keep the failed object alive so __del__ cannot mask missing init cleanup.
+            failed_instances = []
+
+            def fail_after_lock(self):
+                failed_instances.append(self)
+                print("LOCKED", flush=True)
+                expect("RELEASE")
+                raise ValueError("forced initialization failure")
+
+            TickArchive._recover_partial_segment = fail_after_lock
+            root, db_path = Path(sys.argv[1]), Path(sys.argv[2])
+            try:
+                TickArchive(root, db_path)
+            except ValueError as exc:
+                if str(exc) != "forced initialization failure":
+                    raise
+            else:
+                raise RuntimeError("initialization unexpectedly succeeded")
+            print("READY_AFTER_RELEASE", flush=True)
+            expect("FINISH")
+        """)
+        try:
+            self._read_child_line(holder, "LOCKED")
+            self._send_child_command(holder, "RELEASE")
+            self._read_child_line(holder, "READY_AFTER_RELEASE")
+            self.assertIsNone(holder.poll(), "failed initializer exited before the contender ran")
+
+            self._assert_child_can_acquire_writer()
+
+            self.assertIsNone(holder.poll(), "failed initializer exited while the contender ran")
+            self._send_child_command(holder, "FINISH")
+            self._assert_child_exits_cleanly(holder)
+        finally:
+            self._cleanup_child(holder)
 
 
 if __name__ == "__main__":
