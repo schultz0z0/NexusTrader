@@ -229,6 +229,23 @@
               <div class="table-wrap nexus-gate-table"><table><thead><tr><th>GATE</th><th>STATUS</th><th>MOTIVO</th></tr></thead><tbody id="nexus-evolution-gates"></tbody></table></div>
             </article>
           </section>
+          <section class="nexus-governance-grid">
+            <article class="panel nexus-diff-panel">
+              <header class="panel-head"><div><div class="eyebrow">DIFF EXPLICÁVEL</div><h2>O que mudará no Champion</h2></div><span id="nexus-diff-family" class="status-chip neutral">SEM MUDANÇA</span></header>
+              <div class="table-wrap"><table><thead><tr><th>CAMINHO</th><th>ANTES</th><th>DEPOIS</th><th>MUDANÇA</th></tr></thead><tbody id="nexus-evolution-diff"></tbody></table></div>
+            </article>
+            <article class="panel nexus-governance-card">
+              <div class="eyebrow">DECISÃO HUMANA</div>
+              <h2>Governança do Champion</h2>
+              <p id="nexus-governance-reason">Aguardando proposta pendente e Champion seguro.</p>
+              <div class="nexus-governance-actions">
+                <button id="nexus-reanalyze" type="button" class="secondary-button" data-nexus-action="reanalyze" disabled>ENVIAR À REANÁLISE</button>
+                <button id="nexus-rollback" type="button" class="secondary-button" data-nexus-action="rollback">ROLLBACK</button>
+                <button id="nexus-approve" type="button" class="primary-button" data-nexus-action="approve" disabled>APROVAR EVOLUÇÃO</button>
+              </div>
+              <small id="nexus-governance-result" role="status"></small>
+            </article>
+          </section>
         </div>
       </section>
     </main>
@@ -284,6 +301,33 @@
       <small id="real-confirm-error" class="form-error" hidden></small>
       <div class="confirmation-actions"><button id="cancel-real-start" class="secondary-button" type="button">CANCELAR</button><button id="confirm-real-start" class="real-button" type="button">SIM, INICIAR EM REAL</button></div>
     </section>
+  </div>
+
+  <div id="nexus-governance-dialog" class="confirmation-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="nexus-governance-title">
+    <form id="nexus-governance-form" class="confirmation-card nexus-governance-dialog-card">
+      <div class="warning-icon">!</div>
+      <div class="eyebrow">AÇÃO HUMANA AUDITADA</div>
+      <h2 id="nexus-governance-title">Confirmar decisão NexusTrade</h2>
+      <p id="nexus-governance-summary">Revise o relatório, o diff e os gates antes de continuar.</p>
+      <label>Justificativa humana
+        <textarea id="nexus-governance-justification" required minlength="8" maxlength="512" placeholder="Explique a decisão com base no relatório semanal."></textarea>
+      </label>
+      <label>Credencial humana temporária
+        <input id="nexus-human-key" type="password" required autocomplete="off" spellcheck="false" placeholder="Não será armazenada">
+      </label>
+      <label id="nexus-rollback-target-field" hidden>Versão Champion para rollback
+        <select id="nexus-rollback-target"></select>
+      </label>
+      <label id="nexus-reinforced-field" class="nexus-reinforced-confirmation" hidden>
+        <input id="nexus-reinforced-confirmation" type="checkbox">
+        <span>Confirmo que li todos os gates falhos negociáveis e aceito a aprovação excepcional.</span>
+      </label>
+      <div id="nexus-governance-error" class="form-error" hidden></div>
+      <div class="confirmation-actions">
+        <button id="nexus-cancel-governance" type="button" class="secondary-button">CANCELAR</button>
+        <button id="nexus-submit-governance" type="submit" class="real-button">CONFIRMAR AÇÃO</button>
+      </div>
+    </form>
   </div>
 
   <div id="auth-gate" class="auth-gate" hidden>

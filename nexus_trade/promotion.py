@@ -963,10 +963,11 @@ class PromotionService:
             or type(progress.get("operations")) is not int
             or progress["operations"] < 300
             or progress.get("target") != 300
+            or type(progress.get("complete_days")) is not int
+            or progress["complete_days"] < 7
+            or progress.get("required_days") != 7
         ):
             raise PromotionRejected("INSUFFICIENT_SAMPLE")
-        if report_snapshot.get("complete_days", 0) < 7:
-            raise PromotionRejected("INSUFFICIENT_SEVEN_DAY_WINDOW")
         try:
             start = datetime.fromisoformat(report_snapshot["window"]["start_utc"])
             end = datetime.fromisoformat(report_snapshot["window"]["end_utc"])

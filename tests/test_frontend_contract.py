@@ -53,7 +53,7 @@ class FrontendContractTests(unittest.TestCase):
         for filename in (
             "api.js", "store.js", "chart.js", "app.js",
             "nexus_trade_api.js", "nexus_trade_store.js", "nexus_trade_view.js",
-            "nexus_trade_metrics.js",
+            "nexus_trade_metrics.js", "nexus_trade_diff.js",
         ):
             self.assertTrue(os.path.isfile(os.path.join(root, "static", "js", filename)))
 
@@ -103,6 +103,30 @@ class FrontendContractTests(unittest.TestCase):
         with open(os.path.join(root, "static", "styles.css"), encoding="utf-8") as stream:
             styles = stream.read()
         self.assertIn(".nexus-tabs button{flex:1;min-width:105px;min-height:44px}", styles)
+
+    def test_governance_dialog_keeps_human_credential_transient_and_explains_diff(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html_source = stream.read()
+        with open(os.path.join(root, "static", "js", "nexus_trade_view.js"), encoding="utf-8") as stream:
+            view_source = stream.read()
+
+        parser = LandmarkParser()
+        parser.feed(html_source)
+        self.assertTrue({
+            "nexus-evolution-diff", "nexus-approve", "nexus-reanalyze",
+            "nexus-rollback", "nexus-governance-dialog", "nexus-governance-form",
+            "nexus-governance-justification", "nexus-human-key",
+            "nexus-reinforced-confirmation", "nexus-rollback-target",
+        }.issubset(parser.ids))
+        human_key = parser.elements_by_id["nexus-human-key"]
+        self.assertEqual(human_key.get("type"), "password")
+        self.assertEqual(human_key.get("autocomplete"), "off")
+        self.assertNotIn("localStorage", view_source)
+        self.assertIn('humanKeyNode.value = ""', view_source)
+        with open(os.path.join(root, "static", "styles.css"), encoding="utf-8") as stream:
+            styles = stream.read()
+        self.assertIn(".nexus-reinforced-confirmation[hidden]{display:none!important}", styles)
 
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))

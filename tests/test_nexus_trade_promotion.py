@@ -52,8 +52,12 @@ class PromotionServiceTests(unittest.TestCase):
                 "start_utc": "2026-08-03T13:00:00+00:00",
                 "end_utc": "2026-08-10T13:00:00+00:00",
             },
-            "complete_days": 7,
-            "accumulated_progress": {"operations": 300, "target": 300},
+            "accumulated_progress": {
+                "operations": 300,
+                "target": 300,
+                "complete_days": 7,
+                "required_days": 7,
+            },
             "recommendation": recommendation,
             "gates": [
                 {"code": code, "status": "PASS", "observed": True,

@@ -5,6 +5,11 @@ import {
   reportLocationSearch,
   shiftAlignedWeek,
 } from "./nexus_trade_metrics.js";
+import {
+  buildDiff,
+  buildGovernancePayload,
+  evaluatePromotionReadiness,
+} from "./nexus_trade_diff.js";
 
 export function resolveDashboardView(botId) {
   return botId === NEXUS_BOT_ID ? "nexus" : "standard";
@@ -191,6 +196,64 @@ function renderReports(root, report) {
   if (gates) gates.innerHTML = view.gates.map((gate) => `<tr><td>${escapeHtml(gate.code)}</td><td><span class="nexus-gate-status ${escapeHtml(gate.status.toLowerCase())}">${escapeHtml(gate.status)}</span></td><td>${escapeHtml(`${gate.reason} · observado: ${evidenceLabel(gate.observed)} · limite: ${evidenceLabel(gate.threshold)}`)}</td></tr>`).join("");
 }
 
+function reportSnapshot(report) {
+  return report?.snapshot && typeof report.snapshot === "object" ? report.snapshot : report;
+}
+
+function reportDiffRows(report) {
+  const snapshot = reportSnapshot(report);
+  if (!snapshot || typeof snapshot !== "object") return [];
+  const diffs = snapshot.diffs || {};
+  return buildDiff(
+    {
+      configuration: diffs.configuration?.champion || snapshot.champion?.configuration || {},
+      feature_schema: snapshot.champion?.feature_schema || [],
+      entry_rules: diffs.entry_rules?.champion || snapshot.champion?.entry_rules || [],
+      model: diffs.model?.champion ?? snapshot.champion?.model,
+    },
+    {
+      configuration: diffs.configuration?.trial || snapshot.trial?.configuration || {},
+      feature_schema: snapshot.trial?.feature_schema || [],
+      entry_rules: diffs.entry_rules?.trial || snapshot.trial?.entry_rules || [],
+      model: diffs.model?.trial ?? snapshot.trial?.model,
+    },
+  );
+}
+
+function diffValue(value) {
+  if (value === null || value === undefined || value === false) return "—";
+  if (value === true) return "presente";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function renderGovernance(root, { store, report, proposal, versions }) {
+  const rows = reportDiffRows(report);
+  const body = root?.querySelector?.("#nexus-evolution-diff");
+  if (body) body.innerHTML = rows.length
+    ? rows.map((row) => `<tr><td>${escapeHtml(row.path)}</td><td><span class="nexus-diff-value ${row.before == null ? "empty" : ""}">${escapeHtml(diffValue(row.before))}</span></td><td><span class="nexus-diff-value ${row.after == null ? "empty" : ""}">${escapeHtml(diffValue(row.after))}</span></td><td>${escapeHtml(row.change)}</td></tr>`).join("")
+    : `<tr class="empty-row"><td colspan="4">Nenhuma mudança material declarada.</td></tr>`;
+  const families = [...new Set(rows.map((row) => row.family))];
+  setText(root, "#nexus-diff-family", families.length ? families.join(" · ") : "SEM MUDANÇA");
+
+  const snapshot = store?.get?.() || {};
+  const rawReport = reportSnapshot(report);
+  const readiness = evaluatePromotionReadiness({ snapshot, proposal, report: rawReport });
+  const approve = root?.querySelector?.("#nexus-approve");
+  const reanalyze = root?.querySelector?.("#nexus-reanalyze");
+  const rollback = root?.querySelector?.("#nexus-rollback");
+  if (approve) approve.disabled = !readiness.available;
+  if (reanalyze) reanalyze.disabled = !proposal || proposal.status !== "PENDING_USER_REVIEW" || !readiness.expectedRevision;
+  const currentChampion = (snapshot.lanes || []).find((lane) => lane?.lane === "champion_baseline")?.version?.id;
+  const rollbackTargets = (versions || []).filter((version) => version?.status === "CHAMPION" && version?.id !== currentChampion);
+  if (rollback) rollback.disabled = !readiness.expectedRevision || Boolean(snapshot.runtime?.champion_enabled) || rollbackTargets.length === 0;
+  setText(root, "#nexus-governance-reason", readiness.available
+    ? readiness.requiresReinforced
+      ? `Aprovação excepcional exige confirmação reforçada: ${readiness.failedGates.join(", ")}.`
+      : "Champion seguro e proposta elegível para decisão humana."
+    : readiness.reasons.join(" ") || "Aguardando proposta pendente e Champion seguro.");
+  return { readiness, rollbackTargets };
+}
+
 export function mountNexusTradeView({
   root = null,
   standardRoot = null,
@@ -205,6 +268,9 @@ export function mountNexusTradeView({
   let activeTab = locationState.tab;
   let selectedWeek = locationState.week;
   let selectedReport = null;
+  let proposals = [];
+  let versions = [];
+  let actionMode = null;
 
   const renderTabs = () => {
     for (const button of root?.querySelectorAll?.("[data-nexus-tab]") || []) {
@@ -220,6 +286,9 @@ export function mountNexusTradeView({
     renderOperational(root, buildNexusOperationalModel(store?.get?.() || {}, getAccount()));
     renderTabs();
     renderReports(root, selectedReport);
+    const report = reportSnapshot(selectedReport);
+    const proposal = proposals.find((item) => item?.status === "PENDING_USER_REVIEW" && (!report?.campaign_id || item?.campaign_id === report.campaign_id)) || null;
+    renderGovernance(root, { store, report: selectedReport, proposal, versions });
   };
   store?.subscribe?.(render);
 
@@ -243,7 +312,11 @@ export function mountNexusTradeView({
   const loadReports = async () => {
     if (!api) return;
     try {
-      const reports = await api.reports();
+      const [reports, fetchedProposals, fetchedVersions] = await Promise.all([
+        api.reports(), api.proposals(), api.versions(),
+      ]);
+      proposals = Array.isArray(fetchedProposals) ? fetchedProposals : [];
+      versions = Array.isArray(fetchedVersions) ? fetchedVersions : [];
       const weekly = (Array.isArray(reports) ? reports : [])
         .map((item) => ({ item, view: buildReportPresentation(item) }))
         .filter(({ view }) => view?.type === "weekly");
@@ -317,6 +390,115 @@ export function mountNexusTradeView({
     }
   };
 
+  const governanceContext = () => {
+    const report = reportSnapshot(selectedReport);
+    const proposal = proposals.find((item) => item?.status === "PENDING_USER_REVIEW" && (!report?.campaign_id || item?.campaign_id === report.campaign_id)) || null;
+    const rendered = renderGovernance(root, { store, report: selectedReport, proposal, versions });
+    return { report, proposal, ...rendered };
+  };
+
+  const closeGovernance = () => {
+    const dialog = globalThis.document?.querySelector?.("#nexus-governance-dialog");
+    if (dialog) dialog.hidden = true;
+    const humanKey = globalThis.document?.querySelector?.("#nexus-human-key");
+    const reason = globalThis.document?.querySelector?.("#nexus-governance-justification");
+    const reinforced = globalThis.document?.querySelector?.("#nexus-reinforced-confirmation");
+    const error = globalThis.document?.querySelector?.("#nexus-governance-error");
+    if (humanKey) humanKey.value = "";
+    if (reason) reason.value = "";
+    if (reinforced) reinforced.checked = false;
+    if (error) error.hidden = true;
+    actionMode = null;
+  };
+
+  const openGovernance = (mode) => {
+    const { proposal, readiness, rollbackTargets } = governanceContext();
+    if (mode === "approve" && !readiness.available) {
+      onToast(readiness.reasons.join(" ") || "A aprovação ainda está bloqueada.", "error");
+      return;
+    }
+    if (["approve", "reanalyze"].includes(mode) && !proposal) {
+      onToast("Não existe proposta pendente para esta campanha.", "error");
+      return;
+    }
+    if (mode === "rollback" && rollbackTargets.length === 0) {
+      onToast("Não existe versão Champion histórica elegível para rollback.", "error");
+      return;
+    }
+    actionMode = mode;
+    const dialog = globalThis.document?.querySelector?.("#nexus-governance-dialog");
+    const title = globalThis.document?.querySelector?.("#nexus-governance-title");
+    const summary = globalThis.document?.querySelector?.("#nexus-governance-summary");
+    const reinforcedField = globalThis.document?.querySelector?.("#nexus-reinforced-field");
+    const rollbackField = globalThis.document?.querySelector?.("#nexus-rollback-target-field");
+    const rollbackSelect = globalThis.document?.querySelector?.("#nexus-rollback-target");
+    if (title) title.textContent = ({ approve: "Aprovar evolução do Champion", reanalyze: "Enviar Trial à reanálise", rollback: "Reverter Champion" })[mode];
+    if (summary) summary.textContent = mode === "approve"
+      ? `A versão só mudará após commit do backend. Gates não aprovados: ${readiness.failedGates.join(", ") || "nenhum"}.`
+      : mode === "reanalyze" ? "A campanha visual será reiniciada, mas o aprendizado interno continuará governado."
+        : "O rollback cria uma transição auditada; nenhuma versão histórica será apagada.";
+    if (reinforcedField) reinforcedField.hidden = !(mode === "approve" && readiness.requiresReinforced);
+    if (rollbackField) rollbackField.hidden = mode !== "rollback";
+    if (rollbackSelect) rollbackSelect.innerHTML = rollbackTargets.map((version) => `<option value="${escapeHtml(version.id)}" data-version-hash="${escapeHtml(version.version_hash)}">${escapeHtml(version.id)}</option>`).join("");
+    if (dialog) dialog.hidden = false;
+    globalThis.document?.querySelector?.("#nexus-governance-justification")?.focus?.();
+  };
+
+  const submitGovernance = async (event) => {
+    event?.preventDefault?.();
+    if (!actionMode || !api || !store) return;
+    const humanKeyNode = globalThis.document?.querySelector?.("#nexus-human-key");
+    const reasonNode = globalThis.document?.querySelector?.("#nexus-governance-justification");
+    const reinforcedNode = globalThis.document?.querySelector?.("#nexus-reinforced-confirmation");
+    const submit = globalThis.document?.querySelector?.("#nexus-submit-governance");
+    const errorNode = globalThis.document?.querySelector?.("#nexus-governance-error");
+    const { proposal, readiness } = governanceContext();
+    const humanKey = String(humanKeyNode?.value || "");
+    if (humanKeyNode) humanKeyNode.value = "";
+    try {
+      if (actionMode === "approve" && readiness.requiresReinforced && reinforcedNode?.checked !== true) {
+        throw new Error("Marque a confirmação reforçada para aceitar os gates negociáveis falhos.");
+      }
+      const payload = buildGovernancePayload({
+        expectedRevision: readiness.expectedRevision,
+        reason: reasonNode?.value,
+        reinforcedConfirmation: actionMode === "approve" && reinforcedNode?.checked === true,
+      });
+      if (!humanKey.trim()) throw new Error("A credencial humana temporária é obrigatória.");
+      if (submit) submit.disabled = true;
+      let result;
+      if (actionMode === "approve") result = await api.approve(proposal.id, payload, humanKey);
+      else if (actionMode === "reanalyze") result = await api.reanalyze(proposal.id, payload, humanKey);
+      else {
+        const target = globalThis.document?.querySelector?.("#nexus-rollback-target")?.selectedOptions?.[0];
+        result = await api.rollback({
+          ...payload,
+          target_version_id: target?.value || "",
+          target_version_hash: target?.dataset?.versionHash || "",
+        }, humanKey);
+      }
+      if (result?.snapshot) store.hydrate(result.snapshot);
+      const transition = result?.transition || {};
+      setText(root, "#nexus-governance-result", `Ação confirmada · ${transition.audit_id || transition.request_id || transition.outcome || "auditada"}`);
+      closeGovernance();
+      await loadReports();
+      onToast("Decisão NexusTrade confirmada pelo backend.");
+    } catch (error) {
+      if (error?.status === 409) {
+        try { store.hydrate(await api.snapshot()); } catch { /* original conflict remains visible */ }
+        await loadReports();
+      }
+      if (errorNode) { errorNode.textContent = error.message || "Falha na ação governada."; errorNode.hidden = false; }
+      onToast(error.message || "Falha na ação governada.", "error");
+    } finally {
+      if (humanKeyNode) humanKeyNode.value = "";
+      if (submit) submit.disabled = false;
+    }
+  };
+
+  globalThis.document?.querySelector?.("#nexus-governance-form")?.addEventListener?.("submit", submitGovernance);
+  globalThis.document?.querySelector?.("#nexus-cancel-governance")?.addEventListener?.("click", closeGovernance);
+
   root?.addEventListener?.("click", (event) => {
     const tab = event.target?.closest?.("[data-nexus-tab]")?.dataset?.nexusTab;
     if (tab) openTab(tab);
@@ -324,6 +506,7 @@ export function mountNexusTradeView({
     if (action === "champion-toggle") handleToggle();
     if (action === "emergency-stop") handleEmergency();
     if (action === "open-evolution") { openTab("evolution"); onOpenEvolution(); }
+    if (["approve", "reanalyze", "rollback"].includes(action)) openGovernance(action);
     if (["previous-week", "next-week"].includes(action)) {
       const target = shiftAlignedWeek(selectedWeek, action === "previous-week" ? -1 : 1);
       if (target) {
