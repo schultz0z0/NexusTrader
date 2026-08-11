@@ -176,8 +176,44 @@ class NexusModels:
             id TEXT PRIMARY KEY,
             actor TEXT NOT NULL,
             action TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            request_id TEXT NOT NULL DEFAULT '',
+            expected_revision INTEGER,
+            actual_revision INTEGER,
+            outcome TEXT NOT NULL DEFAULT 'COMMITTED',
             before_json TEXT NOT NULL DEFAULT '{}',
             after_json TEXT NOT NULL DEFAULT '{}',
+            hashes_json TEXT NOT NULL DEFAULT '{}',
+            error_code TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS nexus_transition_requests (
+            action TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(action, request_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS nexus_event_outbox (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL CHECK (event_type IN (
+                'nexus.proposal', 'nexus.version_changed', 'nexus.trial_changed',
+                'nexus.campaign', 'nexus.runtime'
+            )),
+            snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+            payload TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS nexus_trial_boundaries (
+            boundary_utc TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            result_json TEXT NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 

@@ -1,0 +1,40 @@
+# Task 9 — promoção humana, reanálise, rotação Trial e rollback
+
+Data: 2026-08-10
+Branch: `feature/nexustrade-learning`
+Escopo: transições governadas e transacionais do NexusTrade. Nenhuma promoção automática, operação REAL ou integração Deriv foi adicionada.
+
+## RED → GREEN
+
+- Aprovação começou com `ModuleNotFoundError: nexus_trade.promotion`; o RED seguinte demonstrou que uma proposta ainda inválida era aceita antes das validações completas.
+- Injeção de falha começou com construtor sem suporte ao injetor; o GREEN provou rollback integral após a troca local de pointer, sem evento falso de sucesso.
+- Reanálise, rotação Trial e rollback começaram com `AttributeError` para os métodos ainda ausentes e ganharam REDs incrementais antes de cada implementação.
+- A API começou em `404`; as rotas finas passaram a exigir a autenticação já aplicada ao router e delegar ao serviço transacional.
+- O replay de `request_id` inicialmente colidia com a revisão já consumida; o GREEN tornou o replay idêntico idempotente e o reuso com entrada diferente um conflito auditado.
+- Um relatório `EVOLVE` com manifesto incompleto chegou a ser aceito; o último RED passou a exigir o conjunto exato de 19 gates e seus campos governados.
+
+## Garantias implementadas
+
+- `approve` exige ator humano autenticado, motivo, `request_id`, CAS de `config_revision`, Champion `OFF` e revalida dentro de `BEGIN IMMEDIATE` que a lane Champion não possui estado reservado/ativo/quarentenado, intent não resolvido ou contrato aberto.
+- A aprovação valida proposta pendente, campanha e Trial correntes, relatório semanal alinhado, sete dias, 300 decisões, recomendação, gates duros, hashes canônicos e identidade exata de relatório, candidato, artifact, config, dataset, provenance e versão. O Champion nunca é promovido automaticamente.
+- A transação cria nova versão/snapshot Champion imutável e troca o pointer atomicamente; a versão anterior e todo o histórico permanecem preservados. Auditoria e outbox são gravados na mesma transação e eventos só são entregues depois do commit.
+- `reanalyze` nunca altera Champion ou evidência congelada: fecha proposta/campanha e inicia a campanha Trial pretendida em `0/300`, preservando histórico e aprendizagem.
+- A rotação Trial ocorre somente no instante exato de segunda-feira, 10:00, `America/Sao_Paulo`. Exige candidato SHADOW qualificado e ausência de proposta pendente; caso contrário preserva o progresso. A troca A→B é atômica, idempotente e segura sob concorrência, marca A como `SUPERSEDED`, inicia B em zero e nunca toca Champion/REAL.
+- `rollback` é explícito e humano, usa a mesma barreira de segurança, CAS, `request_id` e validação de hash/snapshot. Reaponta para uma versão Champion preservada, sem apagar a versão degradada, e sobrevive a restart.
+- Toda tentativa coberta — commit, replay, rejeição, conflito e falha injetada — deixa auditoria sanitizada com ator, motivo, request, revisões, antes/depois, hashes, resultado e erro, sem secrets.
+- Outbox e IDs de evento são determinísticos. As rotas publicam somente após commit e retornam snapshot durável de reparo consistente.
+- Migração aditiva atualiza banco legado sem perder auditoria e é segura para repetição.
+
+## Evidência final
+
+- Focado promoção/governança: `python -m unittest tests.test_nexus_trade_promotion -v` — **21/21**, 3,726 s.
+- Integração Task 6–9 (promoção, API, relatórios, gates, learning, runtime e repository) — **123/123**, 18,305 s; o teste adicional do manifesto exato também está incluído no full final.
+- Regressões protegidas (`donchian_profile`, `nexus_speed`, `nexus_speed_runtime`, `control_plane`, `repository`) — **78/78**, 3,857 s.
+- Full Python: `python -m unittest discover -s tests -v` — **419/419**, 38,216 s.
+- JavaScript: `node --test tests/js/*.test.mjs` — **17/17**.
+- `python -m compileall -q api backtest core data database nexus_trade risk strategies trading` — exit 0.
+- `python -m pip check` — `No broken requirements found.`
+- `git diff --check` — exit 0.
+- Diff dos arquivos protegidos `strategies/donchian_zigzag.py`, `utils/indicators.py` e `strategies/nexus_speed.py` — vazio.
+- Único aviso: `StarletteDeprecationWarning` preexistente do FastAPI TestClient/httpx.
+- Nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.

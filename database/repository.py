@@ -44,6 +44,7 @@ class DatabaseRepository:
             await self._migrate_nexus_runtime(db)
             await self._migrate_nexus_reports(db)
             await db.executescript(NexusModels.create_tables_sql())
+            await self._migrate_nexus_governance(db)
             await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -295,6 +296,26 @@ class DatabaseRepository:
         for name in ("report_type", "window_start_utc", "window_end_utc"):
             if name not in columns:
                 await db.execute(f"ALTER TABLE nexus_reports ADD COLUMN {name} TEXT")
+
+    @staticmethod
+    async def _migrate_nexus_governance(db):
+        """Extend pre-Task-9 audit rows without rewriting their history."""
+        async with db.execute("PRAGMA table_info(nexus_audit_events)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        definitions = {
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "request_id": "TEXT NOT NULL DEFAULT ''",
+            "expected_revision": "INTEGER",
+            "actual_revision": "INTEGER",
+            "outcome": "TEXT NOT NULL DEFAULT 'COMMITTED'",
+            "hashes_json": "TEXT NOT NULL DEFAULT '{}'",
+            "error_code": "TEXT",
+        }
+        for name, definition in definitions.items():
+            if name not in columns:
+                await db.execute(
+                    f"ALTER TABLE nexus_audit_events ADD COLUMN {name} {definition}"
+                )
 
     @staticmethod
     async def _migrate_nexus_runtime(db):

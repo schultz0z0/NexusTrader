@@ -7,6 +7,7 @@ from api.websocket_manager import ws_manager
 from config.settings import settings
 from core.events import runtime_event
 from nexus_trade.constants import NEXUS_DEMO_STAKE, NEXUS_TRADE_BOT_ID
+from nexus_trade.promotion import PromotionConflict, PromotionRejected, PromotionService
 
 
 router = APIRouter(prefix="/api/v1/nexus-trade", tags=["NexusTrade"])
@@ -26,6 +27,19 @@ class EmergencyStopPayload(BaseModel):
 class NexusRealConfirmationPayload(BaseModel):
     account_id: str = Field(min_length=1)
     phrase: str
+
+
+class PromotionActionPayload(BaseModel):
+    expected_revision: int = Field(ge=1)
+    actor: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=512)
+    reinforced_confirmation: bool = False
+
+
+class RollbackPayload(PromotionActionPayload):
+    target_version_id: str = Field(min_length=1, max_length=256)
+    target_version_hash: str = Field(min_length=64, max_length=64)
 
 
 def _repo(request: Request):
@@ -52,6 +66,31 @@ async def _publish_runtime_snapshot(request: Request) -> dict:
     if request.app.state.live_store.apply(event):
         await ws_manager.broadcast(NEXUS_TRADE_BOT_ID, event)
     return request.app.state.live_store.snapshot(NEXUS_TRADE_BOT_ID)
+
+
+async def _publish_governed_transition(request: Request, transition: dict) -> dict:
+    """Apply only events returned by an already committed governance transaction."""
+    for raw_event in transition.get("events", []):
+        event = request.app.state.live_store.sanitize_event(raw_event)
+        if event is not None and request.app.state.live_store.apply(event):
+            await ws_manager.broadcast(NEXUS_TRADE_BOT_ID, event)
+    snapshot = await _snapshot(request)
+    public_transition = request.app.state.live_store.sanitize_event(
+        {key: value for key, value in transition.items() if key != "events"}
+    )
+    return {"transition": public_transition, "snapshot": snapshot}
+
+
+async def _governed_call(request: Request, operation):
+    try:
+        transition = await operation
+    except PromotionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except PromotionRejected as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"status": "success", "data": await _publish_governed_transition(request, transition)}
 
 
 def _real_ticket_bot(bot: dict, account_id: str) -> dict:
@@ -196,6 +235,53 @@ async def report_detail(report_id: str, request: Request):
 @router.get("/proposals")
 async def proposals(request: Request):
     return await _list_response(request, "list_nexus_proposals")
+
+
+@router.post("/proposals/{proposal_id}/approve")
+async def approve_proposal(proposal_id: str, payload: PromotionActionPayload, request: Request):
+    service = PromotionService(_repo(request).db_path)
+    return await _governed_call(
+        request,
+        service.approve(
+            proposal_id,
+            payload.expected_revision,
+            payload.actor,
+            request_id=payload.request_id,
+            reason=payload.reason,
+            reinforced_confirmation=payload.reinforced_confirmation,
+        ),
+    )
+
+
+@router.post("/proposals/{proposal_id}/reanalyze")
+async def reanalyze_proposal(proposal_id: str, payload: PromotionActionPayload, request: Request):
+    service = PromotionService(_repo(request).db_path)
+    return await _governed_call(
+        request,
+        service.reanalyze(
+            proposal_id,
+            payload.expected_revision,
+            payload.actor,
+            request_id=payload.request_id,
+            reason=payload.reason,
+        ),
+    )
+
+
+@router.post("/rollback")
+async def rollback_champion(payload: RollbackPayload, request: Request):
+    service = PromotionService(_repo(request).db_path)
+    return await _governed_call(
+        request,
+        service.rollback(
+            payload.target_version_id,
+            payload.expected_revision,
+            payload.actor,
+            target_version_hash=payload.target_version_hash,
+            request_id=payload.request_id,
+            reason=payload.reason,
+        ),
+    )
 
 
 @router.get("/exports")
