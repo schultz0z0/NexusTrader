@@ -575,6 +575,13 @@ class NexusTradeRuntime:
             if self._versions[lane] is not None
             and self._versions[lane] != next_versions.get(lane)
         }
+        gate_changes = {
+            lane
+            for lane in Lane
+            if getattr(self.strategies[lane].gate, "artifact_hash", None)
+            != getattr(next_gates.get(lane), "artifact_hash", None)
+        }
+        strategy_changes = version_changes | gate_changes
         if (
             (
                 route_changes
@@ -582,7 +589,7 @@ class NexusTradeRuntime:
             )
             or any(
                 self.strategies[lane].state.position_status != "IDLE"
-                for lane in version_changes
+                for lane in strategy_changes
             )
         ):
             self._pending_runtime_snapshot = snapshot
@@ -590,7 +597,10 @@ class NexusTradeRuntime:
 
         # Commit the route only after all validation/factory work succeeds.
         for lane in Lane:
-            if self._versions[lane] != next_versions.get(lane):
+            if (
+                self._versions[lane] != next_versions.get(lane)
+                or lane in gate_changes
+            ):
                 self.strategies[lane] = NexusTradeStrategy(
                     lane=lane,
                     state=self.strategies[lane].state,

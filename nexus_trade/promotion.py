@@ -916,6 +916,15 @@ class PromotionService:
             raise PromotionRejected("CANDIDATE_NOT_FROZEN_TRIAL")
         try:
             artifact = CandidateArtifact.from_json(candidate["metadata"])
+            artifact.executable_gate()
+            if (
+                candidate["id"] != f"candidate-{artifact.artifact_hash[:24]}"
+                or candidate["artifact_hash"] != artifact.artifact_hash
+                or candidate["metadata"] != artifact.to_json()
+            ):
+                raise ArtifactIntegrityError(
+                    "candidate row does not match its executable artifact",
+                )
         except (ArtifactIntegrityError, TypeError, ValueError) as exc:
             raise PromotionRejected("ARTIFACT_CORRUPT") from exc
         trial_report = report_snapshot.get("trial")

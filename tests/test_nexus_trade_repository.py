@@ -1,4 +1,7 @@
 import asyncio
+import asyncio
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,8 +11,10 @@ import aiosqlite
 from database.repository import DatabaseRepository
 from database.models import DatabaseModels
 from nexus_trade.constants import NEXUS_TRADE_BOT_ID
+from nexus_trade.artifacts import canonical_json
 from nexus_trade.domain import CampaignStatus, Lane, VersionStatus
 from nexus_trade.repository import NexusTradeRepository, NexusTradeSingletonError
+from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
 
 class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -21,6 +26,31 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.temp_dir.cleanup()
+
+    async def _seed_shared_v1_legacy(self, db_path: str, campaign_id: str) -> str:
+        repository = DatabaseRepository(db_path)
+        nexus = NexusTradeRepository(db_path)
+        await repository.init_db()
+        snapshot = await nexus.get_runtime_snapshot()
+        champion_id = snapshot["runtime"]["champion_version_id"]
+        trial_id = snapshot["runtime"]["trial_version_id"]
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "DELETE FROM nexus_campaigns WHERE lane = ? AND status = 'ACTIVE'",
+                (Lane.TRIAL.value,),
+            )
+            await db.execute(
+                "UPDATE nexus_runtime SET trial_version_id = ? WHERE bot_id = ?",
+                (champion_id, NEXUS_TRADE_BOT_ID),
+            )
+            await db.execute("DELETE FROM nexus_versions WHERE id = ?", (trial_id,))
+            await db.execute(
+                "INSERT INTO nexus_campaigns (id,lane,nexus_version_id,status) "
+                "VALUES (?,?,?,'ACTIVE')",
+                (campaign_id, Lane.TRIAL.value, champion_id),
+            )
+            await db.commit()
+        return champion_id
 
     async def test_init_provisions_exactly_one_nexus_trade(self):
         await self.repo.init_db()
@@ -97,6 +127,83 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             migrated["active_campaigns"][0]["nexus_version_id"], trial["id"],
         )
+
+    async def test_post_governance_legacy_campaign_ids_migrate_and_survive_restart(self):
+        for campaign_id in (
+            "trial-reanalyze-review-123456789abc",
+            "trial-after-approve-123456789abc",
+        ):
+            with self.subTest(campaign_id=campaign_id), tempfile.TemporaryDirectory() as directory:
+                db_path = str(Path(directory) / "post-governance-legacy.db")
+                champion_id = await self._seed_shared_v1_legacy(db_path, campaign_id)
+
+                try:
+                    await DatabaseRepository(db_path).init_db()
+                except NexusTradeSingletonError as exc:
+                    self.fail(f"valid post-governance legacy state was rejected: {exc}")
+                migrated = await NexusTradeRepository(db_path).get_runtime_snapshot()
+
+                self.assertEqual(migrated["runtime"]["champion_version_id"], champion_id)
+                self.assertNotEqual(migrated["runtime"]["trial_version_id"], champion_id)
+                self.assertEqual(migrated["active_campaigns"][0]["id"], campaign_id)
+                self.assertEqual(
+                    migrated["active_campaigns"][0]["nexus_version_id"],
+                    migrated["runtime"]["trial_version_id"],
+                )
+
+                restarted_repository = DatabaseRepository(db_path)
+                restarted_nexus = NexusTradeRepository(db_path)
+                await restarted_repository.init_db()
+                restarted = await restarted_nexus.get_runtime_snapshot()
+                self.assertEqual(restarted["runtime"], migrated["runtime"])
+                self.assertEqual(restarted["active_campaigns"], migrated["active_campaigns"])
+
+    async def test_post_governance_legacy_migration_rolls_back_atomically(self):
+        campaign_id = "trial-after-rollback-123456789abc"
+        champion_id = await self._seed_shared_v1_legacy(self.db_path, campaign_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executescript(
+                """
+                CREATE TRIGGER abort_post_governance_legacy_migration
+                BEFORE UPDATE OF trial_version_id ON nexus_runtime
+                WHEN OLD.trial_version_id != NEW.trial_version_id
+                BEGIN SELECT RAISE(ABORT, 'forced legacy migration failure'); END;
+                """
+            )
+            await db.commit()
+
+        try:
+            await DatabaseRepository(self.db_path).init_db()
+        except aiosqlite.IntegrityError:
+            pass
+        except NexusTradeSingletonError as exc:
+            self.fail(f"migration did not reach the transactional update: {exc}")
+        else:
+            self.fail("injected legacy migration failure was not raised")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            runtime = await (await db.execute(
+                "SELECT trial_version_id FROM nexus_runtime WHERE bot_id = ?",
+                (NEXUS_TRADE_BOT_ID,),
+            )).fetchone()
+            campaign = await (await db.execute(
+                "SELECT id,nexus_version_id FROM nexus_campaigns "
+                "WHERE lane = ? AND status = 'ACTIVE'",
+                (Lane.TRIAL.value,),
+            )).fetchone()
+            trial_version_count = await (await db.execute(
+                "SELECT COUNT(*) FROM nexus_versions WHERE status = 'TRIAL'",
+            )).fetchone()
+            self.assertEqual(runtime[0], champion_id)
+            self.assertEqual(tuple(campaign), (campaign_id, champion_id))
+            self.assertEqual(trial_version_count[0], 0)
+            await db.execute("DROP TRIGGER abort_post_governance_legacy_migration")
+            await db.commit()
+
+        await DatabaseRepository(self.db_path).init_db()
+        restarted = await NexusTradeRepository(self.db_path).get_runtime_snapshot()
+        self.assertNotEqual(restarted["runtime"]["trial_version_id"], champion_id)
+        self.assertEqual(restarted["active_campaigns"][0]["id"], campaign_id)
 
     async def test_snapshot_and_reinitialization_reject_wrong_role_pointers(self):
         for pointer, source_lane in (
@@ -199,6 +306,126 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     await nexus.get_runtime_snapshot()
                 with self.assertRaises(NexusTradeSingletonError):
                     await repository.init_db()
+
+    async def test_wal_snapshot_stays_on_one_revision_during_atomic_trial_rotation(self):
+        await self.repo.init_db()
+        artifact = ArtifactAndRegistryTests.artifact("concurrent-trial-snapshot")
+        candidate_id = f"candidate-{artifact.artifact_hash[:24]}"
+        version_snapshot = {
+            "schema_version": 1,
+            "candidate_id": candidate_id,
+            "artifact": json.loads(artifact.to_json()),
+            "trial_selection": {"request_id": "concurrent-rotation"},
+        }
+        encoded = canonical_json(version_snapshot)
+        version_hash = hashlib.sha256(
+            b"nexus-trial-version-v1\0" + encoded.encode("utf-8")
+        ).hexdigest()
+        version_id = f"nexus-trial-{version_hash[:16]}"
+        campaign_id = f"trial-{version_hash[:16]}-concurrent"
+
+        class PausingSnapshotRepository(NexusTradeRepository):
+            after_champion = asyncio.Event()
+            resume_reader = asyncio.Event()
+            paused = False
+
+            @classmethod
+            async def _validated_version(cls, db, version, *, lane):
+                result = await super()._validated_version(db, version, lane=lane)
+                if lane is Lane.CHAMPION and not cls.paused:
+                    cls.paused = True
+                    cls.after_champion.set()
+                    await cls.resume_reader.wait()
+                return result
+
+        reader = PausingSnapshotRepository(self.db_path)
+        reader_task = asyncio.create_task(reader.get_runtime_snapshot())
+        await asyncio.wait_for(PausingSnapshotRepository.after_champion.wait(), timeout=1)
+
+        async with aiosqlite.connect(self.db_path, timeout=1.0) as writer:
+            await writer.execute("PRAGMA foreign_keys=ON")
+            await writer.execute("BEGIN IMMEDIATE")
+            await writer.execute(
+                "INSERT INTO nexus_candidates "
+                "(id,nexus_version_id,artifact_hash,status,metadata) "
+                "VALUES (?,?,?,'TRIAL',?)",
+                (candidate_id, version_id, artifact.artifact_hash, artifact.to_json()),
+            )
+            await writer.execute(
+                "INSERT INTO nexus_versions(id,name,status,version_hash,snapshot) "
+                "VALUES (?,?,'TRIAL',?,?)",
+                (version_id, "Concurrent Trial", version_hash, encoded),
+            )
+            await writer.execute(
+                "UPDATE nexus_campaigns SET status='SUPERSEDED',ended_at=CURRENT_TIMESTAMP "
+                "WHERE lane=? AND status='ACTIVE'",
+                (Lane.TRIAL.value,),
+            )
+            await writer.execute(
+                "INSERT INTO nexus_campaigns(id,lane,nexus_version_id,status) "
+                "VALUES (?,?,?,'ACTIVE')",
+                (campaign_id, Lane.TRIAL.value, version_id),
+            )
+            await writer.execute(
+                "UPDATE nexus_runtime SET trial_version_id=? WHERE bot_id=?",
+                (version_id, NEXUS_TRADE_BOT_ID),
+            )
+            await writer.execute(
+                "UPDATE bot_instances SET config_revision=config_revision+1 WHERE id=?",
+                (NEXUS_TRADE_BOT_ID,),
+            )
+            await asyncio.wait_for(writer.commit(), timeout=1)
+
+        PausingSnapshotRepository.resume_reader.set()
+        try:
+            snapshot = await asyncio.wait_for(reader_task, timeout=1)
+        except NexusTradeSingletonError as exc:
+            self.fail(f"WAL reader mixed atomic rotation revisions: {exc}")
+
+        trial = next(
+            item["version"] for item in snapshot["lanes"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        self.assertEqual(trial["id"], snapshot["runtime"]["trial_version_id"])
+        self.assertEqual(
+            snapshot["active_campaigns"][0]["nexus_version_id"], trial["id"],
+        )
+        latest = await NexusTradeRepository(self.db_path).get_runtime_snapshot()
+        self.assertEqual(latest["runtime"]["trial_version_id"], version_id)
+        self.assertEqual(latest["active_campaigns"][0]["id"], campaign_id)
+
+    async def test_cancelled_wal_snapshot_releases_its_read_transaction(self):
+        await self.repo.init_db()
+
+        class CancellingSnapshotRepository(NexusTradeRepository):
+            reader_started = asyncio.Event()
+            never_resume = asyncio.Event()
+
+            @classmethod
+            async def _validated_version(cls, db, version, *, lane):
+                result = await super()._validated_version(db, version, lane=lane)
+                if lane is Lane.CHAMPION:
+                    cls.reader_started.set()
+                    await cls.never_resume.wait()
+                return result
+
+        task = asyncio.create_task(
+            CancellingSnapshotRepository(self.db_path).get_runtime_snapshot(),
+        )
+        await asyncio.wait_for(
+            CancellingSnapshotRepository.reader_started.wait(), timeout=1,
+        )
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        async with aiosqlite.connect(self.db_path, timeout=1.0) as writer:
+            await asyncio.wait_for(writer.execute("BEGIN IMMEDIATE"), timeout=1)
+            await writer.execute(
+                "UPDATE nexus_runtime SET updated_at=updated_at WHERE bot_id=?",
+                (NEXUS_TRADE_BOT_ID,),
+            )
+            await asyncio.wait_for(writer.rollback(), timeout=1)
 
     async def test_fresh_repository_has_separate_active_campaign_provenance_for_both_lanes(self):
         await self.repo.init_db()

@@ -890,6 +890,58 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
+    async def test_restart_active_trial_installs_its_exact_gate_after_safe_settlement(self):
+        artifact = ArtifactAndRegistryTests.artifact("restart-active-trial")
+        snapshot = self.executable_snapshot(trial_artifact=artifact)
+        snapshot["runtime"]["trial_version_id"] = "trial-v2"
+        snapshot["lanes"][1]["version"]["id"] = "trial-v2"
+        decision_id = "restart-gated-trial"
+        self.repository.restored_states = {
+            Lane.TRIAL.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id=decision_id,
+                contract_id=929,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.TRIAL.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
+        self.repository.recovery_intents = [{
+            "id": f"nexus-{decision_id}",
+            "lane": Lane.TRIAL.value,
+            "decision_id": decision_id,
+            "nexus_version_id": "trial-v2",
+            "campaign_id": "campaign-1",
+            "metadata": {},
+        }]
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(runtime_snapshot=snapshot, cycle_source=source)
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+        self.assertEqual(runtime._versions[Lane.TRIAL], "trial-v2")
+        self.assertEqual(runtime.strategies[Lane.TRIAL].state.contract_id, 929)
+
+        await runtime.settle_contract(Lane.TRIAL, decision_id, {
+            "contract_id": 929,
+            "contract_type": "CALL",
+            "status": "won",
+            "buy_price": 0.35,
+            "payout": 0.67,
+            "profit": 0.32,
+        })
+
+        self.assertEqual(runtime.strategies[Lane.TRIAL].state.position_status, "IDLE")
+        self.assertIsNotNone(runtime.strategies[Lane.TRIAL].gate)
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].gate.artifact_hash,
+            artifact.artifact_hash,
+        )
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
     async def test_restart_fails_closed_when_non_idle_owner_identity_is_missing(self):
         self.repository.restored_states = {
             Lane.CHAMPION.value: SetupState(

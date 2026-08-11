@@ -248,6 +248,133 @@ class PromotionServiceTests(unittest.TestCase):
         self.assertTrue(all(row[1].startswith(f"nexus.") for row in outbox))
         self.assertTrue(all(row[2] == result["snapshot_version"] for row in outbox))
 
+    def test_approve_rejects_hash_bound_legacy_trial_before_any_governance_mutation(self):
+        import hashlib
+
+        artifact = ArtifactAndRegistryTests.artifact("legacy-trial-approval")
+        legacy_metadata = json.loads(artifact.to_json())["metadata"]
+        legacy_metadata["schema_version"] = 1
+        legacy_metadata.pop("fitted_model")
+        legacy_metadata["model"]["serialization"] = (
+            "retrain_from_content_addressed_dataset"
+        )
+        legacy = CandidateArtifact.create(legacy_metadata)
+        candidate = CandidateRegistry(self.db_path).register(legacy)
+        before = self.snapshot()
+        campaign_id = next(
+            row["id"] for row in before["active_campaigns"]
+            if row["lane"] == "challenger_trial"
+        )
+        trial_version = next(
+            item["version"] for item in before["lanes"]
+            if item["lane"] == "challenger_trial"
+        )
+        report_snapshot = {
+            "schema_version": 1,
+            "report_type": "weekly",
+            "campaign_id": campaign_id,
+            "window": {
+                "start_utc": "2026-08-03T13:00:00+00:00",
+                "end_utc": "2026-08-10T13:00:00+00:00",
+            },
+            "complete_days": 7,
+            "accumulated_progress": {"operations": 300, "target": 300},
+            "recommendation": "EVOLVE",
+            "gates": [
+                {"code": code, "status": "PASS", "observed": True,
+                 "threshold": True, "reason": "verified"}
+                for code in (
+                    "MINIMUM_SAMPLE", "DATA_INTEGRITY", "COMPARABLE_PROVENANCE",
+                    "TRIAL_EXPECTANCY_POSITIVE", "PROFIT_FACTOR",
+                    "EXPECTANCY_IMPROVEMENT", "BLOCK_BOOTSTRAP_95", "DRAWDOWN",
+                    "RECOVERY", "WORST_ROLLING_50", "LOSS_STREAK", "RISK_LIMITS",
+                    "DAILY_STABILITY", "RECENT_STABILITY", "REGIME_STABILITY",
+                    "DSR", "PBO", "SENSITIVITY", "CHANGE_BUDGET",
+                )
+            ],
+            "trial": {
+                "version_id": trial_version["id"],
+                "version_hash": trial_version["version_hash"],
+                "artifact_hash": legacy.artifact_hash,
+                "metadata_hash": legacy.metadata_hash,
+                "configuration_hash": legacy.metadata["configuration_hash"],
+                "dataset_hash": legacy.metadata["dataset_hash"],
+                "provenance_hash": legacy.metadata["provenance_hash"],
+            },
+        }
+        report_json = canonical_json(report_snapshot)
+        report_hash = hashlib.sha256(
+            b"nexus-report-json-v1\0" + report_json.encode("utf-8")
+        ).hexdigest()
+        report_id = f"report-{report_hash[:24]}"
+        proposal_id = f"proposal-{report_hash[:24]}"
+        proposal_payload = {
+            "report_id": report_id,
+            "report_hash": report_hash,
+            "candidate_id": candidate["id"],
+            "candidate_hash": legacy.artifact_hash,
+            "artifact_hash": legacy.artifact_hash,
+            "metadata_hash": legacy.metadata_hash,
+            "configuration_hash": legacy.metadata["configuration_hash"],
+            "dataset_hash": legacy.metadata["dataset_hash"],
+            "provenance_hash": legacy.metadata["provenance_hash"],
+            "trial_version_id": trial_version["id"],
+            "trial_version_hash": trial_version["version_hash"],
+            "campaign_id": campaign_id,
+        }
+
+        trial_version_id = before["runtime"]["trial_version_id"]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO nexus_reports "
+                "(id,campaign_id,report_hash,snapshot,report_type,window_start_utc,window_end_utc) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (report_id, campaign_id, report_hash, report_json, "weekly",
+                 "2026-08-03T13:00:00+00:00", "2026-08-10T13:00:00+00:00"),
+            )
+            db.execute(
+                "INSERT INTO nexus_proposals "
+                "(id,campaign_id,nexus_version_id,revision,status,payload) "
+                "VALUES (?,?,?,?,?,?)",
+                (proposal_id, campaign_id, trial_version_id, 1,
+                 "PENDING_USER_REVIEW", canonical_json(proposal_payload)),
+            )
+            version_count = db.execute("SELECT COUNT(*) FROM nexus_versions").fetchone()[0]
+            db.commit()
+
+        with self.assertRaisesRegex(PromotionRejected, "ARTIFACT_CORRUPT"):
+            asyncio.run(self.service.approve(
+                proposal_id,
+                before["snapshot_version"],
+                "human:operator",
+                request_id="approve-legacy-trial",
+                reason="legacy trial must not become Champion",
+            ))
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            runtime = db.execute(
+                "SELECT champion_version_id FROM nexus_runtime WHERE bot_id='nexus-trade'",
+            ).fetchone()
+            proposal_status = db.execute(
+                "SELECT status FROM nexus_proposals WHERE id=?", (proposal_id,),
+            ).fetchone()[0]
+            audit = db.execute(
+                "SELECT outcome,error_code FROM nexus_audit_events "
+                "WHERE request_id='approve-legacy-trial'",
+            ).fetchone()
+            after_version_count = db.execute(
+                "SELECT COUNT(*) FROM nexus_versions",
+            ).fetchone()[0]
+            outbox_count = db.execute(
+                "SELECT COUNT(*) FROM nexus_event_outbox WHERE request_id=?",
+                ("approve-legacy-trial",),
+            ).fetchone()[0]
+        self.assertEqual(runtime[0], before["runtime"]["champion_version_id"])
+        self.assertEqual(proposal_status, "PENDING_USER_REVIEW")
+        self.assertEqual(audit, ("REJECTED", "ARTIFACT_CORRUPT"))
+        self.assertEqual(after_version_count, version_count)
+        self.assertEqual(outbox_count, 0)
+
     def test_approve_revalidates_every_champion_ownership_barrier(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
         version_id = before["runtime"]["champion_version_id"]

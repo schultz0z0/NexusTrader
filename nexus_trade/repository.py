@@ -109,6 +109,7 @@ class NexusTradeRepository:
             (trial_id, trial_hash),
         ) as trial_cursor:
             trial_versions = await trial_cursor.fetchall()
+        trial_v1_was_missing = not trial_versions
         if trial_versions:
             if len(trial_versions) != 1:
                 raise NexusTradeSingletonError("Trial V1 identity is ambiguous")
@@ -149,6 +150,7 @@ class NexusTradeRepository:
                 db,
                 champion_version_id=version_id,
                 trial_version_id=trial_id,
+                trial_v1_was_missing=trial_v1_was_missing,
             )
         return await cls._snapshot_from_connection(db)
 
@@ -236,26 +238,32 @@ class NexusTradeRepository:
         *,
         champion_version_id: str,
         trial_version_id: str,
+        trial_v1_was_missing: bool,
     ) -> None:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM nexus_runtime WHERE bot_id = ?", (NEXUS_TRADE_BOT_ID,),
         ) as cursor:
             runtime = await cursor.fetchone()
-        if runtime is None or runtime["trial_version_id"] != champion_version_id:
+        if (
+            not trial_v1_was_missing
+            or runtime is None
+            or runtime["trial_version_id"] != champion_version_id
+        ):
             return
         async with db.execute(
             "SELECT * FROM nexus_campaigns WHERE lane = ? AND status = ?",
             (Lane.TRIAL.value, CampaignStatus.ACTIVE.value),
         ) as cursor:
             campaigns = await cursor.fetchall()
-        expected_campaign_id = f"trial-{champion_version_id}"
         if (
             len(campaigns) != 1
-            or campaigns[0]["id"] != expected_campaign_id
+            or type(campaigns[0]["id"]) is not str
+            or not campaigns[0]["id"]
             or campaigns[0]["nexus_version_id"] != champion_version_id
         ):
             return
+        campaign_id = campaigns[0]["id"]
         await db.execute(
             "UPDATE nexus_runtime SET trial_version_id = ?, "
             "updated_at = CURRENT_TIMESTAMP WHERE bot_id = ?",
@@ -263,7 +271,7 @@ class NexusTradeRepository:
         )
         await db.execute(
             "UPDATE nexus_campaigns SET nexus_version_id = ? WHERE id = ?",
-            (trial_version_id, expected_campaign_id),
+            (trial_version_id, campaign_id),
         )
 
     @classmethod
@@ -397,7 +405,15 @@ class NexusTradeRepository:
 
     async def get_runtime_snapshot(self) -> dict:
         async with self._connection() as db:
-            return await self._snapshot_from_connection(db)
+            await db.execute("PRAGMA busy_timeout=30000")
+            await db.execute("BEGIN")
+            try:
+                snapshot = await self._snapshot_from_connection(db)
+            except BaseException:
+                await db.rollback()
+                raise
+            await db.commit()
+            return snapshot
 
     async def set_champion_mode(
         self, *, enabled: bool, account_id: str, account_type: str,

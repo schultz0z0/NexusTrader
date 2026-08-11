@@ -83,3 +83,69 @@ Secret/path scans: pass
 An earlier full-suite invocation incorrectly exported `DEV_MODE=true` to every test and produced seven settings-test failures whose assertions require production mode. The suite was rerun from a fresh command with `DEV_MODE` removed and the required dummy secrets only; all 482 tests passed without a production change.
 
 The only observed warning is the pre-existing Starlette/FastAPI TestClient deprecation warning. No functional concern remains within this fix scope.
+
+## Final-review fix round 1/5
+
+Base: `f6748bda49f0cdc5939c6863f87b148987dfae0b`
+
+All four re-review findings were verified against production code before their tests or fixes were written.
+
+### RED evidence
+
+1. Active Trial restart with an exact candidate journal:
+
+```text
+rtk ... python.exe -m unittest tests.test_nexus_trade_runtime.NexusTradeRuntimeTests.test_restart_active_trial_installs_its_exact_gate_after_safe_settlement -v
+Ran 1 test: FAILED (failures=1)
+Observed: after the restored ACTIVE position settled to IDLE, the same-version Trial strategy still had gate=None.
+```
+
+2. Hash-bound schema-1 Trial approval:
+
+```text
+rtk ... python.exe -m unittest tests.test_nexus_trade_promotion.PromotionServiceTests.test_approve_rejects_hash_bound_legacy_trial_before_any_governance_mutation -v
+Ran 1 test: FAILED (failures=1)
+Observed: PromotionRejected was not raised; a coherent legacy descriptor was approved.
+```
+
+3. Post-governance shared-V1 migration:
+
+```text
+rtk ... python.exe -m unittest tests.test_nexus_trade_repository.NexusTradeRepositoryTests.test_post_governance_legacy_campaign_ids_migrate_and_survive_restart tests.test_nexus_trade_repository.NexusTradeRepositoryTests.test_post_governance_legacy_migration_rolls_back_atomically -v
+Ran 2 tests: FAILED (failures=3)
+Observed: both trial-reanalyze-* and trial-after-* campaign IDs were rejected before migration; the injected rollback path never reached the transactional update.
+```
+
+4. WAL reader/writer interleaving:
+
+```text
+rtk ... python.exe -m unittest tests.test_nexus_trade_repository.NexusTradeRepositoryTests.test_wal_snapshot_stays_on_one_revision_during_atomic_trial_rotation -v
+Ran 1 test: FAILED (failures=1)
+Observed: the writer committed without blocking, then the reader mixed the old runtime pointer with the new active campaign and raised a provenance mismatch.
+```
+
+### Corrections
+
+- Runtime strategy replacement now considers exact gate identity as well as version ID. A missing/mismatched gate on a restored non-IDLE lane queues the validated snapshot; settlement applies it synchronously at the safe IDLE boundary while preserving state and ownership.
+- Approval now requires `executable_gate()` and exact candidate ID, artifact hash, canonical envelope, configuration hash, and fitted-state validation inside `_validate_approval`, before any governance mutation. Rejection remains transactionally audited as `REJECTED/ARTIFACT_CORRUPT` with unchanged pointers, proposal, versions, and outbox.
+- Shared Champion V1 legacy migration accepts any non-empty unique active Trial campaign ID when campaign/pointer/version provenance is exact and the distinct Trial V1 identity was absent before initialization. This distinguishes genuine legacy databases from fresh wrong-role corruption. Both governance ID families survive restart; injected failure rolls back the new Trial V1, pointer, and campaign update.
+- Runtime snapshot reads now use a deferred read transaction with explicit rollback on every `BaseException` (including cancellation), commit on success, and connection-context close. WAL writers remain non-blocking while each reader observes one revision.
+
+The first integrated run exposed one over-broad migration regression: a fresh wrong-role Trial pointer was silently repaired. The migration was restricted using the pre-migration absence of distinct Trial V1; the original corruption test and both valid legacy migrations then passed together.
+
+### Verification
+
+```text
+New focused behavior matrix: 6/6 pass
+Integrated NexusTrade modules: 156/156 pass
+Protected Python regressions: 78/78 pass
+Full Python discovery without DEV_MODE: 495/495 pass (70.157s)
+JavaScript node tests: 17/17 pass
+compileall: pass
+pip check: No broken requirements found
+git diff --check: pass
+Protected diff (Donchian/ZigZag/Nexus Speed): empty
+Secret/path scans: pass
+```
+
+No network, Deriv call, REAL order, Docker live run, push, PR, or GitHub mutation was performed. The only warning remains the pre-existing Starlette/FastAPI TestClient deprecation warning.
