@@ -106,6 +106,20 @@ class NexusTradeRepository:
             (f"trial-{version_id}", Lane.TRIAL.value, version_id, CampaignStatus.ACTIVE.value,
              Lane.TRIAL.value, CampaignStatus.ACTIVE.value),
         )
+        await db.execute(
+            """
+            INSERT INTO nexus_campaigns (id, lane, nexus_version_id, status)
+            SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM nexus_campaigns WHERE lane = ? AND status = ?
+            )
+            """,
+            (
+                f"champion-{version_id}", Lane.CHAMPION.value, version_id,
+                CampaignStatus.ACTIVE.value, Lane.CHAMPION.value,
+                CampaignStatus.ACTIVE.value,
+            ),
+        )
         return await cls._snapshot_from_connection(db)
 
     async def ensure_singleton(self) -> dict:

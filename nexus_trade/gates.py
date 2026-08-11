@@ -143,11 +143,20 @@ class PromotionGateEvaluator:
         families = context.get("change_families")
         family_count = len(set(families)) if isinstance(families, (list, tuple, set)) else None
         bollinger = context.get("bollinger_present")
-        ablation = context.get("new_indicator_ablation_passed", True)
-        change_ok = family_count is not None and family_count <= 1 and bollinger is True and ablation is True
+        ablation = context.get("new_indicator_ablation_passed")
+        ablation_required = (
+            isinstance(families, (list, tuple, set))
+            and "indicator_addition" in families
+        )
+        ablation_ok = ablation is True if ablation_required else True
+        change_ok = family_count is not None and family_count <= 1 and bollinger is True and ablation_ok
+        change_inconclusive = (
+            family_count is None
+            or (ablation_required and ablation is None)
+        )
         gates.append(GateResult(
-            "CHANGE_BUDGET", "PASS" if change_ok else "FAIL" if family_count is not None else "INCONCLUSIVE",
-            {"families": family_count, "bollinger": bollinger, "ablation": ablation},
+            "CHANGE_BUDGET", "PASS" if change_ok else "INCONCLUSIVE" if change_inconclusive else "FAIL",
+            {"families": family_count, "bollinger": bollinger, "ablation": ablation, "ablation_required": ablation_required},
             "at most one material family; Bollinger retained; ablation passed",
             "change budget and causal attribution are satisfied" if change_ok else "change budget, Bollinger or ablation requirement failed",
         ))

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import sqlite3
@@ -164,6 +165,22 @@ def report_evidence(*, campaign_id="trial-a", trial_count=300, accumulated=None)
                    0.35 if index % 3 else -0.35, epoch=20_000 + index)
         for index in range(trial_count)
     ]
+    for row in champion:
+        row.update(
+            decision_id=f"champion-decision-{row['contract_id']}",
+            lane="champion_baseline",
+            campaign_id="champion-a",
+            nexus_version_id="champion-v1",
+            provenance_hash="a" * 64,
+        )
+    for row in trial:
+        row.update(
+            decision_id=f"trial-decision-{row['contract_id']}",
+            lane="challenger_trial",
+            campaign_id=campaign_id,
+            nexus_version_id="trial-v2",
+            provenance_hash="a" * 64,
+        )
     provenance = {
         "symbol": "R_100", "timeframe_seconds": 60, "duration_seconds": 58,
         "provenance_hash": "a" * 64,
@@ -171,12 +188,14 @@ def report_evidence(*, campaign_id="trial-a", trial_count=300, accumulated=None)
     return {
         "campaign_id": campaign_id,
         "champion": {
+            "campaign_id": "champion-a",
             "version_id": "champion-v1", "version_hash": "b" * 64,
             "configuration": {"bollinger": {"period": 20}},
             "feature_schema": ["bollinger_percent_b"], "entry_rules": ["bollinger"],
             "model": "deterministic", "settlements": champion, **provenance,
         },
         "trial": {
+            "campaign_id": campaign_id,
             "version_id": "trial-v2", "version_hash": "c" * 64,
             "configuration": {"bollinger": {"period": 20}, "adx": {"period": 14}},
             "feature_schema": ["bollinger_percent_b", "adx"],
@@ -193,6 +212,182 @@ def report_evidence(*, campaign_id="trial-a", trial_count=300, accumulated=None)
 
 
 class ImmutableReportTests(unittest.TestCase):
+    def test_scheduler_persisted_weekly_close_recalculates_real_gates_to_evolve(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "governed.db")
+            os.environ.setdefault("DERIV_APP_ID", "dummy-app")
+            os.environ.setdefault("DERIV_API_TOKEN", "dummy-token")
+            os.environ.setdefault("DASHBOARD_API_KEY", "dummy-dashboard")
+            os.environ.setdefault("INTERNAL_API_TOKEN", "dummy-internal")
+            from database.repository import DatabaseRepository
+
+            asyncio.run(DatabaseRepository(path).init_db())
+            schedule = BrasiliaSchedule()
+            weekly = schedule.weekly_window(
+                datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
+            )
+            db = sqlite3.connect(path)
+            try:
+                champion_version = db.execute(
+                    "SELECT champion_version_id FROM nexus_runtime"
+                ).fetchone()[0]
+                trial_campaign = db.execute(
+                    "SELECT id FROM nexus_campaigns WHERE lane='challenger_trial'"
+                ).fetchone()[0]
+                champion_campaign = db.execute(
+                    "SELECT id FROM nexus_campaigns WHERE lane='champion_baseline'"
+                ).fetchone()[0]
+                trial_snapshot = {
+                    "symbol": "R_100", "timeframe_seconds": 60,
+                    "duration_seconds": 58,
+                    "indicator_configuration": {
+                        "bollinger": {"period": 20}, "adx": {"period": 14},
+                    },
+                    "feature_schema": ["bollinger_percent_b", "adx"],
+                    "entry_rules": ["bollinger", "adx_gate"],
+                    "model": "hgb-v1",
+                }
+                db.execute(
+                    """INSERT INTO nexus_versions
+                       (id, name, status, version_hash, snapshot)
+                       VALUES ('trial-v2', 'Trial V2', 'TRIAL', ?, ?)""",
+                    ("c" * 64, json.dumps(trial_snapshot, sort_keys=True)),
+                )
+                db.execute(
+                    "UPDATE nexus_runtime SET trial_version_id='trial-v2'"
+                )
+                db.execute(
+                    """UPDATE nexus_campaigns
+                       SET nexus_version_id='trial-v2', started_at='2026-08-03 13:00:00'
+                       WHERE id=?""",
+                    (trial_campaign,),
+                )
+                db.execute(
+                    "UPDATE nexus_campaigns SET started_at='2026-08-03 13:00:00' WHERE id=?",
+                    (champion_campaign,),
+                )
+                provenance = "a" * 64
+                contract_id = 80_000
+                for day in range(7):
+                    count = 43 if day < 6 else 42
+                    champion_wins = 26 if day < 6 else 25
+                    trial_wins = 30 if day < 6 else 29
+                    epoch_base = int(
+                        datetime(2026, 8, 3 + day, 14, tzinfo=timezone.utc).timestamp()
+                    )
+                    for lane, campaign, version, win_count in (
+                        ("champion_baseline", champion_campaign, champion_version, champion_wins),
+                        ("challenger_trial", trial_campaign, "trial-v2", trial_wins),
+                    ):
+                        for index in range(count):
+                            contract_id += 1
+                            won = index < win_count
+                            decision_id = f"governed-{lane}-{day}-{index}"
+                            payload = {
+                                "lane": lane,
+                                "campaign_id": campaign,
+                                "nexus_version_id": version,
+                                "provenance_hash": provenance,
+                                "causal": True,
+                                "risk_limits_ok": True,
+                            }
+                            db.execute(
+                                """INSERT INTO nexus_decisions
+                                   (id, lane, nexus_version_id, campaign_id, symbol,
+                                    signal_epoch, entry_delay_ms, payload)
+                                   VALUES (?, ?, ?, ?, 'R_100', ?, 100, ?)""",
+                                (decision_id, lane, version, campaign, epoch_base + index, json.dumps(payload)),
+                            )
+                            db.execute(
+                                """INSERT INTO trades
+                                   (bot_id, symbol, contract_id, stake, payout, profit,
+                                    result, status, purchase_time, lane, nexus_version_id,
+                                    campaign_id, decision_id, entry_delay_ms)
+                                   VALUES ('nexus-trade', 'R_100', ?, 0.35, ?, ?, ?,
+                                           'closed', ?, ?, ?, ?, ?, 100)""",
+                                (
+                                    contract_id, 0.70 if won else 0.0,
+                                    0.35 if won else -0.35, "won" if won else "lost",
+                                    epoch_base + index, lane, version, campaign, decision_id,
+                                ),
+                            )
+                governance = {
+                    "campaign_id": trial_campaign,
+                    "trial_version_id": "trial-v2",
+                    "provenance_hash": provenance,
+                    "window_end_utc": weekly.end_utc.isoformat(),
+                    "promotion_evidence": {
+                        "integrity": {
+                            "trial_frozen": True, "all_reconciled": True,
+                            "no_duplicates": True, "no_future_leakage": True,
+                            "dispatch_within_limit": True, "candle_coverage": 1.0,
+                            "reproducible": True, "risk_limits_ok": True,
+                        },
+                        "regimes": [{"n": 300, "trial_loss_significant": False}],
+                        "dsr_probability": 0.97,
+                        "pbo": 0.08,
+                        "sensitivity_passed": True,
+                        "change_families": ["indicator_reconfiguration"],
+                        "bollinger_present": True,
+                        "gates": [{"code": "FORGED", "status": "PASS"}],
+                        "recommendation": "REANALYZE",
+                    },
+                }
+                db.execute(
+                    """INSERT INTO nexus_training_attempts
+                       (attempt_hash, status, dataset_hash, provenance_hash, seed, payload)
+                       VALUES (?, 'SUCCEEDED', ?, ?, 7, ?)""",
+                    ("d" * 64, "e" * 64, provenance, json.dumps(governance, sort_keys=True)),
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            service = ReportService(path)
+            scheduler = DurableReportScheduler(path, service)
+            scheduler.run_due(
+                datetime(2026, 8, 9, 13, tzinfo=timezone.utc),
+                now=weekly.end_utc,
+            )
+            report = service.get_weekly("2026-08-10")
+
+            self.assertIsNotNone(report)
+            self.assertEqual(report.snapshot["recommendation"], "EVOLVE")
+            self.assertEqual({gate["status"] for gate in report.snapshot["gates"]}, {"PASS"})
+            self.assertNotIn("FORGED", {gate["code"] for gate in report.snapshot["gates"]})
+
+    def test_weekly_close_never_accepts_caller_forged_gates_or_recommendation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "reports.db")
+            evidence = report_evidence()
+            evidence["gates"] = [{
+                "code": "FORGED", "status": "PASS", "observed": 1,
+                "threshold": 1, "reason": "caller says pass",
+            }]
+            evidence["recommendation"] = "EVOLVE"
+            window = BrasiliaSchedule().weekly_window(
+                datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
+            )
+
+            report = ReportService(path).close_weekly(window, evidence)
+
+            self.assertEqual(report.snapshot["recommendation"], "INCONCLUSIVE")
+            self.assertNotIn("FORGED", {gate["code"] for gate in report.snapshot["gates"]})
+
+    def test_missing_settlement_provenance_fails_before_any_report_is_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "reports.db")
+            evidence = report_evidence(trial_count=1)
+            evidence["trial"]["settlements"][0].pop("provenance_hash")
+            window = BrasiliaSchedule().weekly_window(
+                datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
+            )
+            service = ReportService(path)
+
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                service.close_weekly(window, evidence)
+            self.assertEqual(service.list_reports(), [])
+
     def test_snapshot_is_content_addressed_immutable_and_historically_aligned(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "reports.db")
@@ -261,24 +456,44 @@ class ImmutableReportTests(unittest.TestCase):
             window = BrasiliaSchedule().weekly_window(
                 datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
             )
-            inside = int(datetime(2026, 8, 5, 13, tzinfo=timezone.utc).timestamp())
+            before_ten = int(datetime(2026, 8, 5, 12, tzinfo=timezone.utc).timestamp())
+            after_ten = int(datetime(2026, 8, 5, 14, tzinfo=timezone.utc).timestamp())
             exact_end = int(window.end_utc.timestamp())
             db = sqlite3.connect(path)
             try:
                 version_id = db.execute("SELECT champion_version_id FROM nexus_runtime").fetchone()[0]
                 campaign_id = db.execute("SELECT id FROM nexus_campaigns WHERE lane='challenger_trial'").fetchone()[0]
+                champion_campaign = db.execute(
+                    "SELECT id FROM nexus_campaigns WHERE lane='champion_baseline'"
+                ).fetchone()[0]
+                db.execute(
+                    "UPDATE nexus_campaigns SET started_at='2026-08-03 13:00:00' WHERE id=?",
+                    (champion_campaign,),
+                )
                 db.execute("UPDATE nexus_campaigns SET started_at='2026-08-03 13:00:00' WHERE id=?", (campaign_id,))
                 for lane, suffix, epoch, contract_id in (
-                    ("champion_baseline", "champion", inside, 7001),
-                    ("challenger_trial", "trial-late", inside, 7002),
-                    ("challenger_trial", "trial-boundary", exact_end, 7003),
+                    ("champion_baseline", "champion-before", before_ten, 7001),
+                    ("challenger_trial", "trial-before", before_ten, 7002),
+                    ("champion_baseline", "champion-after", after_ten, 7003),
+                    ("challenger_trial", "trial-after", after_ten, 7004),
+                    ("challenger_trial", "trial-boundary", exact_end, 7005),
                 ):
                     decision_id = "report-decision-" + suffix
                     db.execute(
                         """INSERT INTO nexus_decisions
                            (id, lane, nexus_version_id, campaign_id, symbol, signal_epoch, payload)
-                           VALUES (?, ?, ?, ?, 'R_100', ?, '{}')""",
-                        (decision_id, lane, version_id, campaign_id if lane == "challenger_trial" else None, epoch),
+                           VALUES (?, ?, ?, ?, 'R_100', ?, ?)""",
+                        (
+                            decision_id, lane, version_id,
+                            campaign_id if lane == "challenger_trial" else champion_campaign,
+                            epoch,
+                            json.dumps({
+                                "lane": lane,
+                                "campaign_id": campaign_id if lane == "challenger_trial" else champion_campaign,
+                                "nexus_version_id": version_id,
+                                "provenance_hash": "a" * 64,
+                            }),
+                        ),
                     )
                     db.execute(
                         """INSERT INTO trades
@@ -287,7 +502,7 @@ class ImmutableReportTests(unittest.TestCase):
                            VALUES ('nexus-trade', 'R_100', ?, 0.35, 0.70, 0.35, 'won', 'closed',
                                    ?, ?, ?, ?, ?)""",
                         (contract_id, exact_end + 3600, lane, version_id,
-                         campaign_id if lane == "challenger_trial" else None, decision_id),
+                         campaign_id if lane == "challenger_trial" else champion_campaign, decision_id),
                     )
                 db.commit()
             finally:
@@ -295,9 +510,13 @@ class ImmutableReportTests(unittest.TestCase):
 
             report = ReportService(path).close_weekly(window)
 
-            self.assertEqual(report.snapshot["champion"]["metrics"]["n_total"], 1)
-            self.assertEqual(report.snapshot["trial"]["metrics"]["n_total"], 1)
-            self.assertEqual(report.snapshot["accumulated_progress"]["operations"], 1)
+            self.assertEqual(report.snapshot["champion"]["metrics"]["n_total"], 2)
+            self.assertEqual(report.snapshot["trial"]["metrics"]["n_total"], 2)
+            self.assertEqual(report.snapshot["accumulated_progress"]["operations"], 2)
+            self.assertEqual(
+                [day.get("window_start_local") for day in report.snapshot["days"]],
+                ["2026-08-04T10:00:00-03:00", "2026-08-05T10:00:00-03:00"],
+            )
 
 
 if __name__ == "__main__":

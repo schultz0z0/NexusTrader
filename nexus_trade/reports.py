@@ -148,8 +148,12 @@ class ReportService:
         campaign_id = evidence.get("campaign_id")
         if type(campaign_id) is not str or not campaign_id:
             raise ValueError("report campaign_id is required")
-        champion = self._lane(evidence.get("champion"), "champion_baseline", campaign_id)
-        trial = self._lane(evidence.get("trial"), "challenger_trial", campaign_id)
+        champion = self._lane(evidence.get("champion"), "champion_baseline")
+        trial = self._lane(evidence.get("trial"), "challenger_trial")
+        if trial["campaign_id"] != campaign_id:
+            raise ValueError("Trial report campaign provenance does not match the report")
+        if champion["campaign_id"] == trial["campaign_id"]:
+            raise ValueError("Champion and Trial require separate campaign provenance")
         if champion["provenance_hash"] != trial["provenance_hash"]:
             raise ValueError("Champion and Trial report provenance must match")
         duplicate_contracts = set(champion.pop("contract_ids")) & set(trial.pop("contract_ids"))
@@ -162,31 +166,26 @@ class ReportService:
         if type(complete_days) is not int or complete_days < 0:
             raise ValueError("complete_days is invalid")
 
-        supplied_gates = evidence.get("gates")
-        recommendation = evidence.get("recommendation")
-        if kind == "weekly" and isinstance(evidence.get("evaluation_context"), Mapping):
-            evaluation = self.gate_evaluator.evaluate(
-                calculate_lane_metrics(evidence["champion"]["settlements"]),
-                calculate_lane_metrics(evidence["trial"]["settlements"]),
-                evidence["evaluation_context"],
-            )
-            gates = [self._gate_dict(gate) for gate in evaluation.gates]
-            recommendation = evaluation.recommendation
-        elif isinstance(supplied_gates, (list, tuple)) and supplied_gates:
-            gates = [self._gate_dict(gate) for gate in supplied_gates]
-        else:
-            code = "DAILY_NO_PROMOTION" if kind == "daily" else "EVIDENCE_INCOMPLETE"
-            gates = [{
-                "code": code, "status": "INCONCLUSIVE", "observed": None,
-                "threshold": "governed weekly evidence", "reason": "daily reports are descriptive only" if kind == "daily" else "conservative gate evidence was not supplied",
-            }]
-            recommendation = "INCONCLUSIVE"
-        if recommendation not in {"EVOLVE", "REANALYZE", "INCONCLUSIVE"}:
-            raise ValueError("invalid machine recommendation")
-
+        recommendation = "INCONCLUSIVE"
         days = evidence.get("daily", [])
         if not isinstance(days, (list, tuple)):
             raise ValueError("daily rows must be a sequence")
+        if kind == "weekly":
+            evaluation_context = self._evaluation_context(
+                evidence, champion, trial, window, days,
+            )
+            evaluation = self.gate_evaluator.evaluate(
+                calculate_lane_metrics(evidence["champion"]["settlements"]),
+                calculate_lane_metrics(evidence["trial"]["settlements"]),
+                evaluation_context,
+            )
+            gates = [self._gate_dict(gate) for gate in evaluation.gates]
+            recommendation = evaluation.recommendation
+        else:
+            gates = [{
+                "code": "DAILY_NO_PROMOTION", "status": "INCONCLUSIVE", "observed": None,
+                "threshold": "governed weekly evidence", "reason": "daily reports are descriptive only",
+            }]
         diffs = self._diffs(champion, trial)
         return {
             "schema_version": 1,
@@ -214,11 +213,73 @@ class ReportService:
         }
 
     @staticmethod
-    def _lane(value: Any, lane: str, campaign_id: str) -> dict:
+    def _evaluation_context(
+        evidence: Mapping[str, Any],
+        champion: dict,
+        trial: dict,
+        window: ReportWindow,
+        days: list | tuple,
+    ) -> dict:
+        supplied = evidence.get("evaluation_context")
+        context = _plain(supplied) if isinstance(supplied, Mapping) else {}
+        context["complete_days"] = evidence.get("complete_days")
+        context["trial_settled_operations"] = evidence.get(
+            "trial_accumulated_operations", trial["metrics"]["n_total"],
+        )
+        base_provenance = {
+            "symbol": "R_100",
+            "timeframe_seconds": 60,
+            "duration_seconds": 58,
+            "window_start": window.start_utc.isoformat(),
+            "window_end": window.end_utc.isoformat(),
+        }
+        context["champion_provenance"] = {
+            **base_provenance,
+            "campaign_id": champion["campaign_id"],
+            "version_id": champion["version_id"],
+            "provenance_hash": champion["provenance_hash"],
+        }
+        context["trial_provenance"] = {
+            **base_provenance,
+            "campaign_id": trial["campaign_id"],
+            "version_id": trial["version_id"],
+            "provenance_hash": trial["provenance_hash"],
+        }
+        derived_daily = []
+        for day in days:
+            if not isinstance(day, Mapping):
+                continue
+            champion_metrics = day.get("champion")
+            trial_metrics = day.get("trial")
+            if not isinstance(champion_metrics, Mapping) or not isinstance(trial_metrics, Mapping):
+                continue
+            if "normalized_expectancy" not in champion_metrics or "normalized_expectancy" not in trial_metrics:
+                continue
+            derived_daily.append({
+                "champion_expectancy": champion_metrics["normalized_expectancy"],
+                "trial_expectancy": trial_metrics["normalized_expectancy"],
+                "trial_profit": trial_metrics.get("total_profit"),
+            })
+        if derived_daily:
+            context["daily"] = derived_daily
+            context["temporal_blocks"] = [
+                {"champion": day["champion_expectancy"], "trial": day["trial_expectancy"]}
+                for day in derived_daily
+            ]
+            recent = [day["trial_expectancy"] for day in derived_daily[-3:]]
+            context["recent_deterioration"] = (
+                len(recent) == 3
+                and all(isinstance(value, (int, float)) for value in recent)
+                and recent[0] > recent[1] > recent[2]
+            )
+        return context
+
+    @staticmethod
+    def _lane(value: Any, lane: str) -> dict:
         if not isinstance(value, Mapping):
             raise ValueError(f"{lane} evidence is required")
         required = (
-            "version_id", "version_hash", "configuration", "feature_schema",
+            "campaign_id", "version_id", "version_hash", "configuration", "feature_schema",
             "entry_rules", "model", "settlements", "symbol", "timeframe_seconds",
             "duration_seconds", "provenance_hash",
         )
@@ -227,26 +288,40 @@ class ReportService:
         if (value["symbol"], value["timeframe_seconds"], value["duration_seconds"]) != ("R_100", 60, 58):
             raise ValueError("reports require the R_100/M1/58s contract")
         settlements = list(value["settlements"])
+        campaign_id = value["campaign_id"]
+        if type(campaign_id) is not str or not campaign_id:
+            raise ValueError(f"{lane} campaign provenance is required")
         ids = []
         for row in settlements:
+            if not isinstance(row, Mapping):
+                raise ValueError("settlement provenance must be a mapping")
             contract_id = row.get("contract_id") if isinstance(row, Mapping) else getattr(row, "contract_id", None)
             if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:
                 raise ValueError("settlement contract_id must be a positive integer")
             ids.append(contract_id)
-            row_lane = row.get("lane") if isinstance(row, Mapping) else getattr(row, "lane", None)
-            row_campaign = row.get("campaign_id") if isinstance(row, Mapping) else getattr(row, "campaign_id", None)
-            row_version = row.get("nexus_version_id") if isinstance(row, Mapping) else getattr(row, "nexus_version_id", None)
-            if row_lane is not None and row_lane != lane:
+            required_provenance = (
+                "decision_id", "decision_epoch", "lane", "campaign_id",
+                "nexus_version_id", "provenance_hash",
+            )
+            if any(name not in row or row[name] is None for name in required_provenance):
+                raise ValueError("settlement decision provenance is incomplete")
+            row_lane = row["lane"]
+            row_campaign = row["campaign_id"]
+            row_version = row["nexus_version_id"]
+            if row_lane != lane:
                 raise ValueError("cross-lane settlement provenance")
-            if row_campaign is not None and row_campaign != campaign_id:
+            if row_campaign != campaign_id:
                 raise ValueError("cross-campaign settlement provenance")
-            if row_version is not None and row_version != value["version_id"]:
+            if row_version != value["version_id"]:
                 raise ValueError("cross-version settlement provenance")
+            if row["provenance_hash"] != value["provenance_hash"]:
+                raise ValueError("settlement provenance hash mismatch")
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate settlement contract")
         metrics = calculate_lane_metrics(settlements)
         return {
             "lane": lane,
+            "campaign_id": campaign_id,
             "version_id": value["version_id"],
             "version_hash": value["version_hash"],
             "contract": {"symbol": "R_100", "timeframe_seconds": 60, "duration_seconds": 58},
@@ -338,21 +413,17 @@ class ReportService:
             runtime = db.execute("SELECT * FROM nexus_runtime WHERE bot_id='nexus-trade'").fetchone()
             if runtime is None:
                 raise ValueError("NexusTrade runtime provenance is unavailable")
-            campaign_rows = db.execute(
-                """
-                SELECT * FROM nexus_campaigns
-                WHERE lane='challenger_trial'
-                  AND CAST(strftime('%s', started_at) AS INTEGER) < ?
-                  AND (ended_at IS NULL OR CAST(strftime('%s', ended_at) AS INTEGER) >= ?)
-                ORDER BY started_at DESC, id DESC
-                """,
-                (end_epoch, start_epoch),
-            ).fetchall()
-            if len(campaign_rows) != 1:
-                raise ValueError("report window must resolve exactly one Trial campaign")
-            campaign = campaign_rows[0]
+            campaign = self._campaign_for_window(
+                db, "challenger_trial", start_epoch, end_epoch,
+            )
+            champion_campaign = self._campaign_for_window(
+                db, "champion_baseline", start_epoch, end_epoch,
+            )
             campaign_id = campaign["id"]
-            champion_rows = self._settlement_rows(db, "champion_baseline", start_epoch, end_epoch)
+            champion_rows = self._settlement_rows(
+                db, "champion_baseline", start_epoch, end_epoch,
+                champion_campaign["id"],
+            )
             trial_rows = self._settlement_rows(db, "challenger_trial", start_epoch, end_epoch, campaign_id)
             accumulated_trial = self._settlement_rows(db, "challenger_trial", None, end_epoch, campaign_id)
             champion_version = self._version_evidence(db, runtime["champion_version_id"])
@@ -363,7 +434,16 @@ class ReportService:
                     raise ValueError("Trial report rows cross or omit version provenance")
                 trial_version_id = versions.pop()
             trial_version = self._version_evidence(db, trial_version_id)
-            provenance_hash = self._window_provenance_hash(db, start_epoch, end_epoch)
+            provenance_hash = self._comparable_provenance_hash(
+                db, start_epoch, end_epoch, champion_rows, trial_rows,
+            )
+            evaluation_context = self._persisted_evaluation_context(
+                db,
+                campaign_id=campaign_id,
+                trial_version_id=trial_version_id,
+                provenance_hash=provenance_hash,
+                window_end_utc=window.end_utc.isoformat(),
+            )
             audit = []
             if "nexus_audit_events" in tables:
                 audit = [
@@ -373,8 +453,18 @@ class ReportService:
                     ).fetchall()
                 ]
 
-        champion = {**champion_version, "settlements": champion_rows, "provenance_hash": provenance_hash}
-        trial = {**trial_version, "settlements": trial_rows, "provenance_hash": provenance_hash}
+        champion = {
+            **champion_version,
+            "campaign_id": champion_campaign["id"],
+            "settlements": champion_rows,
+            "provenance_hash": provenance_hash,
+        }
+        trial = {
+            **trial_version,
+            "campaign_id": campaign_id,
+            "settlements": trial_rows,
+            "provenance_hash": provenance_hash,
+        }
         started = self._parse_db_datetime(campaign["started_at"])
         complete_days = max(0, (window.end_utc.astimezone(BRASILIA).date() - started.astimezone(BRASILIA).date()).days)
         return {
@@ -384,10 +474,79 @@ class ReportService:
             "complete_days": complete_days,
             "trial_accumulated_operations": len(accumulated_trial),
             "daily": self._daily_rows(champion_rows, trial_rows),
-            "gates": [],
-            "recommendation": "INCONCLUSIVE",
+            "evaluation_context": evaluation_context,
             "audit": audit + [{"actor": "system", "action": f"{window.kind.upper()}_REPORT_CLOSE"}],
         }
+
+    @staticmethod
+    def _persisted_evaluation_context(
+        db: sqlite3.Connection,
+        *,
+        campaign_id: str,
+        trial_version_id: str,
+        provenance_hash: str,
+        window_end_utc: str,
+    ) -> dict:
+        rows = db.execute(
+            """SELECT payload FROM nexus_training_attempts
+               WHERE status='SUCCEEDED' ORDER BY created_at, id"""
+        ).fetchall()
+        matched = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("persisted promotion evidence is invalid JSON") from exc
+            if not isinstance(payload, Mapping):
+                raise ValueError("persisted promotion evidence must be a mapping")
+            identity = (
+                payload.get("campaign_id"),
+                payload.get("trial_version_id"),
+                payload.get("provenance_hash"),
+                payload.get("window_end_utc"),
+            )
+            if identity == (
+                campaign_id, trial_version_id, provenance_hash, window_end_utc,
+            ):
+                matched.append(payload)
+        if not matched:
+            return {}
+        if len(matched) != 1:
+            raise ValueError("persisted promotion evidence identity is ambiguous")
+        evidence = matched[0].get("promotion_evidence")
+        if not isinstance(evidence, Mapping):
+            raise ValueError("persisted promotion evidence payload is incomplete")
+        allowed = {
+            "integrity", "regimes", "dsr_probability", "pbo",
+            "sensitivity_passed", "change_families", "bollinger_present",
+            "new_indicator_ablation_passed",
+        }
+        return {
+            key: _plain(value)
+            for key, value in evidence.items()
+            if key in allowed
+        }
+
+    @staticmethod
+    def _campaign_for_window(
+        db: sqlite3.Connection,
+        lane: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> sqlite3.Row:
+        rows = db.execute(
+            """
+            SELECT * FROM nexus_campaigns
+            WHERE lane=?
+              AND CAST(strftime('%s', started_at) AS INTEGER) < ?
+              AND (ended_at IS NULL OR CAST(strftime('%s', ended_at) AS INTEGER) >= ?)
+            ORDER BY started_at DESC, id DESC
+            """,
+            (lane, end_epoch, start_epoch),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(f"report window must resolve exactly one {lane} campaign")
+        return rows[0]
 
     @staticmethod
     def _parse_db_datetime(value: Any) -> datetime:
@@ -407,12 +566,18 @@ class ReportService:
         decision_table = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nexus_decisions'"
         ).fetchone() is not None
-        epoch_sql = "COALESCE(d.signal_epoch, t.purchase_time)" if decision_table else "t.purchase_time"
-        join_sql = "LEFT JOIN nexus_decisions d ON d.id=t.decision_id" if decision_table else ""
+        if not decision_table:
+            raise ValueError("settlement decision provenance table is missing")
+        epoch_sql = "COALESCE(d.signal_epoch, t.purchase_time)"
+        join_sql = "LEFT JOIN nexus_decisions d ON d.id=t.decision_id"
         query = f"""
             SELECT t.contract_id, t.stake, t.payout, t.profit, t.result,
                    t.lane, t.nexus_version_id, t.campaign_id,
-                   {epoch_sql} AS decision_epoch
+                   t.decision_id, {epoch_sql} AS decision_epoch,
+                   d.id AS persisted_decision_id, d.lane AS decision_lane,
+                   d.campaign_id AS decision_campaign_id,
+                   d.nexus_version_id AS decision_version_id,
+                   d.payload AS decision_payload
             FROM trades t {join_sql}
             WHERE t.bot_id='nexus-trade' AND t.status='closed' AND t.lane=?
               AND {epoch_sql} < ?
@@ -427,6 +592,28 @@ class ReportService:
         query += f" ORDER BY {epoch_sql}, t.contract_id"
         rows = []
         for row in db.execute(query, params).fetchall():
+            if row["persisted_decision_id"] is None:
+                raise ValueError("settlement decision provenance is missing")
+            try:
+                decision_payload = json.loads(row["decision_payload"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("settlement decision provenance payload is invalid") from exc
+            provenance_hash = decision_payload.get("provenance_hash")
+            exact = {
+                "lane": row["lane"],
+                "campaign_id": row["campaign_id"],
+                "nexus_version_id": row["nexus_version_id"],
+            }
+            decision_exact = {
+                "lane": row["decision_lane"],
+                "campaign_id": row["decision_campaign_id"],
+                "nexus_version_id": row["decision_version_id"],
+            }
+            payload_exact = {name: decision_payload.get(name) for name in exact}
+            if exact != decision_exact or exact != payload_exact:
+                raise ValueError("settlement and decision lane/campaign/version provenance mismatch")
+            if type(provenance_hash) is not str or len(provenance_hash) != 64:
+                raise ValueError("settlement decision provenance hash is missing")
             rows.append({
                 "contract_id": row["contract_id"],
                 "stake": row["stake"],
@@ -434,10 +621,12 @@ class ReportService:
                 "profit": row["profit"],
                 "result": row["result"],
                 "settled": True,
+                "decision_id": row["decision_id"],
                 "lane": row["lane"],
                 "nexus_version_id": row["nexus_version_id"],
                 "campaign_id": row["campaign_id"],
                 "decision_epoch": row["decision_epoch"],
+                "provenance_hash": provenance_hash,
             })
         return rows
 
@@ -466,8 +655,24 @@ class ReportService:
         }
 
     @staticmethod
-    def _window_provenance_hash(db: sqlite3.Connection, start_epoch: int, end_epoch: int) -> str:
+    def _comparable_provenance_hash(
+        db: sqlite3.Connection,
+        start_epoch: int,
+        end_epoch: int,
+        champion_rows: list[dict],
+        trial_rows: list[dict],
+    ) -> str:
         import hashlib
+
+        champion_hashes = {row["provenance_hash"] for row in champion_rows}
+        trial_hashes = {row["provenance_hash"] for row in trial_rows}
+        if len(champion_hashes) > 1 or len(trial_hashes) > 1:
+            raise ValueError("cross-provenance settlements are forbidden")
+        if champion_hashes and trial_hashes and champion_hashes != trial_hashes:
+            raise ValueError("Champion and Trial provenance hashes do not match")
+        persisted = champion_hashes or trial_hashes
+        if persisted:
+            return next(iter(persisted))
 
         exists = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nexus_candles'"
@@ -487,21 +692,44 @@ class ReportService:
 
     @staticmethod
     def _daily_rows(champion_rows: list[dict], trial_rows: list[dict]) -> list[dict]:
-        by_day: dict[str, dict[str, list[dict]]] = {}
+        from datetime import timedelta
+
+        by_day: dict[str, dict[str, Any]] = {}
         for lane, rows in (("champion", champion_rows), ("trial", trial_rows)):
             for row in rows:
                 epoch = row.get("decision_epoch")
                 if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
                     raise ValueError("decision time provenance is required")
-                day = datetime.fromtimestamp(epoch, timezone.utc).astimezone(BRASILIA).date().isoformat()
-                by_day.setdefault(day, {"champion": [], "trial": []})[lane].append(row)
+                local = datetime.fromtimestamp(epoch, timezone.utc).astimezone(BRASILIA)
+                start_date = (
+                    local.date()
+                    if local.time().replace(tzinfo=None) >= time(10)
+                    else local.date() - timedelta(days=1)
+                )
+                start_local = datetime.combine(start_date, time(10), BRASILIA)
+                end_local = datetime.combine(start_date + timedelta(days=1), time(10), BRASILIA)
+                key = start_local.astimezone(timezone.utc).isoformat()
+                bucket = by_day.setdefault(key, {
+                    "date": start_date.isoformat(),
+                    "window_start_utc": key,
+                    "window_end_utc": end_local.astimezone(timezone.utc).isoformat(),
+                    "window_start_local": start_local.isoformat(),
+                    "window_end_local": end_local.isoformat(),
+                    "champion": [],
+                    "trial": [],
+                })
+                bucket[lane].append(row)
         return [
             {
-                "date": day,
+                "date": rows["date"],
+                "window_start_utc": rows["window_start_utc"],
+                "window_end_utc": rows["window_end_utc"],
+                "window_start_local": rows["window_start_local"],
+                "window_end_local": rows["window_end_local"],
                 "champion": calculate_lane_metrics(rows["champion"]).as_dict(),
                 "trial": calculate_lane_metrics(rows["trial"]).as_dict(),
             }
-            for day, rows in sorted(by_day.items())
+            for _, rows in sorted(by_day.items())
         ]
 
 

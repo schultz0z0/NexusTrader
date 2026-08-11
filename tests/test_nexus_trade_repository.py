@@ -53,6 +53,14 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["active_campaigns"][0]["lane"], Lane.TRIAL.value)
         self.assertEqual(snapshot["active_campaigns"][0]["status"], CampaignStatus.ACTIVE.value)
 
+    async def test_fresh_repository_has_separate_active_campaign_provenance_for_both_lanes(self):
+        await self.repo.init_db()
+        campaigns = await self.nexus.list_campaigns()
+
+        active = {row["lane"]: row for row in campaigns if row["status"] == "ACTIVE"}
+        self.assertEqual(set(active), {Lane.CHAMPION.value, Lane.TRIAL.value})
+        self.assertNotEqual(active[Lane.CHAMPION.value]["id"], active[Lane.TRIAL.value]["id"])
+
     async def test_schema_rejects_a_second_nexus_trade_singleton(self):
         await self.repo.init_db()
 

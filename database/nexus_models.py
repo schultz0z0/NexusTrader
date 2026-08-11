@@ -53,6 +53,8 @@ class NexusModels:
         );
         CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_campaigns_active_trial
         ON nexus_campaigns(lane) WHERE lane = 'challenger_trial' AND status = 'ACTIVE';
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_campaigns_active_champion
+        ON nexus_campaigns(lane) WHERE lane = 'champion_baseline' AND status = 'ACTIVE';
 
         CREATE TABLE IF NOT EXISTS nexus_candles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

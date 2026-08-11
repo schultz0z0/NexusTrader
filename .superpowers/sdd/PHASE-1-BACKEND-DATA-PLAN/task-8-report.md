@@ -34,3 +34,24 @@ Escopo: métricas governadas, calendário persistente, gates conservadores, snap
 - `git diff --check` — exit 0.
 - `git diff -- strategies/donchian_zigzag.py utils/indicators.py` — vazio; robôs protegidos permanecem inalterados.
 - Nenhum acesso Deriv, ordem REAL, push ou deploy foi realizado.
+
+## Fix round 1/5 — evidência governada persistida
+
+Os quatro achados da revisão foram cobertos por REDs específicos antes da implementação:
+
+- um `close_weekly` com gates/recomendação forjados pelo chamador persistia `EVOLVE` sem executar o avaliador;
+- settlements sem `provenance_hash` eram aceitos e um settlement às 09:00 de São Paulo caía no mesmo dia operacional que outro às 11:00;
+- `indicator_addition` sem evidência explícita de ablação passava o gate;
+- o fluxo scheduler → repositório → fechamento semanal não conseguia obter uma recomendação governada a partir da evidência persistida.
+
+O fechamento semanal agora constrói o contexto somente de campanhas, decisões, settlements e evidência de governança persistidos, exige identidade exata de lane/campaign/version/provenance e sempre recalcula métricas, gates e recomendação internamente. Campos `gates` e `recommendation` fornecidos pelo chamador ou presentes no payload persistido não são confiados. Os dias operacionais usam janelas `America/Sao_Paulo` de 10:00 inclusivo até 10:00 exclusivo do dia seguinte. Uma campanha Champion ativa separada é provisionada para tornar a comparação persistida explícita. `indicator_addition` sem ablação explícita fecha como `INCONCLUSIVE`.
+
+### Verificação do fix
+
+- Integração persistida scheduler → SQLite → coleta → `close_weekly` → gates: **1/1**, recomendação `EVOLVE`, todos os gates `PASS`, valor `FORGED` ausente.
+- Focados reports/gates/exports/repository/API: **49/49** em 7,269 s.
+- Regressões learning/runtime/API/repository/dispatcher/strategy/Nexus Speed/Donchian: **199/199** em 21,829 s.
+- Full Python: **398/398** em 34,214 s.
+- JavaScript: **17/17**.
+- `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos robôs protegidos: exit 0/limpos.
+- O `.env` temporário continha somente valores dummy e foi removido após os checks. Nenhum acesso Deriv, ordem REAL, push ou deploy foi realizado.

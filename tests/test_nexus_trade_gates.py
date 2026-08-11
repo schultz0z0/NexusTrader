@@ -128,6 +128,17 @@ class PromotionGateTests(unittest.TestCase):
         self.assertEqual(gate.status, "INCONCLUSIVE")
         self.assertIn("temporal", gate.reason.lower())
 
+    def test_indicator_addition_without_explicit_ablation_evidence_never_passes(self):
+        context = passing_context()
+        context["change_families"] = ["indicator_addition"]
+        context.pop("new_indicator_ablation_passed")
+
+        result = self.evaluator.evaluate(self.champion, self.trial, context)
+
+        gate = next(g for g in result.gates if g.code == "CHANGE_BUDGET")
+        self.assertIn(gate.status, {"FAIL", "INCONCLUSIVE"})
+        self.assertNotEqual(result.recommendation, "EVOLVE")
+
 
 if __name__ == "__main__":
     unittest.main()
