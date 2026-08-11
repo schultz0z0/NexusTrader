@@ -1,3 +1,4 @@
+import copy
 import json
 import urllib.request
 import unittest
@@ -29,6 +30,8 @@ def canonical_snapshot(**overrides):
         "snapshot_version": 7,
         "bot_id": "nexus-trade",
         "runtime": {
+            "champion_version_id": "champion-redacted",
+            "trial_version_id": "trial-redacted",
             "champion_enabled": 0,
             "champion_account_id": "",
             "champion_account_type": "demo",
@@ -69,6 +72,7 @@ def canonical_snapshot(**overrides):
             {
                 "id": "campaign-redacted",
                 "lane": "challenger_trial",
+                "nexus_version_id": "trial-redacted",
                 "status": "ACTIVE",
             }
         ],
@@ -484,6 +488,92 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
                 "snapshot_version_invalid",
             ):
                 NexusTradeSmoke.verify_restart(canonical_snapshot(), after)
+
+    def test_restart_refuses_lane_identity_or_configuration_drift(self):
+        """Catches pointer identity loss hidden by matching version hashes."""
+        before = canonical_snapshot()
+        cases = {}
+
+        missing_lane = copy.deepcopy(before)
+        missing_lane["lanes"] = missing_lane["lanes"][:1]
+        cases["missing"] = missing_lane
+
+        duplicate_lane = copy.deepcopy(before)
+        duplicate_lane["lanes"][1]["lane"] = "champion_baseline"
+        cases["duplicate"] = duplicate_lane
+
+        changed_id = copy.deepcopy(before)
+        changed_id["runtime"]["trial_version_id"] = "different-trial-version"
+        changed_id["lanes"][1]["version"]["id"] = "different-trial-version"
+        changed_id["active_campaigns"][0]["nexus_version_id"] = "different-trial-version"
+        cases["version_id"] = changed_id
+
+        changed_configuration = copy.deepcopy(before)
+        changed_configuration["lanes"][1]["version"]["snapshot"]["adx"]["max_entry"] = 21
+        cases["configuration"] = changed_configuration
+
+        for mutation, after in cases.items():
+            with self.subTest(mutation=mutation), self.assertRaises(SmokeSafetyError):
+                NexusTradeSmoke.verify_restart(before, after)
+
+    def test_restart_refuses_malformed_duplicate_or_changed_active_campaign(self):
+        """Catches set-collapsed campaign rows and loss of trial campaign provenance."""
+        before = canonical_snapshot()
+        cases = {}
+
+        duplicate = copy.deepcopy(before)
+        duplicate["active_campaigns"].append(copy.deepcopy(duplicate["active_campaigns"][0]))
+        cases["duplicate"] = duplicate
+
+        missing_version = copy.deepcopy(before)
+        del missing_version["active_campaigns"][0]["nexus_version_id"]
+        cases["missing_version"] = missing_version
+
+        wrong_lane = copy.deepcopy(before)
+        wrong_lane["active_campaigns"][0]["lane"] = "champion_baseline"
+        cases["wrong_lane"] = wrong_lane
+
+        changed_id = copy.deepcopy(before)
+        changed_id["active_campaigns"][0]["id"] = "different-campaign"
+        cases["changed_id"] = changed_id
+
+        changed_version = copy.deepcopy(before)
+        changed_version["active_campaigns"][0]["nexus_version_id"] = "champion-redacted"
+        cases["changed_version"] = changed_version
+
+        for mutation, after in cases.items():
+            with self.subTest(mutation=mutation), self.assertRaises(SmokeSafetyError):
+                NexusTradeSmoke.verify_restart(before, after)
+
+    def test_restart_refuses_runtime_pointer_mode_or_emergency_drift_without_account_leak(self):
+        """Catches runtime identity drift while keeping account values out of diagnostics."""
+        account_sentinel = "demo-account-private-sentinel"
+        before = canonical_snapshot()
+        before["runtime"]["champion_account_id"] = account_sentinel
+        cases = {
+            "champion_version_id": "changed-champion-version",
+            "trial_version_id": "changed-trial-version",
+            "champion_enabled": 1,
+            "champion_account_id": "different-private-account",
+            "champion_account_type": "real",
+            "emergency_stop": 1,
+        }
+
+        for field, changed_value in cases.items():
+            after = copy.deepcopy(before)
+            after["runtime"][field] = changed_value
+            if field == "emergency_stop":
+                after["emergency_stop"] = True
+            with self.subTest(field=field):
+                with self.assertRaises(SmokeSafetyError) as caught:
+                    NexusTradeSmoke.verify_restart(before, after)
+                self.assertNotIn(account_sentinel, str(caught.exception))
+                self.assertNotIn(str(changed_value), str(caught.exception))
+
+        unchanged = copy.deepcopy(before)
+        unchanged["snapshot_version"] += 1
+        summary = NexusTradeSmoke.verify_restart(before, unchanged)
+        self.assertNotIn(account_sentinel, json.dumps(summary, sort_keys=True))
 
 
 if __name__ == "__main__":

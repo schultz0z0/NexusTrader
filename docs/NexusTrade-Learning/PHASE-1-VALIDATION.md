@@ -144,6 +144,29 @@ O primeiro round de review foi executado totalmente offline, sem Docker ou rede:
 Este hardening não altera a decisão GO nem reutiliza as autorizações de rede da
 validação original.
 
+## Hardening pós-review — round 2
+
+O segundo round também foi executado totalmente offline, sem Docker ou rede:
+
+- RED de identidade de restart: 3 testes com 9 subfalhas esperadas para `version.id`,
+  configuração, campanhas duplicadas/malformadas, ponteiros de runtime, conta e
+  emergency stop; GREEN 3/3 em 0.001s.
+- A identidade de cada lane agora preserva exatamente lane, `version.id`, hash e
+  configuração. Lanes ausentes ou duplicadas são recusadas antes da comparação.
+- A lista durável contém exatamente uma campanha ACTIVE de Trial, com ID único e
+  `nexus_version_id` coerente; a comparação usa a lista canônica de
+  ID/lane/version/status, sem colapso por `set`.
+- O runtime preserva os ponteiros Champion/Trial, Champion enabled/type/account e
+  emergency stop. A conta é comparada somente em memória e não aparece em erros ou
+  no resumo público, conforme teste com sentinela.
+- Regressão focused smoke/start/auth: 28/28 em 7.539s.
+- Suíte Python completa pós-review: 461/461 em 49.943s.
+- JavaScript pós-review: 17/17 em 107.303ms; `node --check`, `compileall` e
+  `pip check` exit 0.
+
+Este hardening preserva a evidência Champion V1 e os ponteiros validados no restart
+original; nenhuma nova execução externa foi realizada.
+
 ## Comandos repetíveis
 
 ```powershell

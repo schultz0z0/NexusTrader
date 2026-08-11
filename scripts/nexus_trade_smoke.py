@@ -103,6 +103,14 @@ class NexusTradeSmoke:
         ("exports", "/api/v1/nexus-trade/exports"),
     )
     DURABLE_COLLECTIONS = ("decisions", "trades", "reports", "proposals")
+    RUNTIME_IDENTITY_FIELDS = (
+        "champion_version_id",
+        "trial_version_id",
+        "champion_enabled",
+        "champion_account_id",
+        "champion_account_type",
+        "emergency_stop",
+    )
 
     def __init__(
         self,
@@ -159,21 +167,37 @@ class NexusTradeSmoke:
         runtime = snapshot.get("runtime")
         if not isinstance(runtime, dict) or runtime.get("champion_account_type") != "demo":
             raise SmokeSafetyError("runtime_not_provably_demo")
+        if any(
+            not isinstance(runtime.get(field), str) or not runtime[field]
+            for field in ("champion_version_id", "trial_version_id")
+        ):
+            raise SmokeSafetyError("runtime_version_pointer_invalid")
+        if not isinstance(runtime.get("champion_account_id"), str):
+            raise SmokeSafetyError("runtime_account_identity_invalid")
         if type(runtime.get("champion_enabled")) is not int or runtime["champion_enabled"] != 0:
             raise SmokeSafetyError("champion_must_be_off")
+        if type(runtime.get("emergency_stop")) is not int or runtime["emergency_stop"] not in {0, 1}:
+            raise SmokeSafetyError("runtime_emergency_stop_invalid")
         if snapshot.get("emergency_stop") != bool(runtime.get("emergency_stop", 0)):
             raise SmokeSafetyError("emergency_stop_mismatch")
 
         lanes = snapshot.get("lanes")
-        if not isinstance(lanes, list) or {row.get("lane") for row in lanes} != NEXUS_LANES:
+        if not isinstance(lanes, list) or any(not isinstance(row, dict) for row in lanes):
             raise SmokeSafetyError("lane_singleton_contract_invalid")
-        if len(lanes) != len(NEXUS_LANES):
+        lane_names = [row.get("lane") for row in lanes]
+        if set(lane_names) != NEXUS_LANES:
+            raise SmokeSafetyError("lane_singleton_contract_invalid")
+        if len(lane_names) != len(set(lane_names)):
             raise SmokeSafetyError("lane_duplicate_detected")
+        lane_versions = {}
         for lane in lanes:
             version = lane.get("version")
             profile = version.get("snapshot") if isinstance(version, dict) else None
             if not isinstance(profile, dict):
                 raise SmokeSafetyError("version_profile_missing")
+            version_id = version.get("id")
+            if not isinstance(version_id, str) or not version_id:
+                raise SmokeSafetyError("version_id_invalid")
             expected = {
                 "symbol": NEXUS_SYMBOL,
                 "timeframe_seconds": NEXUS_TIMEFRAME_SECONDS,
@@ -184,12 +208,42 @@ class NexusTradeSmoke:
             version_hash = version.get("version_hash")
             if not isinstance(version_hash, str) or len(version_hash) != 64:
                 raise SmokeSafetyError("version_hash_invalid")
+            lane_versions[lane["lane"]] = version_id
+        if (
+            runtime["champion_version_id"] != lane_versions["champion_baseline"]
+            or runtime["trial_version_id"] != lane_versions["challenger_trial"]
+        ):
+            raise SmokeSafetyError("runtime_lane_pointer_mismatch")
 
         campaigns = snapshot.get("active_campaigns")
         if not isinstance(campaigns, list) or not campaigns:
             raise SmokeSafetyError("active_campaign_missing")
-        if any(row.get("status") != "ACTIVE" for row in campaigns):
-            raise SmokeSafetyError("active_campaign_status_invalid")
+        campaign_ids = []
+        campaign_lanes = []
+        for row in campaigns:
+            if not isinstance(row, dict):
+                raise SmokeSafetyError("active_campaign_schema_invalid")
+            campaign_id = row.get("id")
+            version_id = row.get("nexus_version_id")
+            lane = row.get("lane")
+            if not isinstance(campaign_id, str) or not campaign_id:
+                raise SmokeSafetyError("active_campaign_schema_invalid")
+            if not isinstance(version_id, str) or not version_id:
+                raise SmokeSafetyError("active_campaign_schema_invalid")
+            if lane not in NEXUS_LANES:
+                raise SmokeSafetyError("active_campaign_lane_invalid")
+            if row.get("status") != "ACTIVE":
+                raise SmokeSafetyError("active_campaign_status_invalid")
+            campaign_ids.append(campaign_id)
+            campaign_lanes.append(lane)
+        if len(campaign_ids) != len(set(campaign_ids)):
+            raise SmokeSafetyError("duplicate_active_campaign_detected")
+        if len(campaign_lanes) != len(set(campaign_lanes)):
+            raise SmokeSafetyError("active_campaign_lane_duplicate")
+        if campaign_lanes != ["challenger_trial"]:
+            raise SmokeSafetyError("active_campaign_contract_invalid")
+        if campaigns[0]["nexus_version_id"] != lane_versions["challenger_trial"]:
+            raise SmokeSafetyError("active_campaign_version_mismatch")
         cls._validate_journals(snapshot)
 
     @staticmethod
@@ -349,26 +403,34 @@ class NexusTradeSmoke:
             if len(after_rows) < len(before_rows):
                 raise SmokeSafetyError(f"{field}_decreased_on_restart")
         before_versions = {
-            row["lane"]: row["version"]["version_hash"] for row in before["lanes"]
+            row["lane"]: {
+                field: row["version"][field]
+                for field in ("id", "version_hash", "snapshot")
+            }
+            for row in before["lanes"]
         }
         after_versions = {
-            row["lane"]: row["version"]["version_hash"] for row in after["lanes"]
+            row["lane"]: {
+                field: row["version"][field]
+                for field in ("id", "version_hash", "snapshot")
+            }
+            for row in after["lanes"]
         }
         if before_versions != after_versions:
             raise SmokeSafetyError("lane_version_changed_on_restart")
-        before_campaigns = {
-            (row.get("lane"), row.get("id"), row.get("status"))
+        before_campaigns = [
+            (row["id"], row["lane"], row["nexus_version_id"], row["status"])
             for row in before["active_campaigns"]
-        }
-        after_campaigns = {
-            (row.get("lane"), row.get("id"), row.get("status"))
+        ]
+        after_campaigns = [
+            (row["id"], row["lane"], row["nexus_version_id"], row["status"])
             for row in after["active_campaigns"]
-        }
+        ]
         if before_campaigns != after_campaigns:
             raise SmokeSafetyError("campaign_changed_on_restart")
-        for field in ("champion_enabled", "champion_account_type"):
+        for field in cls.RUNTIME_IDENTITY_FIELDS:
             if before["runtime"].get(field) != after["runtime"].get(field):
-                raise SmokeSafetyError("runtime_mode_changed_on_restart")
+                raise SmokeSafetyError("runtime_identity_changed_on_restart")
         return {
             "outcome": "PASS_RESTART",
             "snapshot_version_before": before["snapshot_version"],
