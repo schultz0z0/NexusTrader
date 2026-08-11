@@ -67,6 +67,11 @@ R_100/M1/58s/USD 0.35, lanes, versões, campanha, relatórios e exports. Ele nun
 modo, solicita proposal ou chama compra. `--demo-only` apenas observa por uma janela de
 pelo menos uma virada M1; sem sinal aprovado retorna `NO_SIGNAL`.
 
+O transporte não segue redirects, inclusive para outro endpoint loopback, e revalida a
+URL efetiva antes de ler a resposta para que `X-API-Key` nunca seja encaminhada. A
+comparação de restart também recusa regressão de `snapshot_version` ou redução de
+decisions, trades, reports e proposals; ambos os modos do smoke exigem Champion OFF.
+
 ```powershell
 $env:ALLOW_REAL_TRADING = "false"
 $env:DERIV_ACCOUNT_TYPE = "demo"

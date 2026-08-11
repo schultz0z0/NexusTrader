@@ -1,5 +1,9 @@
 import json
+import urllib.request
 import unittest
+from unittest.mock import patch
+
+from scripts import nexus_trade_smoke as smoke_module
 
 
 try:
@@ -7,11 +11,13 @@ try:
         NexusTradeSmoke,
         SmokeSafetyError,
         TransportError,
+        UrllibTransport,
     )
 except ModuleNotFoundError:
     NexusTradeSmoke = None
     SmokeSafetyError = RuntimeError
     TransportError = RuntimeError
+    UrllibTransport = None
 
 
 API_KEY = "dashboard-secret-value"
@@ -127,6 +133,72 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
             "scripts.nexus_trade_smoke must implement the offline smoke contract",
         )
 
+    def test_redirect_handler_rejects_loopback_and_external_targets_without_forwarding_key(self):
+        """Catches delegating any 3xx into a new request carrying dashboard authority."""
+        handler_type = getattr(smoke_module, "FailClosedRedirectHandler", None)
+        self.assertIsNotNone(handler_type)
+        handler = handler_type()
+        request = urllib.request.Request(
+            "http://127.0.0.1:8990/api/v1/health/live",
+            headers={"X-API-Key": API_KEY},
+        )
+        delegated = []
+
+        def capture_delegate(*args, **kwargs):
+            delegated.append((args, kwargs))
+
+        with patch.object(
+            urllib.request.HTTPRedirectHandler,
+            "redirect_request",
+            side_effect=capture_delegate,
+        ):
+            for code, target in (
+                (300, "http://127.0.0.1:8990/redirected"),
+                (399, "https://outside.invalid/collect"),
+            ):
+                with self.subTest(code=code), self.assertRaisesRegex(
+                    TransportError,
+                    "redirect_refused",
+                ) as caught:
+                    handler.redirect_request(request, None, code, "redirect", {}, target)
+                self.assertNotIn(API_KEY, str(caught.exception))
+
+        self.assertEqual(delegated, [])
+
+    def test_transport_revalidates_effective_response_url_before_reading_payload(self):
+        """Catches an injected/future opener returning data from a non-loopback URL."""
+
+        class SyntheticResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return "https://outside.invalid/collect"
+
+            def read(self, _limit):
+                return b'{"status":"alive"}'
+
+        class SyntheticOpener:
+            def open(self, *_args, **_kwargs):
+                return SyntheticResponse()
+
+        transport = UrllibTransport("http://127.0.0.1:8990")
+        opener = SyntheticOpener()
+        object.__setattr__(transport, "_opener", opener)
+
+        with patch.object(urllib.request, "urlopen", side_effect=opener.open):
+            with self.assertRaisesRegex(TransportError, "effective_url_not_loopback"):
+                transport.get_json(
+                    "/api/v1/health/live",
+                    headers={"X-API-Key": API_KEY},
+                    timeout=1.0,
+                )
+
     def test_refuses_real_or_noncanonical_nexus_profile(self):
         """Catches removal of REAL/profile fail-closed checks."""
         self.require_subject()
@@ -157,6 +229,18 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
         self.assertNotIn("account_id", serialized)
         self.assertNotIn("ticket", serialized)
         self.assertNotIn("token", serialized)
+
+    def test_read_only_refuses_champion_on_even_without_demo_observation(self):
+        """Catches a standard smoke proving DEMO profile while Champion remains armed."""
+        champion_on = canonical_snapshot()
+        champion_on["runtime"]["champion_enabled"] = 1
+        smoke = NexusTradeSmoke(
+            FakeHttpTransport(healthy_responses(champion_on)),
+            API_KEY,
+        )
+
+        with self.assertRaisesRegex(SmokeSafetyError, "champion_must_be_off"):
+            smoke.run_read_only()
 
     def test_transient_transport_failure_reconnects_with_a_bounded_retry(self):
         """Catches unbounded retry loops and failure to reconnect once."""
@@ -333,6 +417,73 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
         changed["lanes"][1]["version"]["version_hash"] = "c" * 64
         with self.assertRaises(SmokeSafetyError):
             smoke.verify_restart(before, changed)
+
+    def test_restart_refuses_snapshot_or_durable_counter_decrease(self):
+        """Catches a restart accepting rollback or loss of durable journal rows."""
+        before = canonical_snapshot(
+            snapshot_version=8,
+            decisions=[{"id": "decision-1"}, {"id": "decision-2"}],
+            trades=[
+                {"contract_id": 401, "lane": "champion_baseline", "status": "closed"},
+                {"contract_id": 402, "lane": "challenger_trial", "status": "closed"},
+            ],
+            reports=[{"id": "report-1"}, {"id": "report-2"}],
+            proposals=[{"id": "proposal-1"}, {"id": "proposal-2"}],
+        )
+        cases = {
+            "snapshot_version": canonical_snapshot(**{
+                **before,
+                "snapshot_version": 7,
+            }),
+            "decisions": canonical_snapshot(**{
+                **before,
+                "decisions": before["decisions"][:1],
+            }),
+            "trades": canonical_snapshot(**{
+                **before,
+                "trades": before["trades"][:1],
+            }),
+            "reports": canonical_snapshot(**{
+                **before,
+                "reports": before["reports"][:1],
+            }),
+            "proposals": canonical_snapshot(**{
+                **before,
+                "proposals": before["proposals"][:1],
+            }),
+        }
+
+        for field, after in cases.items():
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SmokeSafetyError,
+                "decreased",
+            ):
+                NexusTradeSmoke.verify_restart(before, after)
+
+    def test_restart_refuses_missing_or_malformed_durable_counters(self):
+        """Catches treating absent/non-list durable collections as a zero counter."""
+        before = canonical_snapshot()
+        for field, malformed in (
+            ("reports", None),
+            ("proposals", "not-a-list"),
+        ):
+            after = canonical_snapshot()
+            after[field] = malformed
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SmokeSafetyError,
+                "durable_counter_invalid",
+            ):
+                NexusTradeSmoke.verify_restart(before, after)
+
+    def test_restart_refuses_non_integer_snapshot_versions(self):
+        """Catches coercing bool, string or float versions into durable revisions."""
+        for invalid in (None, True, "8", 8.0):
+            after = canonical_snapshot(snapshot_version=invalid)
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                SmokeSafetyError,
+                "snapshot_version_invalid",
+            ):
+                NexusTradeSmoke.verify_restart(canonical_snapshot(), after)
 
 
 if __name__ == "__main__":

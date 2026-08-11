@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -31,17 +31,41 @@ class TransportError(RuntimeError):
     """A sanitized transient local transport error."""
 
 
+def _is_loopback_http_url(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
+
+
+class FailClosedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect before urllib can construct a successor request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise TransportError("redirect_refused")
+
+
 @dataclass(frozen=True)
 class UrllibTransport:
     base_url: str
+    _opener: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         parsed = urllib.parse.urlsplit(self.base_url)
-        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+        if not _is_loopback_http_url(self.base_url):
             raise SmokeSafetyError("base_url_must_be_loopback_http")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        if parsed.query:
             raise SmokeSafetyError("base_url_must_not_contain_authority_or_query")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        object.__setattr__(
+            self,
+            "_opener",
+            urllib.request.build_opener(FailClosedRedirectHandler()),
+        )
 
     def get_json(self, path: str, *, headers: dict[str, str], timeout: float) -> dict:
         request = urllib.request.Request(
@@ -50,7 +74,10 @@ class UrllibTransport:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
+                effective_url = response.geturl()
+                if not isinstance(effective_url, str) or not _is_loopback_http_url(effective_url):
+                    raise TransportError("effective_url_not_loopback")
                 if response.status != 200:
                     raise TransportError(f"http_status_{response.status}")
                 payload = response.read(4 * 1024 * 1024 + 1)
@@ -75,6 +102,7 @@ class NexusTradeSmoke:
         ("reports", "/api/v1/nexus-trade/reports"),
         ("exports", "/api/v1/nexus-trade/exports"),
     )
+    DURABLE_COLLECTIONS = ("decisions", "trades", "reports", "proposals")
 
     def __init__(
         self,
@@ -131,6 +159,8 @@ class NexusTradeSmoke:
         runtime = snapshot.get("runtime")
         if not isinstance(runtime, dict) or runtime.get("champion_account_type") != "demo":
             raise SmokeSafetyError("runtime_not_provably_demo")
+        if type(runtime.get("champion_enabled")) is not int or runtime["champion_enabled"] != 0:
+            raise SmokeSafetyError("champion_must_be_off")
         if snapshot.get("emergency_stop") != bool(runtime.get("emergency_stop", 0)):
             raise SmokeSafetyError("emergency_stop_mismatch")
 
@@ -307,6 +337,17 @@ class NexusTradeSmoke:
     def verify_restart(cls, before: dict, after: dict) -> dict:
         cls._validate_snapshot(before)
         cls._validate_snapshot(after)
+        if after["snapshot_version"] < before["snapshot_version"]:
+            raise SmokeSafetyError("snapshot_version_decreased_on_restart")
+        durable_counts = {}
+        for field in cls.DURABLE_COLLECTIONS:
+            before_rows = before.get(field)
+            after_rows = after.get(field)
+            if not isinstance(before_rows, list) or not isinstance(after_rows, list):
+                raise SmokeSafetyError("durable_counter_invalid")
+            durable_counts[field] = (len(before_rows), len(after_rows))
+            if len(after_rows) < len(before_rows):
+                raise SmokeSafetyError(f"{field}_decreased_on_restart")
         before_versions = {
             row["lane"]: row["version"]["version_hash"] for row in before["lanes"]
         }
@@ -334,10 +375,11 @@ class NexusTradeSmoke:
             "snapshot_version_after": after["snapshot_version"],
             "lanes": len(after["lanes"]),
             "campaigns": len(after["active_campaigns"]),
-            "decisions_before": len(before["decisions"]),
-            "decisions_after": len(after["decisions"]),
-            "trades_before": len(before["trades"]),
-            "trades_after": len(after["trades"]),
+            **{
+                f"{field}_{suffix}": counts[index]
+                for field, counts in durable_counts.items()
+                for index, suffix in enumerate(("before", "after"))
+            },
         }
 
 

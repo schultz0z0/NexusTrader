@@ -125,6 +125,25 @@ o valor configurado em memória; ambos retornaram zero, inclusive nos logs de ru
    foram comparados sem nova requisição usando detecção de BOM; o resultado foi
    `PASS_RESTART`.
 
+## Hardening pós-review — round 1
+
+O primeiro round de review foi executado totalmente offline, sem Docker ou rede:
+
+- RED de redirects: 2/2 falhas esperadas; GREEN 2/2. O transporte agora usa opener
+  próprio, recusa qualquer redirect antes de criar successor request e revalida toda
+  URL efetiva como HTTP loopback, sem encaminhar `X-API-Key`.
+- RED de restart: 7 subfalhas esperadas para regressão de versão/decisions/trades/
+  reports/proposals e counters malformados; GREEN 3/3. `snapshot_version` permanece
+  inteiro estrito e todos os counters duráveis disponíveis são monotônicos.
+- RED de Champion: 1 falha esperada; GREEN 1/1. `run_read_only` e, por consequência,
+  o caminho padrão de `--demo-only`, recusam Champion ON mesmo com perfil DEMO.
+- Regressão focused smoke/start/auth: 25/25 em 7.556s.
+- Suíte Python completa pós-review: 458/458 em 48.165s.
+- JavaScript pós-review: 17/17 em 98.620ms; `compileall` e `pip check` exit 0.
+
+Este hardening não altera a decisão GO nem reutiliza as autorizações de rede da
+validação original.
+
 ## Comandos repetíveis
 
 ```powershell
