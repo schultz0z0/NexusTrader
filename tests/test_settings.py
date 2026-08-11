@@ -12,6 +12,8 @@ class SettingsContractTests(unittest.TestCase):
                 DOMAIN="trade.example.com",
                 INTERNAL_API_TOKEN="",
                 DASHBOARD_API_KEY="dashboard-secret",
+                NEXUS_HUMAN_ACTION_KEY="human-secret",
+                NEXUS_HUMAN_ACTOR="human:operator",
             )
 
     def test_dashboard_key_must_not_be_empty_in_production(self):
@@ -22,6 +24,8 @@ class SettingsContractTests(unittest.TestCase):
                 DOMAIN="trade.example.com",
                 INTERNAL_API_TOKEN="internal-secret",
                 DASHBOARD_API_KEY="",
+                NEXUS_HUMAN_ACTION_KEY="human-secret",
+                NEXUS_HUMAN_ACTOR="human:operator",
             )
 
     def test_demo_execution_is_default(self):

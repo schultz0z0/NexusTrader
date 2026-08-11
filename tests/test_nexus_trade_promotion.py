@@ -33,7 +33,7 @@ class PromotionServiceTests(unittest.TestCase):
     def snapshot(self):
         return asyncio.run(self.repository.get_nexus_control_snapshot())
 
-    def seed_valid_proposal(self):
+    def seed_valid_proposal(self, *, recommendation="EVOLVE"):
         registry = CandidateRegistry(self.db_path)
         artifact = ArtifactAndRegistryTests.artifact("trial-current")
         candidate = registry.register(artifact)
@@ -54,7 +54,7 @@ class PromotionServiceTests(unittest.TestCase):
             },
             "complete_days": 7,
             "accumulated_progress": {"operations": 300, "target": 300},
-            "recommendation": "EVOLVE",
+            "recommendation": recommendation,
             "gates": [
                 {"code": code, "status": "PASS", "observed": True,
                  "threshold": True, "reason": "verified"}
@@ -265,7 +265,14 @@ class PromotionServiceTests(unittest.TestCase):
                         "(id,lane,nexus_version_id,campaign_id,symbol,signal_epoch,payload) "
                         "VALUES (?,?,?,?,?,?,?)",
                         (decision_id, "champion_baseline", version_id, campaign_id,
-                         "R_100", 100 + index, json.dumps({"state": state})),
+                         "R_100", 100 + index, json.dumps({
+                             "owner": None,
+                             "state": {
+                                 "position_status": state,
+                                 "owner_decision_id": None,
+                                 "contract_id": None,
+                             },
+                         })),
                     )
                     db.execute(
                         "INSERT INTO nexus_lane_heads(lane,snapshot_id) VALUES (?,?) "
@@ -327,6 +334,49 @@ class PromotionServiceTests(unittest.TestCase):
             self.snapshot()["runtime"]["champion_version_id"],
             before["runtime"]["champion_version_id"],
         )
+
+    def test_approve_fails_closed_when_lane_position_status_is_missing(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        self._install_champion_lane_head(before, {"owner": None, "state": {}})
+        with self.assertRaisesRegex(PromotionRejected, "LANE_CORRUPT"):
+            asyncio.run(
+                self.service.approve(
+                    proposal_id, before["snapshot_version"], "human:operator",
+                    request_id="lane-status-missing", reason="safety check",
+                )
+            )
+        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+
+    def test_approve_fails_closed_when_lane_state_is_malformed(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        self._install_champion_lane_head(before, {"owner": None, "state": "IDLE"})
+        with self.assertRaisesRegex(PromotionRejected, "LANE_CORRUPT"):
+            asyncio.run(
+                self.service.approve(
+                    proposal_id, before["snapshot_version"], "human:operator",
+                    request_id="lane-state-malformed", reason="safety check",
+                )
+            )
+        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+
+    def _install_champion_lane_head(self, before, payload):
+        version_id = before["runtime"]["champion_version_id"]
+        campaign_id = next(
+            row["id"] for row in before["active_campaigns"]
+            if row["lane"] == "challenger_trial"
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO nexus_decisions "
+                "(id,lane,nexus_version_id,campaign_id,symbol,signal_epoch,payload) "
+                "VALUES ('lane-validation','champion_baseline',?,?, 'R_100',100,?)",
+                (version_id, campaign_id, canonical_json(payload)),
+            )
+            db.execute(
+                "INSERT INTO nexus_lane_heads(lane,snapshot_id) "
+                "VALUES ('champion_baseline','lane-validation')"
+            )
+            db.commit()
 
     def test_fault_before_commit_rolls_back_pointer_and_records_fault_without_success_event(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
@@ -446,6 +496,75 @@ class PromotionServiceTests(unittest.TestCase):
             {"nexus.proposal", "nexus.campaign", "nexus.trial_changed"},
         )
 
+    def test_reanalyze_recommendation_requires_reinforced_confirmation_even_with_all_gates_pass(self):
+        proposal_id, _, _, before = self.seed_valid_proposal(recommendation="REANALYZE")
+
+        with self.assertRaisesRegex(PromotionRejected, "CONFIRMATION"):
+            asyncio.run(
+                self.service.approve(
+                    proposal_id, before["snapshot_version"], "human:operator",
+                    request_id="reanalyze-without-confirmation",
+                    reason="human must reinforce this recommendation",
+                    reinforced_confirmation=False,
+                )
+            )
+        committed = asyncio.run(
+            self.service.approve(
+                proposal_id, before["snapshot_version"], "human:operator",
+                request_id="reanalyze-with-confirmation",
+                reason="human explicitly reinforced this recommendation",
+                reinforced_confirmation=True,
+            )
+        )
+        self.assertEqual(committed["outcome"], "COMMITTED")
+
+    def test_corrupt_reanalysis_proposal_is_audited_without_state_mutation(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            active_before = db.execute(
+                "SELECT id FROM nexus_campaigns WHERE status='ACTIVE' ORDER BY lane,id"
+            ).fetchall()
+            db.execute(
+                "UPDATE nexus_proposals SET payload='not-json' WHERE id=?",
+                (proposal_id,),
+            )
+            db.commit()
+
+        with self.assertRaisesRegex(PromotionRejected, "corrupt"):
+            asyncio.run(
+                self.service.reanalyze(
+                    proposal_id, before["snapshot_version"], "human:operator",
+                    request_id="reanalyze-corrupt",
+                    reason="reject corrupt proposal safely",
+                )
+            )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            actual_revision = db.execute(
+                "SELECT config_revision FROM bot_instances WHERE id='nexus-trade'"
+            ).fetchone()[0]
+            runtime = db.execute(
+                "SELECT champion_version_id,trial_version_id FROM nexus_runtime WHERE bot_id='nexus-trade'"
+            ).fetchone()
+            active_campaigns = db.execute(
+                "SELECT id FROM nexus_campaigns WHERE status='ACTIVE' ORDER BY lane,id"
+            ).fetchall()
+            audit = db.execute(
+                "SELECT actor,reason,outcome,error_code FROM nexus_audit_events WHERE request_id=?",
+                ("reanalyze-corrupt",),
+            ).fetchone()
+        self.assertEqual(actual_revision, before["snapshot_version"])
+        self.assertEqual(runtime, (
+            before["runtime"]["champion_version_id"], before["runtime"]["trial_version_id"],
+        ))
+        self.assertEqual(
+            [row[0] for row in active_campaigns],
+            [row[0] for row in active_before],
+        )
+        self.assertEqual(
+            audit,
+            ("human:operator", "reject corrupt proposal safely", "REJECTED", "PROPOSAL_CORRUPT"),
+        )
+
     def test_weekly_trial_replacement_is_exact_atomic_and_concurrent_idempotent(self):
         candidate, artifact = self.seed_qualified_shadow()
         before = self.snapshot()
@@ -453,6 +572,10 @@ class PromotionServiceTests(unittest.TestCase):
         old_trial = before["runtime"]["trial_version_id"]
         old_champion = before["runtime"]["champion_version_id"]
         boundary = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            old_candidate_id = db.execute(
+                "SELECT id FROM nexus_candidates WHERE status='TRIAL'"
+            ).fetchone()[0]
 
         async def replace(request_id):
             return await PromotionService(self.db_path).replace_trial(
@@ -470,6 +593,7 @@ class PromotionServiceTests(unittest.TestCase):
         self.assertEqual(sum(result["changed"] for result in results), 1)
         self.assertEqual(after["runtime"]["champion_version_id"], old_champion)
         self.assertNotEqual(after["runtime"]["trial_version_id"], old_trial)
+        asyncio.run(DatabaseRepository(self.db_path).init_db())
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
             self.assertEqual(
                 db.execute("SELECT status FROM nexus_campaigns WHERE id=?", (old_campaign,)).fetchone()[0],
@@ -486,8 +610,62 @@ class PromotionServiceTests(unittest.TestCase):
             stored_candidate = db.execute(
                 "SELECT status,metadata FROM nexus_candidates WHERE id=?", (candidate["id"],)
             ).fetchone()
-        self.assertEqual(stored_candidate[0], "SHADOW")
+            old_candidate_status = db.execute(
+                "SELECT status FROM nexus_candidates WHERE id=?", (old_candidate_id,)
+            ).fetchone()[0]
+            transition = db.execute(
+                "SELECT old_candidate_id,new_candidate_id,new_version_id,new_campaign_id "
+                "FROM nexus_candidate_role_transitions"
+            ).fetchone()
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "UPDATE nexus_candidates SET status='SHADOW' WHERE id=?",
+                    (candidate["id"],),
+                )
+        self.assertEqual(stored_candidate[0], "TRIAL")
+        self.assertEqual(old_candidate_status, "SHADOW")
         self.assertEqual(stored_candidate[1], artifact.to_json())
+        self.assertEqual(transition[0:2], (old_candidate_id, candidate["id"]))
+        self.assertEqual(transition[2], after["runtime"]["trial_version_id"])
+        self.assertEqual(transition[3], new_campaign)
+
+    def test_trial_role_transition_rolls_back_completely_on_injected_failure(self):
+        candidate, _ = self.seed_qualified_shadow()
+        before = self.snapshot()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            statuses_before = db.execute(
+                "SELECT id,status FROM nexus_candidates ORDER BY id"
+            ).fetchall()
+
+        def inject(phase):
+            if phase == "after_candidate_roles":
+                raise RuntimeError("injected candidate role failure")
+
+        with self.assertRaisesRegex(RuntimeError, "candidate role"):
+            asyncio.run(
+                PromotionService(self.db_path, failure_injector=inject).replace_trial(
+                    datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc),
+                    actor="system:scheduler",
+                    request_id="weekly-role-fault",
+                    reason="prove role transition rollback",
+                    candidate_id=candidate["id"],
+                )
+            )
+        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            self.assertEqual(
+                db.execute("SELECT id,status FROM nexus_candidates ORDER BY id").fetchall(),
+                statuses_before,
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM nexus_candidate_role_transitions").fetchone()[0],
+                0,
+            )
+            fault = db.execute(
+                "SELECT outcome,error_code FROM nexus_audit_events WHERE request_id=?",
+                ("weekly-role-fault",),
+            ).fetchone()
+        self.assertEqual(fault, ("FAULTED", "TRANSITION_FAULT"))
 
     def test_trial_replacement_retains_progress_without_candidate_or_with_pending_proposal(self):
         boundary = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
@@ -607,7 +785,10 @@ class PromotionServiceTests(unittest.TestCase):
         live_store = LiveStore()
         with TestClient(
             create_app(self.repository, live_store),
-            headers={"X-API-Key": settings.DASHBOARD_API_KEY},
+            headers={
+                "X-API-Key": settings.DASHBOARD_API_KEY,
+                "X-Nexus-Human-Key": settings.NEXUS_HUMAN_ACTION_KEY,
+            },
         ) as client:
             denied = client.post(
                 f"/api/v1/nexus-trade/proposals/{proposal_id}/approve",
@@ -646,6 +827,63 @@ class PromotionServiceTests(unittest.TestCase):
         self.assertNotIn("token", serialized)
         self.assertNotIn("c:\\users", serialized)
 
+    def test_dashboard_key_alone_cannot_authorize_a_human_governance_action(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        with TestClient(
+            create_app(self.repository, LiveStore()),
+            headers={"X-API-Key": settings.DASHBOARD_API_KEY},
+        ) as client:
+            requests = (
+                (f"/api/v1/nexus-trade/proposals/{proposal_id}/approve", {}),
+                (f"/api/v1/nexus-trade/proposals/{proposal_id}/reanalyze", {}),
+                ("/api/v1/nexus-trade/rollback", {
+                    "target_version_id": before["runtime"]["champion_version_id"],
+                    "target_version_hash": "0" * 64,
+                }),
+            )
+            responses = [
+                client.post(path, json={
+                    "expected_revision": before["snapshot_version"],
+                    "actor": "forged:administrator",
+                    "request_id": f"api-dashboard-only-{index}",
+                    "reason": "dashboard session is not human-action authority",
+                    **extra,
+                })
+                for index, (path, extra) in enumerate(requests)
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [403, 403, 403])
+        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+
+    def test_human_credential_derives_audit_actor_and_body_cannot_forge_it(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        with TestClient(
+            create_app(self.repository, LiveStore()),
+            headers={
+                "X-API-Key": settings.DASHBOARD_API_KEY,
+                "X-Nexus-Human-Key": settings.NEXUS_HUMAN_ACTION_KEY,
+            },
+        ) as client:
+            response = client.post(
+                f"/api/v1/nexus-trade/proposals/{proposal_id}/approve",
+                json={
+                    "expected_revision": before["snapshot_version"],
+                    "actor": "forged:administrator",
+                    "request_id": "api-trusted-actor",
+                    "reason": "identity must come from trusted configuration",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            actor = db.execute(
+                "SELECT actor FROM nexus_audit_events WHERE request_id=? AND outcome='COMMITTED'",
+                ("api-trusted-actor",),
+            ).fetchone()[0]
+        self.assertEqual(actor, settings.NEXUS_HUMAN_ACTOR)
+        serialized = json.dumps(response.json())
+        self.assertNotIn(settings.NEXUS_HUMAN_ACTION_KEY, serialized)
+
     def test_approve_request_id_is_idempotent_and_cannot_be_rebound(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
         first = asyncio.run(
@@ -677,6 +915,78 @@ class PromotionServiceTests(unittest.TestCase):
                     request_id="approve-idempotent", reason="different decision",
                 )
             )
+
+    def test_outbox_replay_matches_request_id_exactly_even_with_sql_wildcards(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        request_id = "replay_%"
+        injected_event_id = "nexus.campaign:approve:replay-foreign:999:0"
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO nexus_event_outbox(event_id,event_type,snapshot_version,payload) "
+                "VALUES (?,?,?,?)",
+                (injected_event_id, "nexus.campaign", 999, "{}"),
+            )
+            db.commit()
+
+        first = asyncio.run(
+            self.service.approve(
+                proposal_id, before["snapshot_version"], "human:operator",
+                request_id=request_id, reason="exact outbox request identity",
+            )
+        )
+        replay = asyncio.run(
+            PromotionService(self.db_path).approve(
+                proposal_id, before["snapshot_version"], "human:operator",
+                request_id=request_id, reason="exact outbox request identity",
+            )
+        )
+        self.assertEqual(len(first["events"]), 3)
+        self.assertEqual(len(replay["events"]), 3)
+        self.assertNotIn(injected_event_id, {event["event_id"] for event in first["events"]})
+        self.assertNotIn(injected_event_id, {event["event_id"] for event in replay["events"]})
+
+    def test_legacy_outbox_migration_backfills_exact_request_identity_for_restart(self):
+        proposal_id, _, _, before = self.seed_valid_proposal()
+        original = asyncio.run(
+            self.service.approve(
+                proposal_id, before["snapshot_version"], "human:operator",
+                request_id="legacy:outbox_%", reason="preserve deterministic replay",
+            )
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            rows = db.execute(
+                "SELECT event_id,event_type,snapshot_version,payload,created_at "
+                "FROM nexus_event_outbox ORDER BY rowid"
+            ).fetchall()
+            db.execute("DROP TABLE nexus_event_outbox")
+            db.execute(
+                "CREATE TABLE nexus_event_outbox ("
+                "event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,"
+                "snapshot_version INTEGER NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)"
+            )
+            db.executemany(
+                "INSERT INTO nexus_event_outbox VALUES (?,?,?,?,?)",
+                rows,
+            )
+            db.commit()
+
+        asyncio.run(DatabaseRepository(self.db_path).init_db())
+        replay = asyncio.run(
+            PromotionService(self.db_path).approve(
+                proposal_id, before["snapshot_version"], "human:operator",
+                request_id="legacy:outbox_%", reason="preserve deterministic replay",
+            )
+        )
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(
+            {event["event_id"] for event in replay["events"]},
+            {event["event_id"] for event in original["events"]},
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            identities = db.execute(
+                "SELECT DISTINCT action,request_id FROM nexus_event_outbox"
+            ).fetchall()
+        self.assertEqual(identities, [("APPROVE", "legacy:outbox_%")])
 
     def test_reanalyze_request_id_replay_does_not_start_another_campaign(self):
         proposal_id, _, _, before = self.seed_valid_proposal()

@@ -7,7 +7,9 @@ Base: `/api/v1`. Quando `DOMAIN` está configurado, `DASHBOARD_API_KEY` e `INTER
 Rotas do dashboard recebem `X-API-Key: <DASHBOARD_API_KEY>`. Antes de abrir o WebSocket,
 o frontend solicita um ticket curto e de uso único em `POST /ws-tickets/{bot_id}`; a
 chave permanente não entra na URL. A rota de eventos entre containers aceita apenas
-`X-Internal-Token`.
+`X-Internal-Token`. Aprovação, reanálise e rollback do NexusTrade exigem ainda
+`X-Nexus-Human-Key`, configurada por `NEXUS_HUMAN_ACTION_KEY`; o ator auditado é
+derivado no servidor de `NEXUS_HUMAN_ACTOR`, nunca do corpo da requisição.
 
 ## Robôs
 

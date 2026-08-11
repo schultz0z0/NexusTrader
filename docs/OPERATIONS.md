@@ -12,6 +12,7 @@ cd nexus-trader
 cp .env.example .env
 openssl rand -hex 32  # INTERNAL_API_TOKEN
 openssl rand -hex 32  # DASHBOARD_API_KEY (use outro valor)
+openssl rand -hex 32  # NEXUS_HUMAN_ACTION_KEY (use um terceiro valor)
 nano .env
 docker compose config --quiet
 docker compose build --pull
@@ -23,6 +24,7 @@ Configuração inicial segura:
 
 ```dotenv
 DOMAIN=trade.solucoes-nexus.tech
+NEXUS_HUMAN_ACTOR=operador-identificado
 HOST_BIND=127.0.0.1
 HOST_PORT=8989
 API_BASE_URL=http://nexus-api:8000

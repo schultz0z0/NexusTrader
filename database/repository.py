@@ -316,6 +316,68 @@ class DatabaseRepository:
                 await db.execute(
                     f"ALTER TABLE nexus_audit_events ADD COLUMN {name} {definition}"
                 )
+        async with db.execute("PRAGMA table_info(nexus_event_outbox)") as cursor:
+            outbox_columns = {row[1] for row in await cursor.fetchall()}
+        for name in ("action", "request_id"):
+            if name not in outbox_columns:
+                await db.execute(
+                    f"ALTER TABLE nexus_event_outbox ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS ix_nexus_event_outbox_request "
+            "ON nexus_event_outbox(action,request_id)"
+        )
+        async with db.execute(
+            "SELECT event_id,event_type,snapshot_version FROM nexus_event_outbox "
+            "WHERE action='' OR request_id=''"
+        ) as cursor:
+            legacy_events = await cursor.fetchall()
+        for event_id, event_type, snapshot_version in legacy_events:
+            for action in ("APPROVE", "REANALYZE", "ROLLBACK", "REPLACE_TRIAL"):
+                prefix = f"{event_type}:{action.lower()}:"
+                if not event_id.startswith(prefix):
+                    continue
+                request_material = event_id[len(prefix):].rsplit(":", 2)
+                if len(request_material) != 3 or request_material[1] != str(snapshot_version):
+                    continue
+                request_id = request_material[0]
+                if action == "REPLACE_TRIAL":
+                    async with db.execute(
+                        "SELECT 1 FROM nexus_trial_boundaries WHERE request_id=? LIMIT 1",
+                        (request_id,),
+                    ) as cursor:
+                        known = await cursor.fetchone()
+                else:
+                    async with db.execute(
+                        "SELECT 1 FROM nexus_transition_requests WHERE action=? AND request_id=?",
+                        (action, request_id),
+                    ) as cursor:
+                        known = await cursor.fetchone()
+                if known is not None:
+                    await db.execute(
+                        "UPDATE nexus_event_outbox SET action=?,request_id=? WHERE event_id=?",
+                        (action, request_id, event_id),
+                    )
+                break
+        await db.execute("DROP TRIGGER IF EXISTS trg_nexus_candidates_immutable_status")
+        await db.executescript(
+            """
+            CREATE TRIGGER trg_nexus_candidates_immutable_status
+            BEFORE UPDATE OF status ON nexus_candidates
+            WHEN NOT (
+                (OLD.status = 'TRIAL' AND NEW.status = 'SHADOW' AND EXISTS (
+                    SELECT 1 FROM nexus_candidate_role_transitions AS transition
+                    WHERE transition.old_candidate_id = OLD.id
+                ))
+                OR
+                (OLD.status = 'SHADOW' AND NEW.status = 'TRIAL' AND EXISTS (
+                    SELECT 1 FROM nexus_candidate_role_transitions AS transition
+                    WHERE transition.new_candidate_id = OLD.id
+                ))
+            )
+            BEGIN SELECT RAISE(ABORT, 'Nexus candidate status is immutable'); END;
+            """
+        )
 
     @staticmethod
     async def _migrate_nexus_runtime(db):

@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Runtime e seguranca entre os containers
     INTERNAL_API_TOKEN: str = ""
     DASHBOARD_API_KEY: str = ""
+    NEXUS_HUMAN_ACTION_KEY: str = ""
+    NEXUS_HUMAN_ACTOR: str = ""
     API_BASE_URL: str = "http://127.0.0.1:8000"
     BUSINESS_TIMEZONE: str = "America/Sao_Paulo"
     NEXUS_TICK_ARCHIVE_PATH: str = "storage/nexus_ticks"
@@ -54,6 +56,10 @@ class Settings(BaseSettings):
             raise ValueError("INTERNAL_API_TOKEN e obrigatorio fora do DEV_MODE")
         if not self.DEV_MODE and not self.DASHBOARD_API_KEY.strip():
             raise ValueError("DASHBOARD_API_KEY e obrigatorio fora do DEV_MODE")
+        if not self.DEV_MODE and not self.NEXUS_HUMAN_ACTION_KEY.strip():
+            raise ValueError("NEXUS_HUMAN_ACTION_KEY e obrigatorio fora do DEV_MODE")
+        if not self.DEV_MODE and not self.NEXUS_HUMAN_ACTOR.strip():
+            raise ValueError("NEXUS_HUMAN_ACTOR e obrigatorio fora do DEV_MODE")
         if self.EVENT_QUEUE_MAX < 100:
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:

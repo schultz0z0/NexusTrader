@@ -1,9 +1,10 @@
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from api.websocket_manager import ws_manager
+from api.auth import require_nexus_human_action
 from config.settings import settings
 from core.events import runtime_event
 from nexus_trade.constants import NEXUS_DEMO_STAKE, NEXUS_TRADE_BOT_ID
@@ -31,7 +32,6 @@ class NexusRealConfirmationPayload(BaseModel):
 
 class PromotionActionPayload(BaseModel):
     expected_revision: int = Field(ge=1)
-    actor: str = Field(min_length=1, max_length=128)
     request_id: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=512)
     reinforced_confirmation: bool = False
@@ -238,14 +238,19 @@ async def proposals(request: Request):
 
 
 @router.post("/proposals/{proposal_id}/approve")
-async def approve_proposal(proposal_id: str, payload: PromotionActionPayload, request: Request):
+async def approve_proposal(
+    proposal_id: str,
+    payload: PromotionActionPayload,
+    request: Request,
+    trusted_actor: str = Depends(require_nexus_human_action),
+):
     service = PromotionService(_repo(request).db_path)
     return await _governed_call(
         request,
         service.approve(
             proposal_id,
             payload.expected_revision,
-            payload.actor,
+            trusted_actor,
             request_id=payload.request_id,
             reason=payload.reason,
             reinforced_confirmation=payload.reinforced_confirmation,
@@ -254,14 +259,19 @@ async def approve_proposal(proposal_id: str, payload: PromotionActionPayload, re
 
 
 @router.post("/proposals/{proposal_id}/reanalyze")
-async def reanalyze_proposal(proposal_id: str, payload: PromotionActionPayload, request: Request):
+async def reanalyze_proposal(
+    proposal_id: str,
+    payload: PromotionActionPayload,
+    request: Request,
+    trusted_actor: str = Depends(require_nexus_human_action),
+):
     service = PromotionService(_repo(request).db_path)
     return await _governed_call(
         request,
         service.reanalyze(
             proposal_id,
             payload.expected_revision,
-            payload.actor,
+            trusted_actor,
             request_id=payload.request_id,
             reason=payload.reason,
         ),
@@ -269,14 +279,18 @@ async def reanalyze_proposal(proposal_id: str, payload: PromotionActionPayload, 
 
 
 @router.post("/rollback")
-async def rollback_champion(payload: RollbackPayload, request: Request):
+async def rollback_champion(
+    payload: RollbackPayload,
+    request: Request,
+    trusted_actor: str = Depends(require_nexus_human_action),
+):
     service = PromotionService(_repo(request).db_path)
     return await _governed_call(
         request,
         service.rollback(
             payload.target_version_id,
             payload.expected_revision,
-            payload.actor,
+            trusted_actor,
             target_version_hash=payload.target_version_hash,
             request_id=payload.request_id,
             reason=payload.reason,

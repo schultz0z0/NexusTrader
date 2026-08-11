@@ -29,3 +29,15 @@ async def require_internal_token(x_internal_token: str = Header(default="")):
     if expected and not secrets.compare_digest(x_internal_token, expected):
         raise HTTPException(status_code=401, detail="Token interno invalido")
 
+
+async def require_nexus_human_action(
+    x_nexus_human_key: str = Header(default=""),
+) -> str:
+    expected = settings.NEXUS_HUMAN_ACTION_KEY.strip()
+    actor = settings.NEXUS_HUMAN_ACTOR.strip()
+    if not expected or not actor:
+        raise HTTPException(status_code=503, detail="Governanca humana sem credencial configurada")
+    if not secrets.compare_digest(x_nexus_human_key, expected):
+        raise HTTPException(status_code=403, detail="Credencial de governanca humana invalida")
+    return actor
+

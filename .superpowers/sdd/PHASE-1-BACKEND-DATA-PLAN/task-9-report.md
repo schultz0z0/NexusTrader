@@ -38,3 +38,31 @@ Escopo: transições governadas e transacionais do NexusTrade. Nenhuma promoçã
 - Diff dos arquivos protegidos `strategies/donchian_zigzag.py`, `utils/indicators.py` e `strategies/nexus_speed.py` — vazio.
 - Único aviso: `StarletteDeprecationWarning` preexistente do FastAPI TestClient/httpx.
 - Nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.
+
+## Fix round 1/5 — autenticação e invariantes de transição
+
+Os seis achados da revisão foram reproduzidos por REDs comportamentais antes das correções:
+
+- a chave compartilhada do dashboard e um `actor` forjado no JSON aprovavam uma promoção (`200` em vez de `403`);
+- o parser da lane lia `state` como string e ignorava o formato durável real `state.position_status`, inclusive `RESERVED`, além de aceitar estado ausente/malformado;
+- a rotação semanal trocava versão/campanha, mas deixava A como `TRIAL` e B como `SHADOW`;
+- uma recomendação `REANALYZE` com todos os gates `PASS` não exigia confirmação reforçada;
+- payload corrompido em reanálise era revertido sem auditoria da tentativa;
+- replay de outbox com request `replay_%` capturava evento estrangeiro por semântica wildcard de SQL `LIKE` (quatro eventos em vez de três).
+
+As três rotas humanas agora exigem, além da chave do dashboard, `NEXUS_HUMAN_ACTION_KEY`, exclusiva e comparada em tempo constante. A identidade auditada vem apenas de `NEXUS_HUMAN_ACTOR`; `actor` do corpo não possui autoridade. Configuração ausente falha fechada, a chave não entra em resposta/snapshot/audit, e a rotação automática segue restrita ao serviço `system:scheduler`. Compose e documentação declaram as novas variáveis sem incluir secrets reais.
+
+O safety check interpreta estritamente o payload durável, aceita como seguro somente `IDLE` conhecido sem owner/decision/contract/quarantine e rejeita todos os estados governados como inseguros. A rotação grava uma autorização append-only que vincula boundary, request, ator, motivo, candidatos A/B, versões e campanhas; triggers permitem somente A `TRIAL→SHADOW` e B `SHADOW→TRIAL` associados a essa autorização válida. Versão, campanhas, papéis, pointer, CAS, audit e outbox permanecem na mesma transação, com rollback comprovado após failure injection e persistência/revalidação em restart.
+
+`REANALYZE` sempre exige confirmação reforçada, independentemente dos demais gates. Propostas corruptas de reanálise geram auditoria `REJECTED/PROPOSAL_CORRUPT` antes da exceção, sem mudar revision, pointers ou campanhas. A outbox recebeu colunas/index explícitos de `action` e `request_id`; leitura usa igualdade parametrizada e a migração preenche legado somente após validar a identidade contra requests/boundaries duráveis.
+
+### Evidência do fix
+
+- Focado Task 9: **30/30**, 5,335 s.
+- Integração Task 6–9, settings e deploy: **147/147**, 21,027 s.
+- Regressões protegidas: **78/78**, 3,783 s.
+- Full Python: **428/428**, 42,830 s.
+- JavaScript: **17/17**.
+- `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos três robôs/indicadores protegidos: verdes/limpos.
+- O compose foi validado com `.env.example` e valores dummy em memória; nenhum arquivo de segredo foi criado. Permanece apenas o `StarletteDeprecationWarning` preexistente.
+- Nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.

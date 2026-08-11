@@ -125,6 +125,28 @@ class NexusModels:
         CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_candidates_single_trial
         ON nexus_candidates(status) WHERE status = 'TRIAL';
 
+        CREATE TABLE IF NOT EXISTS nexus_candidate_role_transitions (
+            id TEXT PRIMARY KEY,
+            boundary_utc TEXT NOT NULL UNIQUE,
+            request_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            old_candidate_id TEXT NOT NULL,
+            new_candidate_id TEXT NOT NULL,
+            old_version_id TEXT NOT NULL,
+            new_version_id TEXT NOT NULL,
+            old_campaign_id TEXT NOT NULL,
+            new_campaign_id TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (old_candidate_id != new_candidate_id),
+            FOREIGN KEY (old_candidate_id) REFERENCES nexus_candidates(id),
+            FOREIGN KEY (new_candidate_id) REFERENCES nexus_candidates(id),
+            FOREIGN KEY (old_version_id) REFERENCES nexus_versions(id),
+            FOREIGN KEY (new_version_id) REFERENCES nexus_versions(id),
+            FOREIGN KEY (old_campaign_id) REFERENCES nexus_campaigns(id),
+            FOREIGN KEY (new_campaign_id) REFERENCES nexus_campaigns(id)
+        );
+
         CREATE TABLE IF NOT EXISTS nexus_training_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             attempt_hash TEXT NOT NULL,
@@ -200,6 +222,8 @@ class NexusModels:
 
         CREATE TABLE IF NOT EXISTS nexus_event_outbox (
             event_id TEXT PRIMARY KEY,
+            action TEXT NOT NULL DEFAULT '',
+            request_id TEXT NOT NULL DEFAULT '',
             event_type TEXT NOT NULL CHECK (event_type IN (
                 'nexus.proposal', 'nexus.version_changed', 'nexus.trial_changed',
                 'nexus.campaign', 'nexus.runtime'
@@ -286,6 +310,17 @@ class NexusModels:
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus candidate status'); END;
         CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_immutable_status
         BEFORE UPDATE OF status ON nexus_candidates
+        WHEN NOT (
+            (OLD.status = 'TRIAL' AND NEW.status = 'SHADOW' AND EXISTS (
+                SELECT 1 FROM nexus_candidate_role_transitions AS transition
+                WHERE transition.old_candidate_id = OLD.id
+            ))
+            OR
+            (OLD.status = 'SHADOW' AND NEW.status = 'TRIAL' AND EXISTS (
+                SELECT 1 FROM nexus_candidate_role_transitions AS transition
+                WHERE transition.new_candidate_id = OLD.id
+            ))
+        )
         BEGIN SELECT RAISE(ABORT, 'Nexus candidate status is immutable'); END;
         CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_immutable_artifact
         BEFORE UPDATE OF id, artifact_hash, metadata, nexus_version_id ON nexus_candidates
@@ -293,6 +328,43 @@ class NexusModels:
         CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_no_delete
         BEFORE DELETE ON nexus_candidates
         BEGIN SELECT RAISE(ABORT, 'Nexus candidate history is append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidate_role_transition_values
+        BEFORE INSERT ON nexus_candidate_role_transitions
+        WHEN NEW.old_candidate_id = NEW.new_candidate_id
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_candidates
+              WHERE id = NEW.old_candidate_id AND status = 'TRIAL'
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_candidates
+              WHERE id = NEW.new_candidate_id AND status = 'SHADOW'
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_runtime
+              WHERE bot_id = 'nexus-trade' AND trial_version_id = NEW.old_version_id
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_campaigns
+              WHERE id = NEW.old_campaign_id AND lane = 'challenger_trial'
+                AND nexus_version_id = NEW.old_version_id AND status = 'SUPERSEDED'
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_versions
+              WHERE id = NEW.new_version_id AND status = 'TRIAL'
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM nexus_campaigns
+              WHERE id = NEW.new_campaign_id AND lane = 'challenger_trial'
+                AND nexus_version_id = NEW.new_version_id AND status = 'ACTIVE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus candidate role transition'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidate_role_transitions_no_update
+        BEFORE UPDATE ON nexus_candidate_role_transitions
+        BEGIN SELECT RAISE(ABORT, 'Nexus candidate role transitions are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidate_role_transitions_no_delete
+        BEFORE DELETE ON nexus_candidate_role_transitions
+        BEGIN SELECT RAISE(ABORT, 'Nexus candidate role transitions are append-only'); END;
 
         CREATE TRIGGER IF NOT EXISTS trg_nexus_training_attempts_no_update
         BEFORE UPDATE ON nexus_training_attempts

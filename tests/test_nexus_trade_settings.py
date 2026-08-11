@@ -18,6 +18,8 @@ class NexusTradeSettingsTests(unittest.TestCase):
                 DERIV_API_TOKEN="test-token",
                 INTERNAL_API_TOKEN="internal-token",
                 DASHBOARD_API_KEY="dashboard-key",
+                NEXUS_HUMAN_ACTION_KEY="human-key",
+                NEXUS_HUMAN_ACTOR="human:operator",
                 NEXUS_DEMO_STAKE=0.36,
             )
 
@@ -29,6 +31,8 @@ class NexusTradeSettingsTests(unittest.TestCase):
                 DERIV_API_TOKEN="test-token",
                 INTERNAL_API_TOKEN="internal-token",
                 DASHBOARD_API_KEY="dashboard-key",
+                NEXUS_HUMAN_ACTION_KEY="human-key",
+                NEXUS_HUMAN_ACTOR="human:operator",
                 NEXUS_DAILY_CLOSE_HOUR=24,
             )
 
@@ -40,6 +44,8 @@ class NexusTradeSettingsTests(unittest.TestCase):
                 DERIV_API_TOKEN="test-token",
                 INTERNAL_API_TOKEN="internal-token",
                 DASHBOARD_API_KEY="dashboard-key",
+                NEXUS_HUMAN_ACTION_KEY="human-key",
+                NEXUS_HUMAN_ACTOR="human:operator",
                 NEXUS_ENTRY_MAX_DELAY_SECONDS=3,
             )
 

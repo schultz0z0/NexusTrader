@@ -332,8 +332,21 @@ class PromotionService:
             try:
                 payload = json.loads(proposal["payload"])
             except (TypeError, json.JSONDecodeError) as exc:
-                await db.rollback()
+                await self._audit(
+                    db, "REANALYZE", actor, reason, request_id,
+                    expected_revision, actual, "REJECTED", before, before,
+                    error_code="PROPOSAL_CORRUPT",
+                )
+                await db.commit()
                 raise PromotionRejected("proposal payload is corrupt") from exc
+            if not isinstance(payload, dict):
+                await self._audit(
+                    db, "REANALYZE", actor, reason, request_id,
+                    expected_revision, actual, "REJECTED", before, before,
+                    error_code="PROPOSAL_CORRUPT",
+                )
+                await db.commit()
+                raise PromotionRejected("proposal payload is corrupt")
             async with db.execute(
                 "SELECT * FROM nexus_campaigns WHERE id=? AND lane='challenger_trial' AND status='ACTIVE'",
                 (proposal["campaign_id"],),
@@ -468,6 +481,24 @@ class PromotionService:
                 )
                 await db.commit()
                 return result
+            async with db.execute(
+                "SELECT id FROM nexus_candidates WHERE status='TRIAL'"
+            ) as cursor:
+                old_candidate = await cursor.fetchone()
+            async with db.execute(
+                "SELECT id FROM nexus_campaigns WHERE lane='challenger_trial' "
+                "AND nexus_version_id=? AND status='ACTIVE'",
+                (before["trial_version_id"],),
+            ) as cursor:
+                old_campaign = await cursor.fetchone()
+            if old_candidate is None or old_campaign is None:
+                await self._audit(
+                    db, "REPLACE_TRIAL", actor, reason, request_id,
+                    actual, actual, "REJECTED", before, before,
+                    error_code="ACTIVE_TRIAL_IDENTITY_INVALID",
+                )
+                await db.commit()
+                raise PromotionRejected("active Trial candidate/campaign/version identity is invalid")
             try:
                 artifact = CandidateArtifact.from_json(candidate["metadata"])
             except (ArtifactIntegrityError, TypeError, ValueError) as exc:
@@ -494,16 +525,57 @@ class PromotionService:
                 "INSERT INTO nexus_versions(id,name,status,version_hash,snapshot) VALUES (?,?,?,?,?)",
                 (version_id, f"Trial {version_hash[:8]}", "TRIAL", version_hash, encoded),
             )
-            await db.execute(
+            campaign_update = await db.execute(
                 "UPDATE nexus_campaigns SET status='SUPERSEDED',ended_at=? "
-                "WHERE lane='challenger_trial' AND status='ACTIVE'",
-                (boundary_utc,),
+                "WHERE id=? AND lane='challenger_trial' AND nexus_version_id=? AND status='ACTIVE'",
+                (boundary_utc, old_campaign["id"], before["trial_version_id"]),
             )
+            if campaign_update.rowcount != 1:
+                await db.rollback()
+                raise PromotionConflict("active Trial campaign changed during replacement")
             campaign_id = f"trial-{version_hash[:16]}-{local.date().isoformat()}"
             await db.execute(
                 "INSERT INTO nexus_campaigns(id,lane,nexus_version_id,status,started_at) "
                 "VALUES (?,?,?,'ACTIVE',?)",
                 (campaign_id, "challenger_trial", version_id, boundary_utc),
+            )
+            transition_id = "trial-role-" + hashlib.sha256(
+                canonical_json({
+                    "boundary_utc": boundary_utc,
+                    "request_id": request_id,
+                    "old_candidate_id": old_candidate["id"],
+                    "new_candidate_id": candidate["id"],
+                    "old_version_id": before["trial_version_id"],
+                    "new_version_id": version_id,
+                    "old_campaign_id": old_campaign["id"],
+                    "new_campaign_id": campaign_id,
+                }).encode("utf-8")
+            ).hexdigest()[:32]
+            await db.execute(
+                "INSERT INTO nexus_candidate_role_transitions ("
+                "id,boundary_utc,request_id,actor,reason,old_candidate_id,new_candidate_id,"
+                "old_version_id,new_version_id,old_campaign_id,new_campaign_id"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    transition_id, boundary_utc, request_id, actor, reason,
+                    old_candidate["id"], candidate["id"], before["trial_version_id"],
+                    version_id, old_campaign["id"], campaign_id,
+                ),
+            )
+            old_role = await db.execute(
+                "UPDATE nexus_candidates SET status='SHADOW' WHERE id=? AND status='TRIAL'",
+                (old_candidate["id"],),
+            )
+            new_role = await db.execute(
+                "UPDATE nexus_candidates SET status='TRIAL' WHERE id=? AND status='SHADOW'",
+                (candidate["id"],),
+            )
+            if old_role.rowcount != 1 or new_role.rowcount != 1:
+                await db.rollback()
+                raise PromotionConflict("Trial candidate roles changed during replacement")
+            await self._fault_point(
+                db, "after_candidate_roles", "REPLACE_TRIAL", actor, reason, request_id,
+                actual, actual, before,
             )
             await db.execute(
                 "UPDATE nexus_runtime SET trial_version_id=?,updated_at=CURRENT_TIMESTAMP WHERE bot_id=?",
@@ -910,6 +982,8 @@ class PromotionService:
             raise PromotionRejected("HARD_GATE_FAILED")
         non_passing = [code for code, status in gate_map.items() if status != "PASS"]
         recommendation = report_snapshot.get("recommendation")
+        if recommendation == "REANALYZE" and reinforced_confirmation is not True:
+            raise PromotionRejected("REANALYZE_CONFIRMATION_REQUIRED")
         if non_passing and not (recommendation == "REANALYZE" and reinforced_confirmation is True):
             raise PromotionRejected("SOFT_GATE_CONFIRMATION_REQUIRED")
         if recommendation not in {"EVOLVE", "RECOMMEND_EVOLUTION", "REANALYZE"}:
@@ -930,7 +1004,20 @@ class PromotionService:
                 lane = json.loads(row["payload"])
             except (TypeError, json.JSONDecodeError) as exc:
                 raise PromotionRejected("CHAMPION_LANE_CORRUPT") from exc
-            if str(lane.get("state", "")).upper() in unsafe_states or lane.get("owner"):
+            if not isinstance(lane, dict) or not isinstance(lane.get("state"), dict):
+                raise PromotionRejected("CHAMPION_LANE_CORRUPT")
+            state = lane["state"]
+            position_status = state.get("position_status")
+            known_states = unsafe_states | {"IDLE"}
+            if type(position_status) is not str or position_status not in known_states:
+                raise PromotionRejected("CHAMPION_LANE_CORRUPT")
+            owner_fields = (
+                lane.get("owner"),
+                state.get("owner_decision_id"),
+                state.get("contract_id"),
+                state.get("quarantine_correlation_id"),
+            )
+            if position_status in unsafe_states or any(value is not None for value in owner_fields):
                 raise PromotionRejected("CHAMPION_LANE_UNSAFE")
         async with db.execute(
             """SELECT 1 FROM order_intents WHERE bot_id=? AND lane='champion_baseline'
@@ -952,15 +1039,17 @@ class PromotionService:
         for index, (event_type, payload) in enumerate(events):
             event_id = f"{event_type}:{action.lower()}:{request_id}:{revision}:{index}"
             await db.execute(
-                "INSERT INTO nexus_event_outbox (event_id,event_type,snapshot_version,payload) VALUES (?,?,?,?)",
-                (event_id, event_type, revision, canonical_json(payload)),
+                "INSERT INTO nexus_event_outbox "
+                "(event_id,action,request_id,event_type,snapshot_version,payload) "
+                "VALUES (?,?,?,?,?,?)",
+                (event_id, action, request_id, event_type, revision, canonical_json(payload)),
             )
 
     async def _events_for_request(self, action: str, request_id: str) -> list[dict]:
-        pattern = f"%:{action.lower()}:{request_id}:%"
         async with self._connection() as db:
             async with db.execute(
-                "SELECT * FROM nexus_event_outbox WHERE event_id LIKE ? ORDER BY rowid", (pattern,)
+                "SELECT * FROM nexus_event_outbox WHERE action=? AND request_id=? ORDER BY rowid",
+                (action, request_id),
             ) as cursor:
                 rows = await cursor.fetchall()
         return [

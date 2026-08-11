@@ -63,7 +63,11 @@ horas fora de `0..23`.
 
 Para importar `config.settings` durante a suíte de testes sem habilitar `DEV_MODE`,
 forneça valores fictícios para `DERIV_APP_ID`, `DERIV_API_TOKEN`, `INTERNAL_API_TOKEN`
-e `DASHBOARD_API_KEY` no ambiente do processo de teste.
+e `DASHBOARD_API_KEY` no ambiente do processo de teste. As rotas humanas de
+governanca NexusTrade tambem exigem `NEXUS_HUMAN_ACTION_KEY` (segredo exclusivo,
+diferente das chaves de dashboard, canal interno e REAL) e derivam a identidade
+de auditoria de `NEXUS_HUMAN_ACTOR`; nenhum dos dois deve ser enviado no corpo,
+registrado em logs ou exposto em snapshots.
 
 ### Replay/paper determinístico
 
