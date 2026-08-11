@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,9 @@ from config.settings import settings
 from database.repository import DatabaseRepository
 from core.events import is_critical_event
 from nexus_trade.domain import Lane
+from nexus_trade.reports import ReportService
+from nexus_trade.scheduler import BrasiliaSchedule
+from tests.test_nexus_trade_reports import report_evidence
 
 
 class NexusTradeApiTests(unittest.TestCase):
@@ -171,6 +175,36 @@ class NexusTradeApiTests(unittest.TestCase):
                 self.assertIsInstance(data, list)
                 self.assertEqual(bool(data), should_have_rows)
                 self.assertNotIn("path", json.dumps(data).lower())
+
+    def test_report_history_and_safe_exports_are_thin_service_results(self):
+        service = ReportService(self.repository.db_path)
+        window = BrasiliaSchedule().weekly_window(
+            datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
+        )
+        report = service.close_weekly(window, report_evidence())
+
+        detail = self.client.get(f"/api/v1/nexus-trade/reports/{report.id}")
+        historical = self.client.get("/api/v1/nexus-trade/reports/weekly/2026-08-10")
+        csv_export = self.client.get(
+            f"/api/v1/nexus-trade/reports/{report.id}/exports/csv.zip"
+        )
+        xlsx_export = self.client.get(
+            f"/api/v1/nexus-trade/reports/{report.id}/exports/xlsx"
+        )
+        exports = self.client.get("/api/v1/nexus-trade/exports")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["data"]["report_hash"], report.report_hash)
+        self.assertEqual(historical.json()["data"]["id"], report.id)
+        self.assertEqual(csv_export.status_code, 200)
+        self.assertEqual(csv_export.headers["content-type"], "application/zip")
+        self.assertTrue(csv_export.content.startswith(b"PK"))
+        self.assertEqual(xlsx_export.status_code, 200)
+        self.assertTrue(xlsx_export.content.startswith(b"PK"))
+        serialized = json.dumps(exports.json()).lower()
+        self.assertIn(report.report_hash, serialized)
+        self.assertNotIn("path", serialized)
+        self.assertNotIn("token", serialized)
 
     def test_internal_ingress_reports_incomplete_nexus_envelope_as_rejected(self):
         previous = settings.INTERNAL_API_TOKEN

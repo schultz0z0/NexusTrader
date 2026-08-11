@@ -139,7 +139,25 @@ class NexusModels:
             campaign_id TEXT,
             report_hash TEXT NOT NULL UNIQUE,
             snapshot TEXT NOT NULL DEFAULT '{}',
+            report_type TEXT,
+            window_start_utc TEXT,
+            window_end_utc TEXT,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_nexus_reports_aligned_slot
+        ON nexus_reports(report_type, window_end_utc, campaign_id)
+        WHERE report_type IS NOT NULL AND window_end_utc IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS nexus_report_jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL CHECK (job_type IN ('daily', 'weekly')),
+            window_start_utc TEXT NOT NULL,
+            window_end_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED')),
+            owner_id TEXT NOT NULL,
+            claimed_at_utc TEXT NOT NULL,
+            result_json TEXT,
+            UNIQUE(job_type, window_end_utc)
         );
 
         CREATE TABLE IF NOT EXISTS nexus_proposals (
@@ -244,6 +262,13 @@ class NexusModels:
         CREATE TRIGGER IF NOT EXISTS trg_nexus_training_attempts_no_delete
         BEFORE DELETE ON nexus_training_attempts
         BEGIN SELECT RAISE(ABORT, 'Nexus training attempts are append-only'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_reports_no_update
+        BEFORE UPDATE ON nexus_reports
+        BEGIN SELECT RAISE(ABORT, 'Nexus reports are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_reports_no_delete
+        BEFORE DELETE ON nexus_reports
+        BEGIN SELECT RAISE(ABORT, 'Nexus reports are immutable'); END;
         """
 
     @staticmethod

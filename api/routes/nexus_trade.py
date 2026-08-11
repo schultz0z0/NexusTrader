@@ -1,6 +1,6 @@
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from api.websocket_manager import ws_manager
@@ -150,6 +150,49 @@ async def reports(request: Request):
     return await _list_response(request, "list_nexus_reports")
 
 
+@router.get("/reports/weekly/{aligned_week}")
+async def weekly_report(aligned_week: str, request: Request):
+    try:
+        report = await _repo(request).get_nexus_weekly_report(aligned_week)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if report is None:
+        raise HTTPException(404, "Relatorio semanal nao encontrado")
+    return {
+        "status": "success",
+        "data": request.app.state.live_store.sanitize_event(report),
+    }
+
+
+@router.get("/reports/{report_id}/exports/{format_name}")
+async def report_export(report_id: str, format_name: str, request: Request):
+    try:
+        artifact = await _repo(request).get_nexus_export(report_id, format_name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if artifact is None:
+        raise HTTPException(404, "Relatorio nao encontrado")
+    return Response(
+        content=artifact["content"],
+        media_type=artifact["media_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact["filename"]}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/reports/{report_id}")
+async def report_detail(report_id: str, request: Request):
+    report = await _repo(request).get_nexus_report(report_id)
+    if report is None:
+        raise HTTPException(404, "Relatorio nao encontrado")
+    return {
+        "status": "success",
+        "data": request.app.state.live_store.sanitize_event(report),
+    }
+
+
 @router.get("/proposals")
 async def proposals(request: Request):
     return await _list_response(request, "list_nexus_proposals")
@@ -157,6 +200,4 @@ async def proposals(request: Request):
 
 @router.get("/exports")
 async def exports(request: Request):
-    # Task 8 will populate immutable export artifacts. Until then there is no
-    # filesystem lookup and therefore no user-controlled path to resolve.
     return await _list_response(request, "list_nexus_exports")

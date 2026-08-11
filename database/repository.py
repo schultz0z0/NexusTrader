@@ -42,6 +42,7 @@ class DatabaseRepository:
             await self._migrate_trade_columns(db)
             await self._migrate_nexus_tick_segments(db)
             await self._migrate_nexus_runtime(db)
+            await self._migrate_nexus_reports(db)
             await db.executescript(NexusModels.create_tables_sql())
             await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
@@ -282,6 +283,18 @@ class DatabaseRepository:
             await db.execute("ROLLBACK TO SAVEPOINT rebuild_nexus_tick_segments")
             await db.execute("RELEASE SAVEPOINT rebuild_nexus_tick_segments")
             raise
+
+    async def _migrate_nexus_reports(self, db):
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nexus_reports'"
+        ) as cursor:
+            if await cursor.fetchone() is None:
+                return
+        async with db.execute("PRAGMA table_info(nexus_reports)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        for name in ("report_type", "window_start_utc", "window_end_utc"):
+            if name not in columns:
+                await db.execute(f"ALTER TABLE nexus_reports ADD COLUMN {name} TEXT")
 
     @staticmethod
     async def _migrate_nexus_runtime(db):
@@ -1187,13 +1200,73 @@ class DatabaseRepository:
         return await NexusTradeRepository(self.db_path).list_campaigns()
 
     async def list_nexus_reports(self) -> list:
-        return await NexusTradeRepository(self.db_path).list_reports()
+        from nexus_trade.reports import ReportService
+
+        return ReportService(self.db_path).list_reports()
+
+    async def get_nexus_report(self, report_id: str):
+        from nexus_trade.reports import ReportService
+
+        report = ReportService(self.db_path).get_report(report_id)
+        return None if report is None else report.as_dict()
+
+    async def get_nexus_weekly_report(self, aligned_week: str):
+        from nexus_trade.reports import ReportService
+
+        report = ReportService(self.db_path).get_weekly(aligned_week)
+        return None if report is None else report.as_dict()
 
     async def list_nexus_proposals(self) -> list:
         return await NexusTradeRepository(self.db_path).list_proposals()
 
     async def list_nexus_exports(self) -> list:
-        return []
+        from nexus_trade.exports import ReportExporter
+        from nexus_trade.reports import ReportService
+
+        exporter = ReportExporter()
+        exports = []
+        for row in ReportService(self.db_path).list_reports():
+            for format_name in ("csv_zip", "xlsx"):
+                import hashlib
+
+                content = (
+                    exporter.csv_zip(row)
+                    if format_name == "csv_zip"
+                    else exporter.xlsx(row)
+                )
+                exports.append({
+                    "report_id": row["id"],
+                    "report_hash": row["report_hash"],
+                    "format": format_name,
+                    "filename": exporter.filename(row, format_name),
+                    "content_hash": hashlib.sha256(content).hexdigest(),
+                    "byte_count": len(content),
+                })
+        return exports
+
+    async def get_nexus_export(self, report_id: str, format_name: str):
+        from nexus_trade.exports import ReportExporter
+        from nexus_trade.reports import ReportService
+
+        report = ReportService(self.db_path).get_report(report_id)
+        if report is None:
+            return None
+        exporter = ReportExporter()
+        if format_name == "csv.zip":
+            payload = exporter.csv_zip(report)
+            canonical_format = "csv_zip"
+            media_type = "application/zip"
+        elif format_name == "xlsx":
+            payload = exporter.xlsx(report)
+            canonical_format = "xlsx"
+            media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else:
+            raise ValueError("unsupported NexusTrade export format")
+        return {
+            "content": payload,
+            "filename": exporter.filename(report, canonical_format),
+            "media_type": media_type,
+        }
 
     async def get_order_intent(self, intent_id: str):
         async with self._connection() as db:
