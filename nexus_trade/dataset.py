@@ -31,7 +31,9 @@ class LearningRow:
     features: Mapping[str, float]
     label: int
     stake: float
-    payout: float
+    settled_payout: float
+    profit: float
+    result: str
 
     def canonical(self) -> dict:
         return {
@@ -43,7 +45,9 @@ class LearningRow:
             "features": dict(self.features),
             "label": self.label,
             "stake": self.stake,
-            "payout": self.payout,
+            "settled_payout": self.settled_payout,
+            "profit": self.profit,
+            "result": self.result,
         }
 
 
@@ -188,6 +192,7 @@ class DatasetBuilder:
             "contract_id", "symbol", "timeframe_seconds", "feature_epoch",
             "entry_epoch", "label_epoch", "settled", "status", "contract_type",
             "provenance_hash", "features", "label", "stake", "payout",
+            "profit", "result",
         }
         missing = required - set(raw)
         if missing:
@@ -215,9 +220,30 @@ class DatasetBuilder:
         if raw["label"] not in (0, 1) or type(raw["label"]) is not int:
             raise DatasetRejectedError("label must be an exact binary outcome")
         stake = self._finite_positive(raw["stake"], "stake")
-        payout = self._finite_positive(raw["payout"], "payout")
-        if payout <= stake:
-            raise DatasetRejectedError("winning payout must exceed stake")
+        settled_payout = self._finite(raw["payout"], "settled payout")
+        profit = self._finite(raw["profit"], "profit")
+        if settled_payout < 0:
+            raise DatasetRejectedError("settled payout cannot be negative")
+        result = raw["result"]
+        if result not in {"won", "lost", "tie"}:
+            raise DatasetRejectedError("settled result must be won, lost or tie")
+        expected = {
+            "won": (1, settled_payout - stake),
+            "lost": (0, -stake),
+            "tie": (0, 0.0),
+        }
+        expected_label, expected_profit = expected[result]
+        payout_is_valid = (
+            (result == "won" and settled_payout > stake)
+            or (result == "lost" and math.isclose(settled_payout, 0.0, abs_tol=1e-12))
+            or (result == "tie" and math.isclose(settled_payout, stake, abs_tol=1e-12))
+        )
+        if (
+            raw["label"] != expected_label
+            or not payout_is_valid
+            or not math.isclose(profit, expected_profit, rel_tol=0, abs_tol=1e-9)
+        ):
+            raise DatasetRejectedError("settled result, label, payout and profit are inconsistent")
         features = raw["features"]
         if not isinstance(features, Mapping) or not features:
             raise DatasetRejectedError("feature values are incomplete")
@@ -237,7 +263,9 @@ class DatasetBuilder:
             features=MappingProxyType(normalized_features),
             label=raw["label"],
             stake=stake,
-            payout=payout,
+            settled_payout=settled_payout,
+            profit=profit,
+            result=result,
         )
 
     @staticmethod

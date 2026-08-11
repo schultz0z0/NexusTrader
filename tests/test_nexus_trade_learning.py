@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 
+from database.models import DatabaseModels
 from nexus_trade.artifacts import CandidateArtifact, ArtifactIntegrityError
 from nexus_trade.candidates import CandidateRegistry
 from nexus_trade.dataset import DatasetBuilder, DatasetRejectedError
@@ -26,6 +27,7 @@ def settled_rows(count=30, *, labels=None, horizon=90):
     rows = []
     for index in range(count):
         feature_epoch = 60_000 + index * 180
+        label = labels[index]
         rows.append(
             {
                 "contract_id": 10_000 + index,
@@ -43,9 +45,11 @@ def settled_rows(count=30, *, labels=None, horizon=90):
                     "bollinger_percent_b": float(index % 7) / 6.0,
                     "bollinger_width": 0.5 + float(index % 5) / 10.0,
                 },
-                "label": labels[index],
+                "label": label,
                 "stake": 1.0,
-                "payout": 1.8,
+                "payout": 1.8 if label == 1 else 0.0,
+                "profit": 0.8 if label == 1 else -1.0,
+                "result": "won" if label == 1 else "lost",
             }
         )
     return rows
@@ -132,6 +136,29 @@ class DatasetBuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetRejectedError, "minimum"):
             self.build(settled_rows(11), minimum_rows=12)
 
+    def test_accepts_real_mixed_settlements_and_validates_outcome_semantics(self):
+        rows = settled_rows(15)
+        rows[4].update(result="tie", label=0, payout=1.0, profit=0.0)
+        try:
+            dataset = self.build(rows, minimum_rows=12)
+        except DatasetRejectedError as exc:
+            self.fail(f"real settled losses and ties must be accepted: {exc}")
+        self.assertEqual({row.label for row in dataset.rows}, {0, 1})
+
+        invalid = (
+            {"payout": -0.01},
+            {"profit": float("nan")},
+            {"result": "lost", "label": 1, "payout": 0.0, "profit": -1.0},
+            {"result": "won", "label": 1, "payout": 0.0, "profit": -1.0},
+            {"result": "tie", "label": 0, "payout": 0.0, "profit": 0.0},
+        )
+        for update in invalid:
+            malformed = settled_rows(15)
+            malformed[4].update(update)
+            with self.subTest(update=update):
+                with self.assertRaises(DatasetRejectedError):
+                    self.build(malformed, minimum_rows=12)
+
 
 class TrainerTests(unittest.TestCase):
     def setUp(self):
@@ -152,8 +179,8 @@ class TrainerTests(unittest.TestCase):
         return Trainer(
             TrainingConfig(
                 seed=73,
-                stake=1.0,
-                payout=1.8,
+                offered_payout_multiplier=1.8,
+                payout_assumption_version="deriv-offer-gross-v1",
                 safety_margin=0.04,
                 margin_version="break-even-v1",
                 minimum_train_rows=8,
@@ -178,6 +205,10 @@ class TrainerTests(unittest.TestCase):
         threshold = artifact.metadata["operate_threshold"]
         self.assertAlmostEqual(threshold["value"], 1.0 / 1.8 + 0.04, places=12)
         self.assertEqual(threshold["margin_version"], "break-even-v1")
+        self.assertEqual(
+            threshold["payout_assumption_version"], "deriv-offer-gross-v1",
+        )
+        self.assertEqual(threshold["offered_payout_multiplier"], 1.8)
 
     def test_one_class_and_tiny_training_fail_closed_and_are_ledgered(self):
         one_class = DatasetBuilder(
@@ -223,22 +254,96 @@ class ArtifactAndRegistryTests(unittest.TestCase):
 
     @staticmethod
     def artifact(name="candidate-a"):
+        training_config = {
+            "seed": 73,
+            "offered_payout_multiplier": 1.8,
+            "payout_assumption_version": "deriv-offer-gross-v1",
+            "safety_margin": 0.04,
+            "margin_version": "break-even-v1",
+            "minimum_train_rows": 8,
+            "max_iter": 25,
+            "learning_rate": 0.1,
+            "max_leaf_nodes": 15,
+        }
+        import hashlib
+        from nexus_trade.artifacts import canonical_json
+        configuration_hash = hashlib.sha256(
+            canonical_json(training_config).encode("utf-8")
+        ).hexdigest()
         return CandidateArtifact.create(
             {
                 "schema_version": 1,
+                "artifact_type": "nexus_trade_shadow_candidate",
                 "candidate_name": name,
+                "contract": {
+                    "symbol": "R_100",
+                    "timeframe_seconds": 60,
+                    "duration_seconds": 58,
+                },
                 "dataset_hash": "c" * 64,
                 "provenance_hash": PROVENANCE,
+                "configuration_hash": configuration_hash,
+                "training_config": training_config,
                 "seed": 73,
-                "model": {"family": "HistGradientBoostingClassifier"},
+                "indicator_configuration": {
+                    "bollinger": {"period": 20, "std_dev": 2.0, "ma": "SMA"},
+                    "adx": {"period": 14},
+                    "direction_contract": "bollinger_v1_deterministic",
+                },
+                "model": {
+                    "family": "HistGradientBoostingClassifier",
+                    "inputs": ["adx"],
+                    "output": "win_probability",
+                    "serialization": "retrain_from_content_addressed_dataset",
+                },
                 "feature_schema": ["adx"],
-                "metrics": {"test": {"accuracy": 0.5}},
+                "operate_threshold": {
+                    "value": 1.0 / 1.8 + 0.04,
+                    "break_even_probability": 1.0 / 1.8,
+                    "offered_payout_multiplier": 1.8,
+                    "payout_assumption_version": "deriv-offer-gross-v1",
+                    "safety_margin": 0.04,
+                    "margin_version": "break-even-v1",
+                },
+                "metrics": {
+                    "train": {"rows": 10, "accuracy": 0.5},
+                    "validation": {"rows": 4, "accuracy": 0.5},
+                    "test": {"rows": 4, "accuracy": 0.5},
+                },
                 "ablations": [],
                 "trial_count": 1,
+                "split_counts": {"train": 10, "validation": 4, "test": 4, "purged": 0},
                 "direction_source": "bollinger_v1_deterministic",
                 "gate_actions": ["DO_NOT_OPERATE", "OPERATE"],
             }
         )
+
+    def create_legacy_candidates(self, artifact, *, status="TRIAL", metadata=None):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.executescript(DatabaseModels.create_tables_sql())
+            db.executescript(
+                """
+                CREATE TABLE nexus_candidates (
+                    id TEXT PRIMARY KEY,
+                    nexus_version_id TEXT,
+                    artifact_hash TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            db.execute(
+                "INSERT INTO nexus_candidates "
+                "(id, artifact_hash, status, metadata) VALUES (?, ?, ?, ?)",
+                (
+                    f"candidate-{artifact.artifact_hash[:24]}",
+                    artifact.artifact_hash,
+                    status,
+                    artifact.to_json() if metadata is None else metadata,
+                ),
+            )
+            db.commit()
 
     def test_json_artifact_is_content_addressed_immutable_and_rejects_tampering(self):
         artifact = self.artifact()
@@ -250,6 +355,39 @@ class ArtifactAndRegistryTests(unittest.TestCase):
         envelope["metadata"]["seed"] = 99
         with self.assertRaises(ArtifactIntegrityError):
             CandidateArtifact.from_json(json.dumps(envelope))
+
+    def test_artifact_requires_the_complete_gate_only_manifest(self):
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            CandidateArtifact.create({})
+        unknown = dict(self.artifact().metadata)
+        unknown["future_promotion"] = True
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            CandidateArtifact.create(unknown)
+        wrong_contract = dict(self.artifact().metadata)
+        wrong_contract["contract"] = {
+            "symbol": "R_75", "timeframe_seconds": 60, "duration_seconds": 58,
+        }
+        with self.assertRaises(ValueError):
+            CandidateArtifact.create(wrong_contract)
+        invalid_adx = json.loads(self.artifact().to_json())["metadata"]
+        invalid_adx["indicator_configuration"]["adx"] = {"period": 0}
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            CandidateArtifact.create(invalid_adx)
+        invalid_number = json.loads(self.artifact().to_json())["metadata"]
+        invalid_number["training_config"]["offered_payout_multiplier"] = "1.8"
+        import hashlib
+        from nexus_trade.artifacts import canonical_json
+        invalid_number["configuration_hash"] = hashlib.sha256(
+            canonical_json(invalid_number["training_config"]).encode("utf-8")
+        ).hexdigest()
+        try:
+            CandidateArtifact.create(invalid_number)
+        except TypeError as exc:
+            self.fail(f"corrupt numeric manifest must fail as validation: {exc}")
+        except ValueError:
+            pass
+        else:
+            self.fail("corrupt numeric manifest was accepted")
 
     def test_artifact_rejects_secrets_absolute_paths_and_pickle_payloads(self):
         for field, value in (
@@ -291,6 +429,29 @@ class ArtifactAndRegistryTests(unittest.TestCase):
                     "UPDATE nexus_candidates SET metadata = '{}' WHERE id = ?",
                     (row["id"],),
                 )
+
+    def test_legacy_registry_upgrade_freezes_status_and_survives_restart(self):
+        artifact = self.artifact()
+        self.create_legacy_candidates(artifact)
+        first = CandidateRegistry(self.db_path)
+        second = CandidateRegistry(self.db_path)
+        self.assertEqual(first.list_candidates(), second.list_candidates())
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "UPDATE nexus_candidates SET status = 'CHAMPION' WHERE artifact_hash = ?",
+                    (artifact.artifact_hash,),
+                )
+
+    def test_legacy_registry_fails_closed_on_invalid_or_corrupt_rows(self):
+        for status, metadata in (("CHAMPION", None), ("TRIAL", "{}")):
+            with self.subTest(status=status, metadata=metadata):
+                with tempfile.TemporaryDirectory() as directory:
+                    self.db_path = os.path.join(directory, "legacy.db")
+                    artifact = self.artifact()
+                    self.create_legacy_candidates(artifact, status=status, metadata=metadata)
+                    with self.assertRaisesRegex(ValueError, "registry"):
+                        CandidateRegistry(self.db_path)
 
 
 if __name__ == "__main__":

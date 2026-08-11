@@ -15,6 +15,10 @@ from nexus_trade.artifacts import (
 )
 
 
+class CandidateRegistryIntegrityError(ValueError):
+    """Raised when restart discovers an unsafe legacy candidate registry."""
+
+
 class CandidateRegistry:
     """Freeze the first candidate as Trial and every later one as SHADOW.
 
@@ -29,6 +33,7 @@ class CandidateRegistry:
         with self._connection() as db:
             db.executescript(DatabaseModels.create_tables_sql())
             db.executescript(NexusModels.create_tables_sql())
+        self._validate_existing_registry()
 
     @contextmanager
     def _connection(self):
@@ -89,6 +94,38 @@ class CandidateRegistry:
                 db.rollback()
                 raise
 
+    def _validate_existing_registry(self) -> None:
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT * FROM nexus_candidates ORDER BY created_at, id"
+            ).fetchall()
+        if not rows:
+            return
+        if sum(row["status"] == "TRIAL" for row in rows) != 1:
+            raise CandidateRegistryIntegrityError(
+                "candidate registry must contain exactly one frozen Trial"
+            )
+        for row in rows:
+            if row["status"] not in {"TRIAL", "SHADOW"}:
+                raise CandidateRegistryIntegrityError(
+                    "candidate registry contains an invalid legacy status"
+                )
+            try:
+                artifact = CandidateArtifact.from_json(row["metadata"])
+            except (ArtifactIntegrityError, TypeError, ValueError) as exc:
+                raise CandidateRegistryIntegrityError(
+                    "candidate registry contains corrupt artifact metadata"
+                ) from exc
+            expected_id = f"candidate-{artifact.artifact_hash[:24]}"
+            if (
+                row["id"] != expected_id
+                or row["artifact_hash"] != artifact.artifact_hash
+                or row["nexus_version_id"] is not None
+            ):
+                raise CandidateRegistryIntegrityError(
+                    "candidate registry identity does not match its artifact"
+                )
+
     def list_candidates(self) -> list[dict]:
         with self._connection() as db:
             rows = db.execute(
@@ -110,4 +147,4 @@ class CandidateRegistry:
         }
 
 
-__all__ = ["CandidateRegistry"]
+__all__ = ["CandidateRegistry", "CandidateRegistryIntegrityError"]

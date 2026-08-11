@@ -224,6 +224,13 @@ class NexusModels:
         BEFORE INSERT ON nexus_candidates
         WHEN NEW.status NOT IN ('TRIAL', 'SHADOW')
         BEGIN SELECT RAISE(ABORT, 'invalid Nexus candidate status'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_values_update
+        BEFORE UPDATE OF status ON nexus_candidates
+        WHEN NEW.status NOT IN ('TRIAL', 'SHADOW')
+        BEGIN SELECT RAISE(ABORT, 'invalid Nexus candidate status'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_immutable_status
+        BEFORE UPDATE OF status ON nexus_candidates
+        BEGIN SELECT RAISE(ABORT, 'Nexus candidate status is immutable'); END;
         CREATE TRIGGER IF NOT EXISTS trg_nexus_candidates_immutable_artifact
         BEFORE UPDATE OF id, artifact_hash, metadata, nexus_version_id ON nexus_candidates
         BEGIN SELECT RAISE(ABORT, 'Nexus candidate artifact is immutable'); END;

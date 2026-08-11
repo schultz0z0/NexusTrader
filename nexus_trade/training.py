@@ -16,7 +16,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from database.models import DatabaseModels
 from database.nexus_models import NexusModels
-from nexus_trade.artifacts import CandidateArtifact, canonical_json
+from nexus_trade.artifacts import CandidateArtifact, canonical_json, validate_safe_json
 from nexus_trade.dataset import DatasetSplit, LearningDataset
 
 
@@ -27,8 +27,8 @@ class TrainingRejectedError(ValueError):
 @dataclass(frozen=True)
 class TrainingConfig:
     seed: int
-    stake: float = 1.0
-    payout: float = 1.8
+    offered_payout_multiplier: float = 1.8
+    payout_assumption_version: str = "deriv-offer-gross-v1"
     safety_margin: float = 0.03
     margin_version: str = "break-even-v1"
     minimum_train_rows: int = 20
@@ -39,18 +39,23 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a non-negative integer")
-        for name in ("stake", "payout", "safety_margin", "learning_rate"):
+        for name in ("offered_payout_multiplier", "safety_margin", "learning_rate"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{name} must be finite")
             if not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be finite")
-        if self.stake <= 0 or self.payout <= self.stake:
-            raise ValueError("payout must exceed positive stake")
+        if self.offered_payout_multiplier <= 1:
+            raise ValueError("offered_payout_multiplier must exceed one")
         if not 0 <= self.safety_margin < 1:
             raise ValueError("safety_margin must be in [0, 1)")
-        if self.stake / self.payout + self.safety_margin >= 1:
+        if 1.0 / self.offered_payout_multiplier + self.safety_margin >= 1:
             raise ValueError("economic operate threshold must remain below one")
+        if (
+            type(self.payout_assumption_version) is not str
+            or not self.payout_assumption_version
+        ):
+            raise ValueError("payout_assumption_version is required")
         if type(self.margin_version) is not str or not self.margin_version:
             raise ValueError("margin_version is required")
         if type(self.minimum_train_rows) is not int or self.minimum_train_rows < 2:
@@ -63,8 +68,8 @@ class TrainingConfig:
     def canonical(self) -> dict[str, Any]:
         return {
             "seed": self.seed,
-            "stake": float(self.stake),
-            "payout": float(self.payout),
+            "offered_payout_multiplier": float(self.offered_payout_multiplier),
+            "payout_assumption_version": self.payout_assumption_version,
             "safety_margin": float(self.safety_margin),
             "margin_version": self.margin_version,
             "minimum_train_rows": self.minimum_train_rows,
@@ -100,8 +105,8 @@ class SQLiteTrialLedger:
         status = payload.get("status")
         if status not in {"SUCCEEDED", "REJECTED", "FAILED"}:
             raise ValueError("attempt status is invalid")
-        # CandidateArtifact's strict JSON validation also rejects secrets and paths.
-        CandidateArtifact.create({"schema_version": 1, "attempt": payload})
+        # Ledger payloads use the same non-secret finite JSON boundary as artifacts.
+        validate_safe_json({"schema_version": 1, "attempt": payload})
         encoded = canonical_json(payload)
         attempt_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         with self._connection() as db:
@@ -216,18 +221,13 @@ class Trainer:
         labels = {row.label for row in dataset.train.rows}
         if len(labels) != 2:
             raise TrainingRejectedError("training dataset has one class")
-        expected_ratio = self.config.payout / self.config.stake
-        if any(
-            not math.isclose(row.payout / row.stake, expected_ratio, rel_tol=0, abs_tol=1e-12)
-            for row in dataset.rows
-        ):
-            raise TrainingRejectedError("dataset payout provenance mismatches configuration")
         forbidden = {"contract_type", "direction", "signal_direction"}
         if forbidden.intersection(name.lower() for name in dataset.feature_schema):
             raise TrainingRejectedError("direction cannot be learned")
 
     def _fit_validated(self, dataset: LearningDataset) -> CandidateArtifact:
-        threshold = self.config.stake / self.config.payout + self.config.safety_margin
+        break_even_probability = 1.0 / self.config.offered_payout_multiplier
+        threshold = break_even_probability + self.config.safety_margin
         model = self._new_model()
         train_x, train_y = self._matrix(dataset.train, dataset.feature_schema)
         model.fit(train_x, train_y)
@@ -257,16 +257,29 @@ class Trainer:
                     "delta": score - baseline_validation,
                 }
             )
+        training_config = self.config.canonical()
+        configuration_hash = hashlib.sha256(
+            canonical_json(training_config).encode("utf-8")
+        ).hexdigest()
         metadata = {
             "schema_version": 1,
+            "artifact_type": "nexus_trade_shadow_candidate",
+            "contract": {
+                "symbol": "R_100",
+                "timeframe_seconds": 60,
+                "duration_seconds": 58,
+            },
             "dataset_hash": dataset.dataset_hash,
             "provenance_hash": dataset.provenance_hash,
+            "configuration_hash": configuration_hash,
+            "training_config": training_config,
             "seed": self.config.seed,
             "model": {
                 "family": "HistGradientBoostingClassifier",
                 "library": "scikit-learn",
                 "library_version": sklearn.__version__,
                 "inputs": list(dataset.feature_schema),
+                "output": "win_probability",
                 "parameters": {
                     "random_state": self.config.seed,
                     "early_stopping": False,
@@ -279,15 +292,18 @@ class Trainer:
             "indicator_configuration": {
                 "bollinger": {"period": 20, "std_dev": 2.0, "ma": "SMA"},
                 "adx": {"period": 14},
+                "direction_contract": "bollinger_v1_deterministic",
             },
             "feature_schema": list(dataset.feature_schema),
             "direction_source": "bollinger_v1_deterministic",
             "gate_actions": ["DO_NOT_OPERATE", "OPERATE"],
             "operate_threshold": {
                 "value": threshold,
-                "break_even": self.config.stake / self.config.payout,
-                "stake": float(self.config.stake),
-                "payout": float(self.config.payout),
+                "break_even_probability": break_even_probability,
+                "offered_payout_multiplier": float(
+                    self.config.offered_payout_multiplier
+                ),
+                "payout_assumption_version": self.config.payout_assumption_version,
                 "safety_margin": float(self.config.safety_margin),
                 "margin_version": self.config.margin_version,
             },
@@ -348,8 +364,6 @@ class Trainer:
             return "one_class"
         if "tiny" in message:
             return "tiny_dataset"
-        if "payout" in message:
-            return "payout_mismatch"
         return "invalid_dataset"
 
 
