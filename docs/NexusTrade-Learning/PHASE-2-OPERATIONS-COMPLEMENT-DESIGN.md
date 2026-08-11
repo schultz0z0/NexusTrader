@@ -69,19 +69,18 @@ ordem permanecem visíveis com `reason_codes` traduzidos, sem inventar resultado
 
 ## 4. Contrato de dados ao vivo
 
-O backend amplia os eventos NexusTrade sem alterar os oito eventos governados
-existentes:
+O pipeline já existente de mercado continua publicando `market.history` e
+`market.tick` com `bot_id=nexus-trade`; não será criado um segundo feed concorrente.
+Esses eventos carregam a janela limitada de candles M1, o tick/candle parcial e as
+linhas de Bollinger. O backend adiciona somente `nexus.position` para abertura e
+atualização de contrato por lane. `nexus.decision` e `nexus.trade` continuam sendo a
+fonte persistida de decisões e liquidações.
 
-- `nexus.market_history`: janela limitada de candles M1 e linhas de Bollinger;
-- `nexus.market_tick`: tick atual, candle parcial e valores de linha disponíveis;
-- `nexus.position`: abertura/atualização de contrato por lane;
-- `nexus.decision` e `nexus.trade`: continuam sendo a fonte persistida de decisões e
-  liquidações.
-
-Todos usam `bot_id=nexus-trade`, `event_id`, `schema_version=1`,
-`snapshot_version>=1` e payload sanitizado. Reconexão busca snapshot durável antes de
-reativar ações. O snapshot inclui uma janela limitada de mercado, estados de lane e
-posições atuais, suficiente para reconstruir a tela sem eventos antigos.
+Os eventos `nexus.*` usam `bot_id=nexus-trade`, `event_id`, `schema_version=1`,
+`snapshot_version>=1` e payload sanitizado; os eventos genéricos de mercado preservam
+seu contrato existente. Reconexão busca snapshot durável antes de reativar ações. O
+snapshot inclui estados de lane e posições atuais; o feed repõe a janela de mercado
+assim que reconecta.
 
 O runtime publica observabilidade fora do caminho crítico da compra. Falha de
 publicação não atrasa nem repete ordem. Nenhum tick, candle ou valor visual pode
