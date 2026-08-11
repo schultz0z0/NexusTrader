@@ -28,6 +28,13 @@ class LocalDevProfileTests(unittest.TestCase):
         self.assertIn("$apiProcess.Id", script)
         self.assertIn("$botProcess.Id", script)
 
+    def test_uvicorn_protocol_logs_cannot_expose_websocket_tickets(self):
+        script = LAUNCHER.read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn('"--log-level", "warning"', script)
+        self.assertEqual(compose.count("--log-level warning"), 1)
+
     def test_guide_documents_demo_only_donchian_workflow(self):
         guide = DEVELOPMENT_GUIDE.read_text(encoding="utf-8")
 

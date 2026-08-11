@@ -38,7 +38,7 @@
       <div id="account-mode-card" class="rail-foot"><span id="account-shield" class="shield">D</span><p><strong id="account-mode-title">Conta demo</strong><small id="account-mode-detail">Operações em ambiente virtual</small></p></div>
     </aside>
 
-    <main class="workspace">
+    <main id="standard-workspace" class="workspace">
       <section class="chart-panel panel">
         <header class="panel-head chart-head">
           <div>
@@ -96,6 +96,76 @@
             <tbody id="trade-history"><tr class="empty-row"><td colspan="8">As operações encerradas aparecerão aqui em tempo real.</td></tr></tbody>
           </table>
         </div>
+      </section>
+    </main>
+
+    <main id="nexus-trade-view" class="nexus-workspace" hidden data-nexus-fixed-symbol="R_100" data-nexus-fixed-timeframe="60" data-nexus-fixed-duration="58">
+      <section class="panel nexus-command-panel">
+        <header class="nexus-command-head">
+          <div>
+            <div class="eyebrow">NEXUSTRADE · MACHINE LEARNING GOVERNADO</div>
+            <div class="nexus-title-line">
+              <h1>Champion operacional</h1>
+              <span id="nexus-champion-status" class="status-chip neutral">OFF — APRENDENDO EM DEMO</span>
+            </div>
+            <p>Bollinger permanece primária. ADX ≤ 22 autoriza entradas; o modelo decide somente OPERAR ou NÃO OPERAR.</p>
+          </div>
+          <div class="nexus-fixed-contract" aria-label="Contrato fixo NexusTrade">
+            <span><small>ATIVO</small><strong>R_100</strong></span>
+            <span><small>TIMEFRAME</small><strong>M1</strong></span>
+            <span><small>EXPIRAÇÃO</small><strong>58s</strong></span>
+          </div>
+        </header>
+        <div class="nexus-command-actions">
+          <button id="nexus-open-evolution" class="secondary-button" type="button" data-nexus-action="open-evolution">VER EVOLUÇÃO</button>
+          <button id="nexus-emergency-stop" class="nexus-danger-button" type="button" data-nexus-action="emergency-stop" aria-pressed="false">PARADA TOTAL</button>
+          <button id="nexus-champion-toggle" class="primary-button" type="button" data-nexus-action="champion-toggle">INICIAR CHAMPION</button>
+        </div>
+      </section>
+
+      <section class="nexus-lanes" aria-label="Lanes NexusTrade">
+        <article id="nexus-champion-card" class="panel nexus-lane-card champion">
+          <header>
+            <div><div class="eyebrow">VERSÃO DE PRODUÇÃO</div><h2 id="nexus-champion-version">Champion V1</h2></div>
+            <span class="nexus-lane-mark">C</span>
+          </header>
+          <dl>
+            <div><dt>Conta</dt><dd id="nexus-champion-account">DEMO permanente</dd></div>
+            <div><dt>Stake</dt><dd id="nexus-champion-stake">US$ 0,35</dd></div>
+            <div><dt>Estratégia</dt><dd>Bollinger + ADX + gate ML</dd></div>
+            <div><dt>Controle</dt><dd>Exclusivo do usuário</dd></div>
+          </dl>
+        </article>
+
+        <article id="nexus-trial-card" class="panel nexus-lane-card trial">
+          <header>
+            <div><div class="eyebrow">LABORATÓRIO INVISÍVEL AO OPERACIONAL</div><h2 id="nexus-trial-version">Trial V1</h2></div>
+            <span class="nexus-lane-mark">T</span>
+          </header>
+          <dl>
+            <div><dt>Status</dt><dd id="nexus-trial-status">LABORATÓRIO DEMO · US$ 0,35</dd></div>
+            <div><dt>Acesso</dt><dd>Sem start, stop ou configuração</dd></div>
+            <div><dt>Função</dt><dd>Testar evolução do Champion</dd></div>
+            <div><dt>Execução</dt><dd>Contrato independente por sinal</dd></div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="nexus-overview-grid">
+        <article class="panel nexus-progress-panel">
+          <header class="panel-head"><div><div class="eyebrow">CAMPANHA DE EVOLUÇÃO</div><h2>Amostra acumulada do Trial</h2></div><strong id="nexus-campaign-progress">0/300 operações</strong></header>
+          <div class="nexus-progress-track" aria-hidden="true"><i id="nexus-campaign-progress-bar"></i></div>
+          <p>O contador continua entre semanas. Promoção exige ao menos sete dias completos, 300 operações e aprovação humana.</p>
+        </article>
+        <article class="panel nexus-invariants-panel">
+          <header class="panel-head"><div><div class="eyebrow">INVARIANTES</div><h2>Proteções fixas</h2></div></header>
+          <ul>
+            <li><strong>Bollinger</strong><span>sempre presente</span></li>
+            <li><strong>ADX ≤ 22</strong><span>gate de execução</span></li>
+            <li><strong>Uma posição</strong><span>por lane</span></li>
+            <li><strong>Decisão humana</strong><span>para o Champion</span></li>
+          </ul>
+        </article>
       </section>
     </main>
   </div>

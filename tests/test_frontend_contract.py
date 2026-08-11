@@ -50,8 +50,36 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_frontend_modules_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        for filename in ("api.js", "store.js", "chart.js", "app.js"):
+        for filename in (
+            "api.js", "store.js", "chart.js", "app.js",
+            "nexus_trade_api.js", "nexus_trade_store.js", "nexus_trade_view.js",
+        ):
             self.assertTrue(os.path.isfile(os.path.join(root, "static", "js", filename)))
+
+    def test_nexus_trade_has_a_fixed_operational_view_and_no_strategy_option(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html_source = stream.read()
+
+        parser = LandmarkParser()
+        parser.feed(html_source)
+        self.assertTrue({
+            "standard-workspace", "nexus-trade-view", "nexus-champion-status",
+            "nexus-champion-version", "nexus-trial-version", "nexus-campaign-progress",
+            "nexus-champion-toggle", "nexus-emergency-stop", "nexus-open-evolution",
+        }.issubset(parser.ids))
+        self.assertIn('data-nexus-action="champion-toggle"', html_source)
+        self.assertIn('data-nexus-fixed-symbol="R_100"', html_source)
+        self.assertIn('data-nexus-fixed-timeframe="60"', html_source)
+        self.assertIn('data-nexus-fixed-duration="58"', html_source)
+        strategy_source = html_source[
+            html_source.index('id="strategy-select"'):html_source.index('</select>', html_source.index('id="strategy-select"'))
+        ]
+        self.assertNotIn('value="nexus_trade"', strategy_source)
+        trial_source = html_source[
+            html_source.index('id="nexus-trial-card"'):html_source.index('</article>', html_source.index('id="nexus-trial-card"'))
+        ]
+        self.assertNotIn('button', trial_source)
 
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))

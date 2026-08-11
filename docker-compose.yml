@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers --no-access-log
+    command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers --no-access-log --log-level warning
     env_file:
       - "${ENV_FILE:-.env}"
     environment:

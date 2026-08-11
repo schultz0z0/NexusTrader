@@ -305,7 +305,7 @@ $botWorkerId = 0
 try {
     if (-not $BotOnly) {
         $apiProcess = Start-Process -FilePath $python `
-            -ArgumentList @("-m", "uvicorn", "api.app:app", "--host", $BindAddress, "--port", $Port, "--no-access-log") `
+            -ArgumentList @("-m", "uvicorn", "api.app:app", "--host", $BindAddress, "--port", $Port, "--no-access-log", "--log-level", "warning") `
             -WorkingDirectory $projectRoot `
             -RedirectStandardOutput $apiStdout `
             -RedirectStandardError $apiStderr `

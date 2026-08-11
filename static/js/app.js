@@ -3,10 +3,14 @@ import { Store, marketMatchesBot } from "./store.js";
 import { TradingChart } from "./chart.js";
 import { contractPresentation } from "./trade_state.js";
 import { configuredBotPayload, strategyProfile } from "./bot_config.js";
+import { nexusTradeApi } from "./nexus_trade_api.js";
+import { createNexusTradeStore, NEXUS_BOT_ID } from "./nexus_trade_store.js";
+import { buildNexusOperationalModel, mountNexusTradeView, resolveDashboardView } from "./nexus_trade_view.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
 const store = new Store({ bots: [], accounts: [], selectedId: null, snapshot: null, trades: [], connected: false });
+const nexusStore = createNexusTradeStore();
 const chart = new TradingChart($("#chart"));
 let socket = null;
 let socketToken = 0;
@@ -16,6 +20,18 @@ let realConfirmationResolver = null;
 let activeAccountId = localStorage.getItem(ACCOUNT_STORAGE_KEY) || "";
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD" });
 const price = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(Number(value) >= 100 ? 2 : 4) : "—";
+
+const nexusView = mountNexusTradeView({
+  root: $("#nexus-trade-view"),
+  standardRoot: $("#standard-workspace"),
+  store: nexusStore,
+  api: nexusTradeApi,
+  getAccount: activeAccount,
+  confirmReal: confirmNexusReal,
+  onOpenEvolution: () => toast("A central de evolução será aberta na próxima etapa."),
+  onToast: toast,
+});
+nexusStore.subscribe(() => { if (store.get().selectedId === NEXUS_BOT_ID) renderBots(); });
 
 function toast(message, type = "info") {
   const node = document.createElement("div"); node.className = `toast ${type}`; node.textContent = message;
@@ -27,7 +43,13 @@ function activeAccount() { return store.get().accounts.find((account) => account
 
 function renderBots() {
   const { bots, selectedId } = store.get();
-  $("#bot-list").innerHTML = bots.map((bot) => `<button class="bot-item ${bot.id === selectedId ? "active" : ""} ${String(bot.runtime_state).toLowerCase()}" data-bot-id="${bot.id}"><span class="bot-dot"></span><span class="bot-copy"><strong>${escapeHtml(bot.name)}</strong><small>${escapeHtml(bot.symbol)} · ${timeframe(bot.timeframe_seconds)}</small></span><small>${statusLabel(bot.runtime_state)}</small></button>`).join("");
+  const nexusModel = buildNexusOperationalModel(nexusStore.get(), activeAccount());
+  $("#bot-list").innerHTML = bots.map((bot) => {
+    const nexus = bot.id === NEXUS_BOT_ID;
+    const status = nexus ? nexusModel.champion.status : statusLabel(bot.runtime_state);
+    const stateClass = nexus ? nexusModel.champion.statusTone : String(bot.runtime_state).toLowerCase();
+    return `<button class="bot-item ${bot.id === selectedId ? "active" : ""} ${stateClass}" data-bot-id="${bot.id}"><span class="bot-dot"></span><span class="bot-copy"><strong>${escapeHtml(bot.name)}</strong><small>${escapeHtml(bot.symbol)} · ${timeframe(bot.timeframe_seconds)}</small></span><small>${escapeHtml(status)}</small></button>`;
+  }).join("");
 }
 
 function renderHeader() {
@@ -38,12 +60,14 @@ function renderHeader() {
   $("#selected-bot-name").textContent = bot?.name || "Nenhum robô";
   const isDonchian = bot?.strategy_id === "donchian";
   const isNexusSpeed = bot?.strategy_id === "nexus_speed";
-  $("#selected-bot-strategy").textContent = bot ? (isNexusSpeed ? "Nexus Speed" : "Donchian + ZigZag") : "—";
+  const isNexusTrade = bot?.id === NEXUS_BOT_ID;
+  $("#selected-bot-strategy").textContent = bot ? (isNexusTrade ? "NexusTrade · Champion" : isNexusSpeed ? "Nexus Speed" : "Donchian + ZigZag") : "—";
   $("#legend-upper").textContent = isDonchian ? "Donchian Upper" : "";
   $("#legend-mid").textContent = isNexusSpeed ? "EMA(5)" : "Donchian Middle";
   $("#legend-lower").textContent = isDonchian ? "Donchian Lower" : "";
   const running = bot?.desired_state === "RUNNING";
   const button = $("#toggle-bot"); button.disabled = !bot; button.textContent = running ? "PARAR ROBÔ" : "INICIAR ROBÔ"; button.classList.toggle("stop", running);
+  $("#open-config").hidden = isNexusTrade;
   const risk = bot?.risk_config || {};
   $("#metric-target").textContent = money.format(Number(risk.take_profit_daily || 0));
   $("#metric-stop").textContent = money.format(-Math.abs(Number(risk.stop_loss_daily || 0)));
@@ -169,6 +193,19 @@ async function refreshAccounts() {
 async function selectBot(id) {
   const token = ++socketToken; if (socket) socket.close(); clearTimeout(reconnectTimer);
   store.set({ selectedId: id, connected: false, snapshot: null, trades: [] }); renderBots(); renderHeader(); renderSnapshot(); setConnection(false, "Conectando");
+  if (resolveDashboardView(id) === "nexus") {
+    nexusView.show();
+    nexusStore.setConnection("connecting");
+    connectLive(id, token);
+    try {
+      const snapshot = await nexusTradeApi.snapshot();
+      if (token !== socketToken) return;
+      nexusStore.hydrate(snapshot);
+      renderBots();
+    } catch (error) { handleError(error); }
+    return;
+  }
+  nexusView.hide();
   connectLive(id, token);
   try {
     const [fetchedSnapshot, fetchedTrades] = await Promise.all([api.snapshot(id), api.trades(id)]);
@@ -191,9 +228,35 @@ async function connectLive(botId, token) {
     if (token !== socketToken) return;
     const activeSocket = new WebSocket(websocketUrl(botId, ticket));
     socket = activeSocket;
-    activeSocket.onopen = () => { if (token === socketToken) { setConnection(true, "Tempo real"); activeSocket.send("ready"); } };
-    activeSocket.onmessage = ({ data }) => { if (token !== socketToken) return; const message = JSON.parse(data); if (message.type === "snapshot") { store.set({ snapshot: message.data }); renderSnapshot(); } else applyEvent(message); };
-    activeSocket.onclose = () => { if (token === socketToken) { setConnection(false, "Reconectando"); reconnectTimer = setTimeout(() => connectLive(botId, token), 1800); } };
+    activeSocket.onopen = async () => {
+      if (token !== socketToken) return;
+      setConnection(true, "Tempo real"); activeSocket.send("ready");
+      if (botId === NEXUS_BOT_ID) {
+        nexusStore.setConnection("live");
+        try {
+          const snapshot = await nexusTradeApi.snapshot();
+          if (token === socketToken) nexusStore.hydrate(snapshot);
+        } catch { nexusStore.setConnection("stale"); }
+      }
+    };
+    activeSocket.onmessage = ({ data }) => {
+      if (token !== socketToken) return;
+      const message = JSON.parse(data);
+      if (botId === NEXUS_BOT_ID) {
+        if (message.type === "snapshot") nexusStore.hydrate(message.data);
+        else nexusStore.apply(message);
+        renderBots();
+        return;
+      }
+      if (message.type === "snapshot") { store.set({ snapshot: message.data }); renderSnapshot(); } else applyEvent(message);
+    };
+    activeSocket.onclose = () => {
+      if (token === socketToken) {
+        setConnection(false, "Reconectando");
+        if (botId === NEXUS_BOT_ID) nexusStore.setConnection("stale");
+        reconnectTimer = setTimeout(() => connectLive(botId, token), 1800);
+      }
+    };
   } catch (error) {
     if (token === socketToken) {
       setConnection(false, "Reconectando");
@@ -281,11 +344,12 @@ async function changeGlobalAccount() {
   if (!account) return;
   select.disabled = true;
   try {
-    const updatedBots = await Promise.all(store.get().bots.map((bot) =>
-      bot.account_id === account.account_id && bot.account_type === account.account_type
+    const updatedBots = await Promise.all(store.get().bots.map((bot) => {
+      if (bot.id === NEXUS_BOT_ID) return Promise.resolve(bot);
+      return bot.account_id === account.account_id && bot.account_type === account.account_type
         ? Promise.resolve(bot)
-        : api.updateBot(bot.id, configuredBotPayload(bot, account))
-    ));
+        : api.updateBot(bot.id, configuredBotPayload(bot, account));
+    }));
     store.set({ bots: updatedBots }); renderBots(); renderHeader();
     toast(`Conta global alterada para ${account.account_type === "real" ? "REAL" : "DEMO"} · ${account.account_id}.`);
   } catch (error) {
@@ -303,6 +367,11 @@ function confirmRealStart(bot, account) {
   setTimeout(() => $("#real-confirm-phrase").focus(), 0);
   return new Promise((resolve) => { realConfirmationResolver = resolve; });
 }
+async function confirmNexusReal(account) {
+  const phrase = await confirmRealStart({ name: "NexusTrade" }, account);
+  if (!phrase) return "";
+  return (await nexusTradeApi.confirmReal(account.account_id, phrase)).ticket;
+}
 function closeRealConfirmation(value) {
   $("#real-account-dialog").hidden = true;
   const resolve = realConfirmationResolver; realConfirmationResolver = null;
@@ -310,7 +379,7 @@ function closeRealConfirmation(value) {
 }
 
 $("#bot-list").addEventListener("click", (event) => { const button = event.target.closest("[data-bot-id]"); if (button) selectBot(button.dataset.botId); });
-$("#open-config").addEventListener("click", () => openDrawer(false)); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#open-config").addEventListener("click", () => { if (selectedBot()?.id !== NEXUS_BOT_ID) openDrawer(false); }); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $("#account-select").addEventListener("change", changeGlobalAccount);
 $("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(null));
 
@@ -324,7 +393,7 @@ $("#confirm-real-start").addEventListener("click", () => {
   closeRealConfirmation(phrase);
 });
 $("#config-form").addEventListener("submit", async (event) => { event.preventDefault(); const id = $("#config-id").value; const errorNode = $("#form-error"); try { const saved = id ? await api.updateBot(id, formPayload(event.currentTarget)) : await api.createBot(formPayload(event.currentTarget)); closeDrawer(); showChartState("Trocando mercado", `Aplicando ${saved.symbol} · ${timeframe(saved.timeframe_seconds)}.`); await load(saved.id); toast("Configuração salva com sucesso."); } catch (error) { errorNode.textContent = error.message; errorNode.hidden = false; } });
-$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; store.set({ snapshot }); renderActiveTrade(null); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } let realTicket = ""; if (starting && account.account_type === "real") { const phrase = await confirmRealStart(bot, account); if (!phrase) return; realTicket = (await api.realConfirmation(bot.id, phrase)).ticket; } const updated = starting ? await api.startBot(bot.id, realTicket) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
+$("#toggle-bot").addEventListener("click", async () => { let bot = selectedBot(); if (!bot || bot.id === NEXUS_BOT_ID) return; const starting = bot.desired_state !== "RUNNING"; const account = activeAccount(); if (starting && !account) { toast("Selecione uma conta global Deriv.", "error"); return; } try { if (starting) { const snapshot = store.get().snapshot || {}; snapshot.active_trade = null; store.set({ snapshot }); renderActiveTrade(null); } if (starting && (bot.account_id !== account.account_id || bot.account_type !== account.account_type)) { const updatedConfig = await api.updateBot(bot.id, configuredBotPayload(bot, account)); Object.assign(bot, updatedConfig); } let realTicket = ""; if (starting && account.account_type === "real") { const phrase = await confirmRealStart(bot, account); if (!phrase) return; realTicket = (await api.realConfirmation(bot.id, phrase)).ticket; } const updated = starting ? await api.startBot(bot.id, realTicket) : await api.stopBot(bot.id); Object.assign(bot, updated); renderBots(); renderHeader(); toast(updated.desired_state === "RUNNING" ? `${account?.account_type === "real" ? "Conta REAL: " : ""}comando de início enviado.` : "Parada segura solicitada."); } catch (error) { handleError(error); } });
 $("#stop-all").addEventListener("click", async () => { try { const result = await api.stopAll(); await load(); toast(`${result.stopped} robô(s) receberam parada segura.`); } catch (error) { handleError(error); } });
 $("#auth-form").addEventListener("submit", async (event) => { event.preventDefault(); setApiKey($("#api-key").value); $("#auth-error").textContent = ""; $("#auth-gate").hidden = true; await load(); });
 
