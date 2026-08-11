@@ -20,6 +20,17 @@ class IndicatorFrame:
     values: dict[str, float | None]
 
 
+def exclusive_causal_cutoff(
+    *,
+    decision_epoch: int | None,
+    active_candle_time: int | None,
+) -> dict[str, int | None]:
+    """Prefer the exact decision instant and use the active bucket as fallback."""
+    if decision_epoch is not None:
+        return {"decision_epoch": decision_epoch}
+    return {"active_candle_time": active_candle_time}
+
+
 def closed_candles(
     candles: Iterable[dict],
     *,
@@ -101,7 +112,11 @@ class IndicatorEngine:
         active_candle_time: int | None = None,
     ) -> list[IndicatorFrame]:
         completed = closed_candles(
-            candles, decision_epoch=decision_epoch, active_candle_time=active_candle_time,
+            candles,
+            **exclusive_causal_cutoff(
+                decision_epoch=decision_epoch,
+                active_candle_time=active_candle_time,
+            ),
         )
         if not completed:
             return []

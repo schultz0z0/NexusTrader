@@ -40,29 +40,20 @@ class AuthManager:
                 logger.error(f"Health check falhou: HTTP {response.status_code}")
                 return False
         except Exception as e:
-            logger.error(f"Erro no health check: {str(e)}")
+            logger.error("Health check falhou (error_type=%s).", type(e).__name__)
             return False
 
     async def list_accounts(self) -> list:
         """Lista as contas de trading disponiveis via REST API."""
         try:
-            logger.info("Listando contas de trading...")
+            logger.info("Consultando catalogo de contas Deriv.")
             response = await self._client.get("/trading/v1/options/accounts")
             
             if response.status_code == 200:
                 data = response.json()
                 self._accounts = data if isinstance(data, list) else data.get('accounts', data.get('data', [data]))
-                logger.info(f"Contas encontradas: {len(self._accounts) if isinstance(self._accounts, list) else 1}")
-                
-                # Log das contas
-                if isinstance(self._accounts, list):
-                    for acc in self._accounts:
-                        acc_id = acc.get('account_id', acc.get('loginid', 'N/A'))
-                        balance = acc.get('balance', 'N/A')
-                        currency = acc.get('currency', 'USD')
-                        logger.info(f"  Conta: {acc_id} | Saldo: {balance} {currency}")
-                else:
-                    logger.info(f"  Response: {self._accounts}")
+                account_count = len(self._accounts) if isinstance(self._accounts, list) else 1
+                logger.info("Catalogo Deriv recebido (accounts=%s).", account_count)
                     
                 self._is_authorized = True
                 return self._accounts
@@ -70,11 +61,17 @@ class AuthManager:
                 logger.error("Token invalido ou expirado (HTTP 401).")
                 return []
             else:
-                logger.error(f"Erro ao listar contas: HTTP {response.status_code} - {response.text}")
+                logger.error(
+                    "Falha no catalogo Deriv (http_status=%s).",
+                    response.status_code,
+                )
                 return []
                 
         except Exception as e:
-            logger.error(f"Erro ao listar contas: {str(e)}")
+            logger.error(
+                "Falha no catalogo Deriv (error_type=%s).",
+                type(e).__name__,
+            )
             return []
 
     async def get_websocket_url(self, account_id: str = None) -> str:
@@ -89,7 +86,7 @@ class AuthManager:
             return None
             
         try:
-            logger.info(f"Solicitando OTP para conta {acc_id}...")
+            logger.info("Solicitando OTP Deriv para conta selecionada.")
             response = await self._client.post(
                 f"/trading/v1/options/accounts/{acc_id}/otp"
             )
@@ -111,14 +108,20 @@ class AuthManager:
                     logger.info("URL WebSocket pre-autenticada recebida com sucesso!")
                     return ws_url
                 else:
-                    logger.error(f"Formato de resposta OTP inesperado: {data}")
+                    logger.error("Resposta OTP invalida (shape=missing_url).")
                     return None
             else:
-                logger.error(f"Erro ao solicitar OTP: HTTP {response.status_code} - {response.text}")
+                logger.error(
+                    "Falha ao solicitar OTP (http_status=%s).",
+                    response.status_code,
+                )
                 return None
                 
         except Exception as e:
-            logger.error(f"Erro ao solicitar OTP: {str(e)}")
+            logger.error(
+                "Falha ao solicitar OTP (error_type=%s).",
+                type(e).__name__,
+            )
             return None
 
     def is_authorized(self) -> bool:

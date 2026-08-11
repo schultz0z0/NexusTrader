@@ -99,6 +99,31 @@ class IndicatorEngineTests(unittest.TestCase):
 
         self.assertEqual(before, after)
 
+    def test_indicator_engine_prefers_decision_epoch_when_runtime_supplies_both_cutoffs(self):
+        history = candles(4)
+
+        frames = IndicatorEngine().calculate(
+            history,
+            decision_epoch=150,
+            active_candle_time=60,
+        )
+
+        self.assertEqual([frame.epoch for frame in frames], [0, 60])
+
+    def test_closed_candle_selector_still_rejects_ambiguous_dual_cutoff(self):
+        with self.assertRaisesRegex(ValueError, "decision_epoch or active_candle_time"):
+            closed_candles(candles(2), decision_epoch=120, active_candle_time=120)
+
+    def test_feature_builder_runtime_cutoff_excludes_boundary_and_future_candles(self):
+        frames = FeatureBuilder().build(
+            candles(42),
+            decision_epoch=2_400,
+            active_candle_time=2_400,
+        )
+
+        self.assertEqual(len(frames), 40)
+        self.assertEqual(frames[-1].epoch, 2_340)
+
     def test_indicator_prefix_is_unchanged_by_later_closed_candles(self):
         prefix = candles(40)
         extended = [*prefix, *candles(45)[40:]]

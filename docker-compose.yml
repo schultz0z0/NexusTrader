@@ -3,7 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: nexustrader-api
     restart: unless-stopped
     command: python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --ws wsproto --proxy-headers --no-access-log
     env_file:
@@ -58,7 +57,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: nexustrader-bot
     restart: unless-stopped
     command: python main.py
     stop_grace_period: 7m

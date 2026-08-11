@@ -41,6 +41,45 @@ No painel:
 
 O launcher não edita o `.env`, não seleciona conta e não inicia o bot automaticamente.
 
+Para uma validação isolada, o launcher também aceita o arquivo de ambiente somente como
+entrada e paths exclusivos. Ele importa as variáveis apenas no processo filho e aplica
+depois os overrides `ALLOW_REAL_TRADING=false`, `REAL_MAX_STAKE_USD=0`,
+`DERIV_ACCOUNT_TYPE=demo` e stake NexusTrade `0.35`. O bind continua restrito a
+loopback. Não copie o arquivo de credenciais para o worktree.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_dev.ps1 `
+  -EnvFile <arquivo-local> `
+  -DatabasePath storage/phase1-validation/nexus.db `
+  -LogsDirectory logs/phase1-validation `
+  -PidDirectory storage/phase1-validation/pids `
+  -RunId phase1-validation -Detached
+```
+
+Use `-ApiOnly` ou `-BotOnly` para reiniciar separadamente um componente. O modo
+`-PreflightOnly` valida o contrato seguro sem iniciar processos e nunca mostra
+credenciais ou paths. Encerre somente os PIDs gravados no diretório exclusivo do run;
+não procure nem finalize processos por nome.
+
+O smoke NexusTrade é somente leitura: usa exclusivamente `GET` em localhost, envia a
+chave em `X-API-Key`, confirma singleton, Champion `OFF/DEMO`, Trial/Bot DEMO,
+R_100/M1/58s/USD 0.35, lanes, versões, campanha, relatórios e exports. Ele nunca muda o
+modo, solicita proposal ou chama compra. `--demo-only` apenas observa por uma janela de
+pelo menos uma virada M1; sem sinal aprovado retorna `NO_SIGNAL`.
+
+```powershell
+$env:ALLOW_REAL_TRADING = "false"
+$env:DERIV_ACCOUNT_TYPE = "demo"
+$env:DASHBOARD_API_KEY = <chave-local-em-memoria>
+python -m scripts.nexus_trade_smoke --base-url http://127.0.0.1:8990
+python -m scripts.nexus_trade_smoke --base-url http://127.0.0.1:8990 --demo-only
+```
+
+Para Docker, sempre escolha um projeto e porta exclusivos, force os mesmos overrides no
+ambiente do comando e use um `ENV_FILE` local somente como input. O Compose não possui
+`container_name`, portanto o isolamento por projeto inclui containers e volume. Finalize
+com `docker compose -p <projeto> down`, sem `-v`, preservando o volume de evidência.
+
 ## Testes
 
 ```bash

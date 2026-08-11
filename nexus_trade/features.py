@@ -6,7 +6,13 @@ from typing import Iterable
 
 from stock_indicators import indicators
 
-from nexus_trade.indicators import IndicatorEngine, IndicatorFrame, closed_candles, number
+from nexus_trade.indicators import (
+    IndicatorEngine,
+    IndicatorFrame,
+    closed_candles,
+    exclusive_causal_cutoff,
+    number,
+)
 from utils.indicator_quotes import candles_to_quotes
 
 
@@ -24,11 +30,17 @@ class FeatureBuilder:
         active_candle_time: int | None = None,
     ) -> list[IndicatorFrame]:
         source = list(candles)
+        cutoff = exclusive_causal_cutoff(
+            decision_epoch=decision_epoch,
+            active_candle_time=active_candle_time,
+        )
         completed = closed_candles(
-            source, decision_epoch=decision_epoch, active_candle_time=active_candle_time,
+            source,
+            **cutoff,
         )
         base_frames = self.indicator_engine.calculate(
-            source, decision_epoch=decision_epoch, active_candle_time=active_candle_time,
+            source,
+            **cutoff,
         )
         if not completed:
             return []

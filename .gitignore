@@ -36,6 +36,7 @@ wheels/
 *.sqlite3
 nexus_trader.db
 nexustrader.db
+/storage/
 
 # Logs
 *.log

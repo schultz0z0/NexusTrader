@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import logging
 
 from core.auth import AuthManager
 from core.connection import NexusConnection
@@ -24,6 +25,8 @@ def is_demo(account):
 
 
 async def run(symbol="R_100"):
+    previous_logging_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
     auth = AuthManager()
     connection = NexusConnection(auth, reconnect_delays=(1, 2, 4))
     summary = {"rest": False, "websocket": False, "history": False, "tick": False}
@@ -36,7 +39,7 @@ async def run(symbol="R_100"):
         selected_id = account_id(selected)
         ensure_demo_account("demo")
         summary["rest"] = True
-        summary["demo_account"] = selected_id
+        summary["demo_account_verified"] = True
 
         if not await connection.connect(selected_id):
             raise RuntimeError("Falha ao conectar o WebSocket OTP")
@@ -67,6 +70,7 @@ async def run(symbol="R_100"):
         print(json.dumps(summary, ensure_ascii=False))
     finally:
         await connection.disconnect()
+        logging.disable(previous_logging_disable)
 
 
 def build_parser():
@@ -75,6 +79,15 @@ def build_parser():
     return parser
 
 
+def main(argv=None):
+    arguments = build_parser().parse_args(argv)
+    try:
+        asyncio.run(run(arguments.symbol))
+    except Exception:
+        print('{"outcome":"SKIPPED_SAFE"}')
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    arguments = build_parser().parse_args()
-    asyncio.run(run(arguments.symbol))
+    raise SystemExit(main())

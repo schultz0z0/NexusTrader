@@ -66,7 +66,10 @@ class NexusConnection:
             await self._open_socket(replay_subscriptions=False)
             return True
         except Exception as exc:
-            logger.error(f"Erro ao conectar WebSocket: {exc}")
+            logger.error(
+                "Falha ao conectar WebSocket Deriv (error_type=%s).",
+                type(exc).__name__,
+            )
             self._is_connected = False
             self._connected_event.clear()
             return False
@@ -74,9 +77,9 @@ class NexusConnection:
     async def _open_socket(self, replay_subscriptions: bool):
         websocket_url = await self.auth_manager.get_websocket_url(self.account_id)
         if not websocket_url:
-            raise ConnectionError(f"OTP indisponivel para a conta {self.account_id}")
+            raise ConnectionError("OTP indisponivel para a conta selecionada")
 
-        logger.info(f"Conectando ao WebSocket da conta {self.account_id}...")
+        logger.info("Conectando WebSocket Deriv para conta selecionada.")
         self.websocket_url = websocket_url
         opened_socket = await self._connector(websocket_url, ping_interval=30, ping_timeout=10)
         self.ws = opened_socket
@@ -155,7 +158,10 @@ class NexusConnection:
             raise
         except Exception as exc:
             if not self._closing:
-                logger.warning(f"Conexao WebSocket interrompida: {exc}")
+                logger.warning(
+                    "Conexao WebSocket interrompida (error_type=%s).",
+                    type(exc).__name__,
+                )
                 await self._handle_connection_loss(exc)
 
     async def _run_handler(self, record, data):
@@ -164,12 +170,15 @@ class NexusConnection:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception(f"Falha no handler da subscription {record.key}: {exc}")
+            logger.exception(
+                "Falha no handler da subscription (error_type=%s).",
+                type(exc).__name__,
+            )
 
     async def _handle_connection_loss(self, exc):
         self._is_connected = False
         self._connected_event.clear()
-        self._fail_pending(ConnectionError(str(exc)))
+        self._fail_pending(ConnectionError("Deriv connection lost"))
         if not self._closing and (self._reconnect_task is None or self._reconnect_task.done()):
             self._reconnect_task = asyncio.create_task(self._reconnect_flow())
 
@@ -199,7 +208,7 @@ class NexusConnection:
                 self._pending_requests.pop(req_id, None)
                 self._pending_subscription_keys.pop(req_id, None)
                 await self._handle_connection_loss(exc)
-                return {"error": {"code": "SendError", "message": str(exc)}}
+                return {"error": {"code": "SendError", "message": "transport send failed"}}
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
@@ -207,8 +216,8 @@ class NexusConnection:
             self._pending_requests.pop(req_id, None)
             self._pending_subscription_keys.pop(req_id, None)
             return {"error": {"code": "Timeout", "message": "Request timed out"}}
-        except ConnectionError as exc:
-            return {"error": {"code": "Disconnected", "message": str(exc)}}
+        except ConnectionError:
+            return {"error": {"code": "Disconnected", "message": "Deriv connection lost"}}
 
     async def subscribe(self, key, request=None, handler=None) -> str:
         # Compatibility with the original subscribe(request, handler) signature.
@@ -232,7 +241,7 @@ class NexusConnection:
     async def _activate_subscription(self, record: SubscriptionRecord):
         response = await self.send(record.request, subscription_key=record.key)
         if "error" in response:
-            raise ConnectionError(response["error"].get("message", str(response["error"])))
+            raise ConnectionError("Deriv subscription failed")
         record.remote_id = response.get("subscription", {}).get("id") or record.remote_id
 
     async def unsubscribe(self, key: str):
@@ -260,7 +269,11 @@ class NexusConnection:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"Falha na reconexao Deriv #{attempt}: {exc}")
+                logger.warning(
+                    "Falha na reconexao Deriv (attempt=%s, error_type=%s).",
+                    attempt,
+                    type(exc).__name__,
+                )
                 self._is_connected = False
                 self._connected_event.clear()
 
@@ -271,7 +284,10 @@ class NexusConnection:
                 if self._is_connected:
                     response = await self.send({"ping": 1}, timeout=10)
                     if "error" in response and response["error"].get("code") != "NotConnected":
-                        logger.warning(f"Heartbeat Deriv falhou: {response['error']}")
+                        logger.warning(
+                            "Heartbeat Deriv falhou (error_code=%s).",
+                            response["error"].get("code", "unknown"),
+                        )
         except asyncio.CancelledError:
             raise
 
