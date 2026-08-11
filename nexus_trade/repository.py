@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -23,6 +24,14 @@ from nexus_trade.domain import CampaignStatus, Lane, VersionStatus
 
 class NexusTradeSingletonError(RuntimeError):
     """Raised when the protected NexusTrade identity has been corrupted."""
+
+
+class ChampionManagementConflict(RuntimeError):
+    """Raised when a stale editor attempts to replace Champion management."""
+
+
+class ChampionManagementUnsafe(RuntimeError):
+    """Raised when Champion management cannot change at a safe boundary."""
 
 
 class NexusTradeRepository:
@@ -81,6 +90,16 @@ class NexusTradeRepository:
             """,
             (NEXUS_TRADE_BOT_ID, NEXUS_SYMBOL, NEXUS_TIMEFRAME_SECONDS,
              NEXUS_DURATION_SECONDS, NEXUS_DURATION_UNIT, NEXUS_DEMO_STAKE),
+        )
+        await db.execute(
+            """
+            INSERT INTO nexus_champion_management (
+                bot_id, revision, initial_stake, money_management,
+                money_config, risk_config
+            ) VALUES (?, 1, ?, 'fixed', '{}', '{}')
+            ON CONFLICT(bot_id) DO NOTHING
+            """,
+            (NEXUS_TRADE_BOT_ID, NEXUS_DEMO_STAKE),
         )
         version_id, version_hash, encoded_snapshot = cls._v1_identity(
             VersionStatus.CHAMPION,
@@ -342,7 +361,232 @@ class NexusTradeRepository:
             raise NexusTradeSingletonError(
                 "active Trial campaign does not match the runtime pointer"
             )
-        return {"bot": dict(bot), "runtime": dict(runtime), "lanes": lanes, "active_campaigns": active_campaigns}
+        management = await cls._management_from_connection(db)
+        return {
+            "bot": dict(bot),
+            "runtime": dict(runtime),
+            "lanes": lanes,
+            "active_campaigns": active_campaigns,
+            "champion_management": management,
+        }
+
+    @staticmethod
+    def _finite_number(value, field: str, *, minimum=None, strictly_positive=False) -> float:
+        if isinstance(value, bool) or type(value) not in {int, float}:
+            raise ValueError(f"{field} must be numeric")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError(f"{field} must be finite")
+        if strictly_positive and normalized <= 0:
+            raise ValueError(f"{field} must be positive")
+        if minimum is not None and normalized < minimum:
+            raise ValueError(f"{field} is below the minimum")
+        return normalized
+
+    @staticmethod
+    def _exact_int(value, field: str, *, minimum: int) -> int:
+        if isinstance(value, bool) or type(value) is not int or value < minimum:
+            raise ValueError(
+                f"{field} must be an integer greater than or equal to {minimum}"
+            )
+        return value
+
+    @classmethod
+    def _normalize_champion_management(cls, payload: dict) -> dict:
+        if type(payload) is not dict:
+            raise ValueError("Champion management payload must be an object")
+        expected = {"initial_stake", "money_management", "money_config", "risk_config"}
+        if set(payload) != expected:
+            raise ValueError("Champion management fields are invalid")
+        initial_stake = cls._finite_number(
+            payload["initial_stake"], "initial_stake", strictly_positive=True,
+        )
+        mode = payload["money_management"]
+        if type(mode) is not str or mode not in {"fixed", "martingale", "soros"}:
+            raise ValueError("money_management is invalid")
+        money_config = payload["money_config"]
+        if type(money_config) is not dict:
+            raise ValueError("money_config must be an object")
+        if mode == "fixed":
+            if money_config:
+                raise ValueError("fixed management does not accept money_config")
+            normalized_money = {}
+        elif mode == "martingale":
+            if set(money_config) != {"multiplier", "max_levels"}:
+                raise ValueError("martingale configuration is incomplete")
+            multiplier = cls._finite_number(
+                money_config["multiplier"], "multiplier", strictly_positive=True,
+            )
+            if multiplier <= 1:
+                raise ValueError("martingale multiplier must be greater than one")
+            normalized_money = {
+                "multiplier": multiplier,
+                "max_levels": cls._exact_int(
+                    money_config["max_levels"], "max_levels", minimum=1,
+                ),
+            }
+        else:
+            if set(money_config) != {"levels", "percent"}:
+                raise ValueError("soros configuration is incomplete")
+            percent = cls._finite_number(
+                money_config["percent"], "percent", strictly_positive=True,
+            )
+            if percent > 1:
+                raise ValueError("soros percent cannot exceed one")
+            normalized_money = {
+                "levels": cls._exact_int(money_config["levels"], "levels", minimum=1),
+                "percent": percent,
+            }
+
+        risk_config = payload["risk_config"]
+        if type(risk_config) is not dict:
+            raise ValueError("risk_config must be an object")
+        allowed_risk = {
+            "take_profit_daily",
+            "stop_loss_daily",
+            "max_daily_trades",
+            "max_single_stake",
+            "max_consecutive_losses",
+            "cooldown_minutes",
+        }
+        if not set(risk_config).issubset(allowed_risk):
+            raise ValueError("risk_config fields are invalid")
+        normalized_risk = {}
+        for field in ("take_profit_daily", "stop_loss_daily"):
+            if field in risk_config:
+                normalized_risk[field] = cls._finite_number(
+                    risk_config[field], field, minimum=0,
+                )
+        if "max_single_stake" in risk_config:
+            maximum = cls._finite_number(
+                risk_config["max_single_stake"],
+                "max_single_stake",
+                strictly_positive=True,
+            )
+            if maximum < initial_stake:
+                raise ValueError("max_single_stake cannot be below initial_stake")
+            normalized_risk["max_single_stake"] = maximum
+        for field, minimum in (
+            ("max_daily_trades", 1),
+            ("max_consecutive_losses", 1),
+            ("cooldown_minutes", 0),
+        ):
+            if field in risk_config:
+                normalized_risk[field] = cls._exact_int(
+                    risk_config[field], field, minimum=minimum,
+                )
+        return {
+            "initial_stake": initial_stake,
+            "money_management": mode,
+            "money_config": normalized_money,
+            "risk_config": normalized_risk,
+        }
+
+    @classmethod
+    async def _management_from_connection(cls, db: aiosqlite.Connection) -> dict:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM nexus_champion_management WHERE bot_id = ?",
+            (NEXUS_TRADE_BOT_ID,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise NexusTradeSingletonError("Champion management is missing")
+        try:
+            revision = row["revision"]
+            if isinstance(revision, bool) or type(revision) is not int or revision < 1:
+                raise ValueError("revision is invalid")
+            raw_money = row["money_config"]
+            raw_risk = row["risk_config"]
+            money_config = json.loads(raw_money)
+            risk_config = json.loads(raw_risk)
+            normalized = cls._normalize_champion_management({
+                "initial_stake": row["initial_stake"],
+                "money_management": row["money_management"],
+                "money_config": money_config,
+                "risk_config": risk_config,
+            })
+            if canonical_json(money_config) != raw_money or canonical_json(risk_config) != raw_risk:
+                raise ValueError("management JSON is not canonical")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise NexusTradeSingletonError("Champion management is corrupt") from exc
+        return {"revision": revision, **normalized}
+
+    async def get_champion_management(self) -> dict:
+        async with self._connection() as db:
+            return await self._management_from_connection(db)
+
+    @staticmethod
+    async def _champion_lane_is_idle(db: aiosqlite.Connection) -> bool:
+        async with db.execute(
+            """
+            SELECT decision.payload
+            FROM nexus_lane_heads AS head
+            JOIN nexus_decisions AS decision ON decision.id = head.snapshot_id
+            WHERE head.lane = ?
+            """,
+            (Lane.CHAMPION.value,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return True
+        try:
+            payload = json.loads(row["payload"])
+            status = payload["state"]["position_status"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise NexusTradeSingletonError("Champion lane state is corrupt") from exc
+        if status not in {"IDLE", "RESERVED", "ACTIVE", "QUARANTINED"}:
+            raise NexusTradeSingletonError("Champion lane state is corrupt")
+        return status == "IDLE"
+
+    async def set_champion_management(
+        self, *, expected_revision: int, payload: dict,
+    ) -> dict:
+        if isinstance(expected_revision, bool) or type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("expected_revision must be a positive integer")
+        normalized = self._normalize_champion_management(payload)
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute(
+                    "SELECT champion_enabled FROM nexus_runtime WHERE bot_id = ?",
+                    (NEXUS_TRADE_BOT_ID,),
+                ) as cursor:
+                    runtime = await cursor.fetchone()
+                if runtime is None:
+                    raise NexusTradeSingletonError("NexusTrade runtime is missing")
+                if int(runtime["champion_enabled"]) != 0:
+                    raise ChampionManagementUnsafe("Champion must be OFF to change management")
+                if not await self._champion_lane_is_idle(db):
+                    raise ChampionManagementUnsafe("Champion lane must be IDLE to change management")
+                cursor = await db.execute(
+                    """
+                    UPDATE nexus_champion_management
+                    SET revision = revision + 1, initial_stake = ?,
+                        money_management = ?, money_config = ?, risk_config = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE bot_id = ? AND revision = ?
+                    """,
+                    (
+                        normalized["initial_stake"],
+                        normalized["money_management"],
+                        canonical_json(normalized["money_config"]),
+                        canonical_json(normalized["risk_config"]),
+                        NEXUS_TRADE_BOT_ID,
+                        expected_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ChampionManagementConflict("Champion management revision is stale")
+                await self._advance_snapshot_version(db)
+                management = await self._management_from_connection(db)
+                await db.commit()
+                return management
+            except BaseException:
+                await db.rollback()
+                raise
 
     @classmethod
     async def _validated_version(
@@ -534,6 +778,7 @@ class NexusTradeRepository:
             "emergency_stop": bool(runtime.get("emergency_stop", 0)),
             "lanes": durable["lanes"],
             "active_campaigns": durable["active_campaigns"],
+            "champion_management": durable["champion_management"],
             "decisions": decisions,
             "trades": trades,
             "reports": await self.list_reports(),

@@ -27,6 +27,24 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp_dir.cleanup()
 
+    @staticmethod
+    def _champion_management_payload(**overrides):
+        payload = {
+            "initial_stake": 0.7,
+            "money_management": "martingale",
+            "money_config": {"multiplier": 2.1, "max_levels": 3},
+            "risk_config": {
+                "take_profit_daily": 12.0,
+                "stop_loss_daily": 7.0,
+                "max_daily_trades": 30,
+                "max_single_stake": 8.0,
+                "max_consecutive_losses": 4,
+                "cooldown_minutes": 10,
+            },
+        }
+        payload.update(overrides)
+        return payload
+
     async def _seed_shared_v1_legacy(self, db_path: str, campaign_id: str) -> str:
         repository = DatabaseRepository(db_path)
         nexus = NexusTradeRepository(db_path)
@@ -548,6 +566,7 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await db.execute("DELETE FROM nexus_campaigns")
             await db.execute("DELETE FROM nexus_runtime")
             await db.execute("DELETE FROM nexus_versions")
+            await db.execute("DELETE FROM nexus_champion_management")
             await db.execute("DELETE FROM bot_instances WHERE id = ?", (NEXUS_TRADE_BOT_ID,))
             await db.execute(
                 """
@@ -816,6 +835,130 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                                 f"UPDATE {journal} SET {field} = ? WHERE {identity_column} = ?",
                                 (invalid_value, identity_value),
                             )
+
+    async def test_champion_management_defaults_persist_and_use_revision_cas(self):
+        await self.repo.init_db()
+
+        default = await self.nexus.get_champion_management()
+        self.assertEqual(
+            default,
+            {
+                "revision": 1,
+                "initial_stake": 0.35,
+                "money_management": "fixed",
+                "money_config": {},
+                "risk_config": {},
+            },
+        )
+
+        updated = await self.nexus.set_champion_management(
+            expected_revision=1,
+            payload=self._champion_management_payload(),
+        )
+        self.assertEqual(updated["revision"], 2)
+        self.assertEqual(updated["money_management"], "martingale")
+        self.assertEqual(updated["money_config"]["multiplier"], 2.1)
+
+        restarted = NexusTradeRepository(self.db_path)
+        self.assertEqual(await restarted.get_champion_management(), updated)
+        with self.assertRaisesRegex(RuntimeError, "revision"):
+            await restarted.set_champion_management(
+                expected_revision=1,
+                payload=self._champion_management_payload(initial_stake=0.9),
+            )
+        self.assertEqual(await restarted.get_champion_management(), updated)
+
+        snapshot = await restarted.get_control_snapshot()
+        self.assertEqual(snapshot["champion_management"], updated)
+
+    async def test_champion_management_rejects_invalid_values_and_unsafe_lane(self):
+        await self.repo.init_db()
+        invalid_payloads = (
+            self._champion_management_payload(initial_stake=float("nan")),
+            self._champion_management_payload(initial_stake=float("inf")),
+            self._champion_management_payload(initial_stake=-0.1),
+            self._champion_management_payload(money_management="unknown"),
+            self._champion_management_payload(
+                money_management="martingale",
+                money_config={"multiplier": 1.0, "max_levels": 3},
+            ),
+            self._champion_management_payload(
+                risk_config={
+                    **self._champion_management_payload()["risk_config"],
+                    "max_single_stake": 0.1,
+                },
+            ),
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                await self.nexus.set_champion_management(
+                    expected_revision=1,
+                    payload=payload,
+                )
+
+        snapshot = await self.nexus.get_runtime_snapshot()
+        champion = next(
+            item for item in snapshot["lanes"]
+            if item["lane"] == Lane.CHAMPION.value
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            payload = json.dumps({
+                "state": {
+                    "position_status": "ACTIVE",
+                    "owner_decision_id": "decision-active",
+                    "contract_id": 7001,
+                },
+                "owner": {"decision_id": "decision-active", "contract_id": 7001},
+            })
+            await db.execute(
+                """
+                INSERT INTO nexus_decisions (
+                    id, lane, nexus_version_id, campaign_id, symbol,
+                    signal_epoch, payload
+                ) VALUES (?, ?, ?, NULL, 'R_100', 60, ?)
+                """,
+                (
+                    "decision-active",
+                    Lane.CHAMPION.value,
+                    champion["version"]["id"],
+                    payload,
+                ),
+            )
+            await db.execute(
+                "INSERT INTO nexus_lane_heads (lane, snapshot_id) VALUES (?, ?)",
+                (Lane.CHAMPION.value, "decision-active"),
+            )
+            await db.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "IDLE"):
+            await self.nexus.set_champion_management(
+                expected_revision=1,
+                payload=self._champion_management_payload(),
+            )
+
+    async def test_champion_management_update_rolls_back_with_snapshot_revision(self):
+        await self.repo.init_db()
+        before = await self.nexus.get_control_snapshot()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executescript(
+                """
+                CREATE TRIGGER abort_nexus_management_snapshot_advance
+                BEFORE UPDATE OF config_revision ON bot_instances
+                WHEN NEW.id = 'nexus-trade'
+                BEGIN SELECT RAISE(ABORT, 'forced management rollback'); END;
+                """
+            )
+            await db.commit()
+
+        with self.assertRaises(aiosqlite.IntegrityError):
+            await self.nexus.set_champion_management(
+                expected_revision=1,
+                payload=self._champion_management_payload(),
+            )
+
+        after = await self.nexus.get_control_snapshot()
+        self.assertEqual(after["champion_management"], before["champion_management"])
+        self.assertEqual(after["snapshot_version"], before["snapshot_version"])
 
 
 if __name__ == "__main__":

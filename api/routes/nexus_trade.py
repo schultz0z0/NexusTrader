@@ -1,14 +1,15 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.websocket_manager import ws_manager
 from api.auth import require_nexus_human_action
 from config.settings import settings
 from core.events import runtime_event
-from nexus_trade.constants import NEXUS_DEMO_STAKE, NEXUS_TRADE_BOT_ID
+from nexus_trade.constants import NEXUS_TRADE_BOT_ID
 from nexus_trade.promotion import PromotionConflict, PromotionRejected, PromotionService
+from nexus_trade.repository import ChampionManagementConflict, ChampionManagementUnsafe
 
 
 router = APIRouter(prefix="/api/v1/nexus-trade", tags=["NexusTrade"])
@@ -23,6 +24,16 @@ class ChampionModePayload(BaseModel):
 
 class EmergencyStopPayload(BaseModel):
     enabled: bool = True
+
+
+class ChampionManagementPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    initial_stake: float = Field(gt=0, allow_inf_nan=False)
+    money_management: Literal["fixed", "martingale", "soros"]
+    money_config: dict = Field(default_factory=dict)
+    risk_config: dict = Field(default_factory=dict)
 
 
 class NexusRealConfirmationPayload(BaseModel):
@@ -60,6 +71,7 @@ async def _publish_runtime_snapshot(request: Request) -> dict:
         payload={
             "runtime": snapshot["runtime"],
             "emergency_stop": snapshot["emergency_stop"],
+            "champion_management": snapshot["champion_management"],
         },
     )
     event = request.app.state.live_store.sanitize_event(event)
@@ -101,6 +113,16 @@ def _real_ticket_bot(bot: dict, account_id: str) -> dict:
     }
 
 
+async def _require_real_stake_within_server_cap(request: Request) -> None:
+    management = await _repo(request).get_nexus_champion_management()
+    initial_stake = float(management["initial_stake"])
+    if (
+        settings.REAL_MAX_STAKE_USD <= 0
+        or initial_stake > float(settings.REAL_MAX_STAKE_USD)
+    ):
+        raise HTTPException(422, "Stake REAL excede o teto do servidor")
+
+
 @router.get("")
 async def nexus_snapshot(request: Request):
     return {"status": "success", "data": await _snapshot(request)}
@@ -115,11 +137,7 @@ async def set_champion_mode(payload: ChampionModePayload, request: Request):
     if payload.enabled and payload.account_type == "real":
         if not settings.ALLOW_REAL_TRADING:
             raise HTTPException(403, "Execucao real desabilitada no servidor")
-        if (
-            settings.REAL_MAX_STAKE_USD <= 0
-            or NEXUS_DEMO_STAKE > settings.REAL_MAX_STAKE_USD
-        ):
-            raise HTTPException(422, "Stake REAL excede o teto do servidor")
+        await _require_real_stake_within_server_cap(request)
         if not request.app.state.real_start_tickets.consume(
             payload.real_ticket,
             _real_ticket_bot(bot, payload.account_id),
@@ -137,6 +155,23 @@ async def set_champion_mode(payload: ChampionModePayload, request: Request):
     return {"status": "success", "data": await _publish_runtime_snapshot(request)}
 
 
+@router.post("/champion-management")
+async def set_champion_management(
+    payload: ChampionManagementPayload,
+    request: Request,
+):
+    try:
+        await _repo(request).set_nexus_champion_management(
+            expected_revision=payload.expected_revision,
+            payload=payload.model_dump(exclude={"expected_revision"}),
+        )
+    except (ChampionManagementConflict, ChampionManagementUnsafe) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"status": "success", "data": await _publish_runtime_snapshot(request)}
+
+
 @router.post("/real-confirmation")
 async def confirm_real_champion(
     payload: NexusRealConfirmationPayload,
@@ -144,8 +179,7 @@ async def confirm_real_champion(
 ):
     if not settings.ALLOW_REAL_TRADING:
         raise HTTPException(403, "Execucao real desabilitada no servidor")
-    if settings.REAL_MAX_STAKE_USD <= 0 or NEXUS_DEMO_STAKE > settings.REAL_MAX_STAKE_USD:
-        raise HTTPException(422, "Stake REAL excede o teto do servidor")
+    await _require_real_stake_within_server_cap(request)
     account_id = payload.account_id.strip()
     expected = f"REAL {account_id}"
     if payload.phrase.strip() != expected:

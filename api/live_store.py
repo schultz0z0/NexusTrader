@@ -180,7 +180,7 @@ class LiveStore:
         )
         for key in (
             "runtime", "lanes", "active_campaigns", "decisions", "trades",
-            "reports", "proposals",
+            "reports", "proposals", "champion_management",
         ):
             if key in durable:
                 state[key] = deepcopy(durable[key])
@@ -335,6 +335,10 @@ class LiveStore:
         if event_type == "nexus.runtime":
             runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else payload
             state.setdefault("runtime", {}).update(runtime)
+            if isinstance(payload.get("champion_management"), dict):
+                state["champion_management"] = deepcopy(
+                    payload["champion_management"],
+                )
             emergency = payload.get(
                 "emergency_stop",
                 state["runtime"].get("emergency_stop", state.get("emergency_stop", False)),

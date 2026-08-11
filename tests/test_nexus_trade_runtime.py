@@ -315,6 +315,13 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 {"lane": Lane.CHAMPION.value, "version": {"id": "champion-v1"}},
                 {"lane": Lane.TRIAL.value, "version": {"id": "trial-v1"}},
             ],
+            "champion_management": {
+                "revision": 1,
+                "initial_stake": 0.35,
+                "money_management": "fixed",
+                "money_config": {},
+                "risk_config": {},
+            },
         }
 
     def tearDown(self):
@@ -350,6 +357,37 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "candidate_id": f"candidate-{artifact.artifact_hash[:24]}",
                     "artifact": json.loads(artifact.to_json()),
                 }
+        return snapshot
+
+    def managed_snapshot(
+        self,
+        *,
+        revision=2,
+        initial_stake=0.7,
+        money_management="martingale",
+        money_config=None,
+        risk_config=None,
+        enabled=True,
+        account_id="DOT-DEMO",
+        account_type="demo",
+    ):
+        snapshot = json.loads(json.dumps(self.snapshot))
+        snapshot["runtime"].update({
+            "champion_enabled": int(enabled),
+            "champion_account_id": account_id,
+            "champion_account_type": account_type,
+        })
+        snapshot["champion_management"] = {
+            "revision": revision,
+            "initial_stake": initial_stake,
+            "money_management": money_management,
+            "money_config": (
+                money_config
+                if money_config is not None
+                else {"multiplier": 2.0, "max_levels": 3}
+            ),
+            "risk_config": risk_config or {},
+        }
         return snapshot
 
     def test_trial_rotation_and_restart_load_exact_artifact_and_champion_transition_loads_gate(self):
@@ -474,6 +512,149 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.separate)
         self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+
+    def test_champion_management_is_used_only_when_champion_is_on(self):
+        requested = []
+
+        def factory(config):
+            requested.append(dict(config))
+            return self.separate
+
+        runtime = self.runtime(champion_dispatcher_factory=factory)
+        off = self.managed_snapshot(enabled=False)
+        self.assertTrue(runtime.apply_champion_mode(off))
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.shared)
+        self.assertEqual(requested, [])
+
+        on = self.managed_snapshot(enabled=True)
+        self.assertTrue(runtime.apply_champion_mode(on))
+        self.assertIs(runtime.dispatchers[Lane.CHAMPION], self.separate)
+        self.assertIs(runtime.dispatchers[Lane.TRIAL], self.shared)
+        self.assertEqual(requested[0]["stake"], 0.7)
+        self.assertEqual(requested[0]["money_management"], "martingale")
+        self.assertEqual(requested[0]["money_config"], {"multiplier": 2.0, "max_levels": 3})
+        self.assertEqual(requested[0]["stake_provider"](), 0.7)
+
+    async def test_management_change_waits_for_active_contract_and_settles_with_old_revision(self):
+        requested = []
+
+        def factory(config):
+            requested.append(dict(config))
+            return self.separate
+
+        runtime = self.runtime(champion_dispatcher_factory=factory)
+        old = self.managed_snapshot(
+            revision=2,
+            initial_stake=0.7,
+            money_management="martingale",
+            money_config={"multiplier": 2.0, "max_levels": 2},
+        )
+        self.assertTrue(runtime.apply_champion_mode(old))
+        runtime.strategies[Lane.CHAMPION].state = SetupState(
+            position_status="ACTIVE",
+            owner_decision_id="managed-owner",
+            contract_id=801,
+        )
+        runtime._lane_owners[Lane.CHAMPION] = {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": True,
+        }
+        changed = self.managed_snapshot(
+            revision=3,
+            initial_stake=1.1,
+            money_management="soros",
+            money_config={"levels": 2, "percent": 0.5},
+        )
+
+        self.assertFalse(runtime.apply_champion_mode(changed))
+        self.assertEqual(runtime._champion_money_manager.initial_stake, 0.7)
+        self.assertEqual(len(requested), 1)
+
+        await runtime.settle_contract(
+            Lane.CHAMPION,
+            "managed-owner",
+            {
+                "contract_id": 801,
+                "contract_type": "CALL",
+                "status": "won",
+                "buy_price": 0.7,
+                "payout": 1.25,
+                "profit": 0.55,
+            },
+        )
+
+        _, settlement_config = self.repository.risk_settlements[0]
+        self.assertEqual(settlement_config["money_management"], "martingale")
+        self.assertEqual(settlement_config["initial_stake"], 0.7)
+        self.assertEqual(runtime._champion_money_manager.mode, "soros")
+        self.assertEqual(runtime._champion_money_manager.initial_stake, 1.1)
+
+    def test_management_change_is_deferred_for_every_owned_champion_state(self):
+        for status in ("RESERVED", "ACTIVE", "QUARANTINED"):
+            with self.subTest(status=status):
+                runtime = self.runtime()
+                self.assertTrue(runtime.apply_champion_mode(self.managed_snapshot()))
+                runtime.strategies[Lane.CHAMPION].state = SetupState(
+                    position_status=status,
+                    owner_decision_id="owned",
+                    contract_id=801 if status == "ACTIVE" else None,
+                    quarantine_correlation_id=(
+                        "nexus-owned" if status == "QUARANTINED" else None
+                    ),
+                )
+                changed = self.managed_snapshot(
+                    revision=3,
+                    initial_stake=1.2,
+                    money_management="fixed",
+                    money_config={},
+                )
+
+                self.assertFalse(runtime.apply_champion_mode(changed))
+                self.assertEqual(runtime._champion_money_manager.initial_stake, 0.7)
+
+    def test_real_and_configured_max_stake_caps_block_initial_and_calculated_stake(self):
+        previous_cap = settings.REAL_MAX_STAKE_USD
+        settings.ALLOW_REAL_TRADING = True
+        settings.REAL_MAX_STAKE_USD = 0.5
+        requested = []
+
+        def factory(config):
+            requested.append(dict(config))
+            return FakeDispatcher(
+                901,
+                account_id=config["account_id"],
+                account_type=config["account_type"],
+                management_active=True,
+            )
+
+        try:
+            runtime = self.runtime(champion_dispatcher_factory=factory)
+            with self.assertRaisesRegex(ValueError, "stake.*server"):
+                runtime.apply_champion_mode(self.managed_snapshot(
+                    initial_stake=0.7,
+                    account_id="ROT-REAL",
+                    account_type="real",
+                ))
+            self.assertEqual(requested, [])
+
+            allowed = self.managed_snapshot(
+                initial_stake=0.35,
+                account_id="ROT-REAL",
+                account_type="real",
+                risk_config={"max_single_stake": 0.4},
+            )
+            self.assertTrue(runtime.apply_champion_mode(allowed))
+            provider = requested[0]["stake_provider"]
+            runtime._champion_money_manager.current_stake = 0.45
+            with self.assertRaisesRegex(ValueError, "max_single_stake"):
+                provider()
+            runtime._champion_money_manager.current_stake = 0.55
+            with self.assertRaisesRegex(ValueError, "server"):
+                provider()
+        finally:
+            settings.REAL_MAX_STAKE_USD = previous_cap
+            settings.ALLOW_REAL_TRADING = False
 
     def test_champion_switch_waits_for_idle_boundary(self):
         runtime = self.runtime(restored_lane_states={
@@ -823,6 +1004,27 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "nexus.proposal",
             {event["type"] for event in publisher.events},
+        )
+
+    async def test_runtime_refresh_publishes_management_only_transition(self):
+        publisher = LiveStorePublisher(self.repository)
+        runtime = self.runtime(publisher=publisher)
+        runtime.apply_champion_mode(self.snapshot)
+        self.repository.runtime_snapshot = self.managed_snapshot(
+            revision=2,
+            initial_stake=0.9,
+            money_management="fixed",
+            money_config={},
+            enabled=False,
+        )
+        self.repository.runtime_snapshot["bot"] = {"config_revision": 2}
+
+        await runtime._refresh_runtime_snapshot()
+
+        self.assertEqual([event["type"] for event in publisher.events], ["nexus.runtime"])
+        self.assertEqual(
+            publisher.events[0]["payload"]["champion_management"]["initial_stake"],
+            0.9,
         )
 
     async def test_run_remains_alive_when_desired_state_is_stopped(self):

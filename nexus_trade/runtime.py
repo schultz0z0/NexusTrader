@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import time
 from dataclasses import replace
 
+from config.settings import settings
 from core.accounts import normalize_account
 from core.events import runtime_event
 from nexus_trade.artifacts import CandidateArtifact, canonical_json
@@ -27,6 +29,7 @@ from nexus_trade.dispatcher import (
 )
 from nexus_trade.domain import Lane
 from nexus_trade.features import FeatureBuilder
+from nexus_trade.repository import NexusTradeRepository
 from nexus_trade.strategy import NexusTradeStrategy
 from strategies.base import MoneyManager
 from trading.safety import ensure_account_allowed
@@ -98,14 +101,11 @@ class NexusTradeRuntime:
         # -> repository transaction. Repository and dispatcher internals never
         # call back into the runtime while holding their locks, avoiding inversion.
         self._lane_locks = {lane: asyncio.Lock() for lane in Lane}
-        money_config = dict(self.bot.get("money_config") or {})
-        self._champion_money_manager = MoneyManager(
-            mode=self.bot.get("money_management", "fixed"),
-            initial_stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
-            martingale_multiplier=float(money_config.get("multiplier", 2.0)),
-            max_martingale_levels=int(money_config.get("max_levels", 3)),
-            soros_levels=int(money_config.get("levels", 2)),
-            soros_percent=float(money_config.get("percent", 0.5)),
+        self._champion_management = self._management_from_snapshot(
+            runtime_snapshot,
+        )
+        self._champion_money_manager = self._money_manager_for(
+            self._champion_management,
         )
         restored = restored_lane_states or {}
         self.strategies = {
@@ -121,6 +121,66 @@ class NexusTradeRuntime:
         }
         self._versions = {lane: None for lane in Lane}
         self._campaigns = {lane: None for lane in Lane}
+
+    def _management_from_snapshot(self, snapshot: dict | None) -> dict:
+        raw = (snapshot or {}).get("champion_management")
+        if raw is None:
+            raw = {
+                "revision": 1,
+                "initial_stake": self.bot.get("initial_stake", NEXUS_DEMO_STAKE),
+                "money_management": self.bot.get("money_management", "fixed"),
+                "money_config": dict(self.bot.get("money_config") or {}),
+                "risk_config": dict(self.bot.get("risk_config") or {}),
+            }
+        if type(raw) is not dict:
+            raise ValueError("Champion management snapshot must be an object")
+        revision = raw.get("revision")
+        if isinstance(revision, bool) or type(revision) is not int or revision < 1:
+            raise ValueError("Champion management revision is invalid")
+        normalized = NexusTradeRepository._normalize_champion_management({
+            "initial_stake": raw.get("initial_stake"),
+            "money_management": raw.get("money_management"),
+            "money_config": raw.get("money_config"),
+            "risk_config": raw.get("risk_config"),
+        })
+        return {"revision": revision, **normalized}
+
+    @staticmethod
+    def _money_manager_for(management: dict) -> MoneyManager:
+        money_config = management["money_config"]
+        return MoneyManager(
+            mode=management["money_management"],
+            initial_stake=float(management["initial_stake"]),
+            martingale_multiplier=float(money_config.get("multiplier", 2.0)),
+            max_martingale_levels=int(money_config.get("max_levels", 3)),
+            soros_levels=int(money_config.get("levels", 2)),
+            soros_percent=float(money_config.get("percent", 0.5)),
+        )
+
+    def _champion_stake_for(
+        self,
+        account_type: str,
+        *,
+        manager: MoneyManager | None = None,
+        management: dict | None = None,
+    ) -> float:
+        manager = manager or self._champion_money_manager
+        management = management or self._champion_management
+        stake = manager.get_stake()
+        if isinstance(stake, bool) or type(stake) not in {int, float}:
+            raise ValueError("managed stake must be numeric")
+        stake = float(stake)
+        if not math.isfinite(stake) or stake <= 0:
+            raise ValueError("managed stake must be positive and finite")
+        if account_type == "real" and (
+            settings.REAL_MAX_STAKE_USD <= 0
+            or stake > float(settings.REAL_MAX_STAKE_USD)
+        ):
+            raise ValueError("managed stake exceeds the REAL server cap")
+        maximum = management["risk_config"].get("max_single_stake")
+        if maximum is not None and stake > float(maximum):
+            raise ValueError("managed stake exceeds max_single_stake")
+        return stake
 
     @property
     def stop_event(self):
@@ -183,11 +243,20 @@ class NexusTradeRuntime:
         revision = self._snapshot_version(current)
         previous_runtime = previous.get("runtime") or {}
         current_runtime = current.get("runtime") or {}
-        if current_runtime != previous_runtime:
+        previous_management = previous.get("champion_management")
+        current_management = current.get("champion_management")
+        if (
+            current_runtime != previous_runtime
+            or current_management != previous_management
+        ):
             await self._publish_nexus_event(
                 "nexus.runtime",
                 f"nexus.runtime:{revision}",
-                {"runtime": current_runtime, "applied": bool(applied)},
+                {
+                    "runtime": current_runtime,
+                    "champion_management": current_management,
+                    "applied": bool(applied),
+                },
                 snapshot=current,
             )
 
@@ -267,7 +336,7 @@ class NexusTradeRuntime:
         if callable(risk_loader):
             restored_risk = await risk_loader(
                 self.bot_id,
-                float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
+                float(self._champion_management["initial_stake"]),
             )
             self._restore_champion_risk_state(restored_risk)
 
@@ -375,8 +444,11 @@ class NexusTradeRuntime:
                 self.repository,
                 account_id=selected["account_id"],
                 account_type=selected["account_type"],
-                stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
-                stake_provider=self._champion_money_manager.get_stake,
+                stake=self._champion_stake_for(selected["account_type"]),
+                stake_provider=(
+                    lambda account_type=selected["account_type"]:
+                    self._champion_stake_for(account_type)
+                ),
                 buy_lock=champion_lock,
                 management_active=True,
             )
@@ -500,6 +572,12 @@ class NexusTradeRuntime:
     def apply_champion_mode(self, snapshot: dict) -> bool:
         runtime = snapshot.get("runtime") or {}
         self._apply_persisted_emergency_stop(runtime)
+        next_management = self._management_from_snapshot(snapshot)
+        management_changes = next_management != self._champion_management
+        next_money_manager = (
+            self._money_manager_for(next_management)
+            if management_changes else self._champion_money_manager
+        )
         lanes = snapshot.get("lanes") or []
         next_versions = {
             Lane(item["lane"]): (item.get("version") or {}).get("id")
@@ -527,6 +605,12 @@ class NexusTradeRuntime:
         if enabled not in {0, 1, False, True}:
             raise ValueError("champion_enabled must be boolean")
         desired_enabled = bool(enabled)
+        if (
+            management_changes
+            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+        ):
+            self._pending_runtime_snapshot = snapshot
+            return False
         current_dispatcher = self.dispatchers.get(Lane.CHAMPION)
         current_identity = (
             self._dispatcher_identity(current_dispatcher)
@@ -545,16 +629,29 @@ class NexusTradeRuntime:
             if self._champion_dispatcher_factory is None:
                 raise ValueError("Champion ON dispatcher is not configured")
             desired_identity = (account_id, account_type)
+            initial_stake = self._champion_stake_for(
+                account_type,
+                manager=next_money_manager,
+                management=next_management,
+            )
             config = {
                 "account_id": desired_identity[0],
                 "account_type": desired_identity[1],
-                "stake": float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
-                "money_management": self.bot.get("money_management", "fixed"),
-                "money_config": dict(self.bot.get("money_config") or {}),
-                "risk_config": dict(self.bot.get("risk_config") or {}),
+                "stake": initial_stake,
+                "stake_provider": (
+                    lambda account_type=account_type:
+                    self._champion_stake_for(account_type)
+                ),
+                "money_management": next_management["money_management"],
+                "money_config": dict(next_management["money_config"]),
+                "risk_config": dict(next_management["risk_config"]),
                 "management_active": True,
             }
-            desired_dispatcher = self._champion_dispatchers.get(desired_identity)
+            desired_dispatcher = (
+                None
+                if management_changes
+                else self._champion_dispatchers.get(desired_identity)
+            )
             if desired_dispatcher is None:
                 desired_dispatcher = self._champion_dispatcher_factory(config)
             if self._dispatcher_identity(desired_dispatcher) != desired_identity:
@@ -587,6 +684,10 @@ class NexusTradeRuntime:
                 route_changes
                 and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
             )
+            or (
+                management_changes
+                and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+            )
             or any(
                 self.strategies[lane].state.position_status != "IDLE"
                 for lane in strategy_changes
@@ -596,6 +697,13 @@ class NexusTradeRuntime:
             return False
 
         # Commit the route only after all validation/factory work succeeds.
+        if management_changes:
+            self._champion_management = next_management
+            self._champion_money_manager = next_money_manager
+            if desired_enabled:
+                self._champion_dispatchers = {desired_identity: desired_dispatcher}
+            else:
+                self._champion_dispatchers = {}
         for lane in Lane:
             if (
                 self._versions[lane] != next_versions.get(lane)
@@ -703,10 +811,17 @@ class NexusTradeRuntime:
             dispatcher = self._champion_dispatcher_factory({
                 "account_id": identity[0],
                 "account_type": identity[1],
-                "stake": float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
-                "money_management": self.bot.get("money_management", "fixed"),
-                "money_config": dict(self.bot.get("money_config") or {}),
-                "risk_config": dict(self.bot.get("risk_config") or {}),
+                # This dispatcher owns a contract that was accepted before the
+                # restart. Reconstructing it must not be mistaken for approval
+                # of a new REAL buy; the provider below still gates every future buy.
+                "stake": float(self._champion_management["initial_stake"]),
+                "stake_provider": (
+                    lambda account_type=identity[1]:
+                    self._champion_stake_for(account_type)
+                ),
+                "money_management": self._champion_management["money_management"],
+                "money_config": dict(self._champion_management["money_config"]),
+                "risk_config": dict(self._champion_management["risk_config"]),
                 "management_active": True,
                 "restoring_owner": True,
             })
@@ -1049,10 +1164,10 @@ class NexusTradeRuntime:
                 trade,
                 lane_state=settled_state,
                 apply_risk=apply_risk,
-                money_management=self.bot.get("money_management", "fixed"),
-                money_config=dict(self.bot.get("money_config") or {}),
-                risk_config=dict(self.bot.get("risk_config") or {}),
-                initial_stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
+                money_management=self._champion_management["money_management"],
+                money_config=dict(self._champion_management["money_config"]),
+                risk_config=dict(self._champion_management["risk_config"]),
+                initial_stake=float(self._champion_management["initial_stake"]),
                 settled_epoch=float(
                     contract.get("sell_time")
                     or contract.get("date_expiry")
@@ -1069,12 +1184,10 @@ class NexusTradeRuntime:
             ):
                 result = await self.repository.settle_trade_and_risk(
                     trade,
-                    money_management=self.bot.get("money_management", "fixed"),
-                    money_config=dict(self.bot.get("money_config") or {}),
-                    risk_config=dict(self.bot.get("risk_config") or {}),
-                    initial_stake=float(
-                        self.bot.get("initial_stake", NEXUS_DEMO_STAKE),
-                    ),
+                    money_management=self._champion_management["money_management"],
+                    money_config=dict(self._champion_management["money_config"]),
+                    risk_config=dict(self._champion_management["risk_config"]),
+                    initial_stake=float(self._champion_management["initial_stake"]),
                     settled_epoch=float(
                         contract.get("sell_time")
                         or contract.get("date_expiry")
@@ -1308,8 +1421,15 @@ class NexusTradeRuntime:
             self.repository,
             account_id=identity[0],
             account_type=identity[1],
-            stake=float(self.bot.get("initial_stake", NEXUS_DEMO_STAKE)),
-            stake_provider=self._champion_money_manager.get_stake,
+            stake=(
+                float(self._champion_management["initial_stake"])
+                if restoring_owner is not None
+                else self._champion_stake_for(identity[1])
+            ),
+            stake_provider=(
+                lambda account_type=identity[1]:
+                self._champion_stake_for(account_type)
+            ),
             buy_lock=buy_lock,
             management_active=True,
         )

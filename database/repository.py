@@ -1270,6 +1270,17 @@ class DatabaseRepository:
             account_type=account_type,
         )
 
+    async def get_nexus_champion_management(self) -> dict:
+        return await NexusTradeRepository(self.db_path).get_champion_management()
+
+    async def set_nexus_champion_management(
+        self, *, expected_revision: int, payload: dict,
+    ) -> dict:
+        return await NexusTradeRepository(self.db_path).set_champion_management(
+            expected_revision=expected_revision,
+            payload=payload,
+        )
+
     async def set_nexus_emergency_stop(self, enabled: bool) -> dict:
         return await NexusTradeRepository(self.db_path).set_emergency_stop(enabled)
 

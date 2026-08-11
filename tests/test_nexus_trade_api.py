@@ -94,6 +94,103 @@ class NexusTradeApiTests(unittest.TestCase):
             "nexus.runtime",
         )
 
+    def test_champion_management_route_persists_and_rejects_stale_revision(self):
+        payload = {
+            "expected_revision": 1,
+            "initial_stake": 0.7,
+            "money_management": "soros",
+            "money_config": {"levels": 2, "percent": 0.5},
+            "risk_config": {
+                "take_profit_daily": 15,
+                "stop_loss_daily": 8,
+                "max_daily_trades": 24,
+                "max_single_stake": 5,
+                "max_consecutive_losses": 3,
+                "cooldown_minutes": 10,
+            },
+        }
+
+        response = self.client.post(
+            "/api/v1/nexus-trade/champion-management",
+            json=payload,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = response.json()["data"]
+        self.assertEqual(snapshot["champion_management"]["revision"], 2)
+        self.assertEqual(snapshot["champion_management"]["money_management"], "soros")
+        self.assertEqual(
+            self.live_store.snapshot("nexus-trade")["last_nexus_event"]["type"],
+            "nexus.runtime",
+        )
+
+        stale = self.client.post(
+            "/api/v1/nexus-trade/champion-management",
+            json={**payload, "initial_stake": 0.9},
+        )
+        self.assertEqual(stale.status_code, 409)
+        persisted = self.client.get("/api/v1/nexus-trade").json()["data"]
+        self.assertEqual(persisted["champion_management"], snapshot["champion_management"])
+
+    def test_champion_management_route_rejects_invalid_or_unsafe_payload(self):
+        base = {
+            "expected_revision": 1,
+            "initial_stake": 0.7,
+            "money_management": "fixed",
+            "money_config": {},
+            "risk_config": {},
+        }
+        invalid = (
+            {**base, "initial_stake": -1},
+            {**base, "money_management": "unknown"},
+            {**base, "money_config": {"multiplier": 2}},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/v1/nexus-trade/champion-management",
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 422)
+
+        started = self.client.post(
+            "/api/v1/nexus-trade/mode",
+            json={"enabled": True, "account_id": "DOT-DEMO", "account_type": "demo"},
+        )
+        self.assertEqual(started.status_code, 200)
+        unsafe = self.client.post(
+            "/api/v1/nexus-trade/champion-management",
+            json=base,
+        )
+        self.assertEqual(unsafe.status_code, 409)
+
+    def test_real_confirmation_uses_persisted_champion_initial_stake(self):
+        configured = self.client.post(
+            "/api/v1/nexus-trade/champion-management",
+            json={
+                "expected_revision": 1,
+                "initial_stake": 0.7,
+                "money_management": "fixed",
+                "money_config": {},
+                "risk_config": {},
+            },
+        )
+        self.assertEqual(configured.status_code, 200)
+        previous_allow = settings.ALLOW_REAL_TRADING
+        previous_cap = settings.REAL_MAX_STAKE_USD
+        settings.ALLOW_REAL_TRADING = True
+        settings.REAL_MAX_STAKE_USD = 0.5
+        try:
+            response = self.client.post(
+                "/api/v1/nexus-trade/real-confirmation",
+                json={"account_id": "ROT-REAL", "phrase": "REAL ROT-REAL"},
+            )
+        finally:
+            settings.ALLOW_REAL_TRADING = previous_allow
+            settings.REAL_MAX_STAKE_USD = previous_cap
+
+        self.assertEqual(response.status_code, 422)
+
     def test_real_mode_remains_fail_closed_without_server_flag_or_ticket(self):
         previous_allow = settings.ALLOW_REAL_TRADING
         previous_cap = settings.REAL_MAX_STAKE_USD
