@@ -66,3 +66,19 @@ O safety check interpreta estritamente o payload durável, aceita como seguro so
 - `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos três robôs/indicadores protegidos: verdes/limpos.
 - O compose foi validado com `.env.example` e valores dummy em memória; nenhum arquivo de segredo foi criado. Permanece apenas o `StarletteDeprecationWarning` preexistente.
 - Nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.
+
+## Fix round 2/5 — credencial humana exclusiva
+
+O achado foi reproduzido antes da correção: configurações em que `NEXUS_HUMAN_ACTION_KEY` coincidia com `DASHBOARD_API_KEY`, `INTERNAL_API_TOKEN` ou `DERIV_API_TOKEN` eram aceitas nas três subcases do RED, anulando a separação de autoridade.
+
+O validator de `Settings` agora normaliza valores não vazios e usa `secrets.compare_digest` para rejeitar cada colisão, tanto em produção quanto em `DEV_MODE` quando a credencial humana está configurada. Valores distintos continuam válidos; DEV ainda permite credenciais humanas vazias e produção continua exigindo chave e ator. A mensagem é genérica e `hide_input_in_errors` impede que o Pydantic inclua inputs secretos no erro.
+
+### Evidência do fix
+
+- Focados settings/NexusTrade promotion: **45/45**, 5,955 s.
+- Integração Task 6–9, settings e deploy: **151/151**, 21,187 s.
+- Regressões protegidas: **78/78**, 4,248 s.
+- Full Python: **432/432**, 47,292 s.
+- JavaScript: **17/17**.
+- `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos arquivos protegidos: verdes/limpos.
+- Nenhum secret foi registrado; nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.

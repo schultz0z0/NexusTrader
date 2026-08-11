@@ -1,4 +1,5 @@
 import os
+import secrets
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -47,7 +48,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
     @model_validator(mode="after")
@@ -60,6 +62,18 @@ class Settings(BaseSettings):
             raise ValueError("NEXUS_HUMAN_ACTION_KEY e obrigatorio fora do DEV_MODE")
         if not self.DEV_MODE and not self.NEXUS_HUMAN_ACTOR.strip():
             raise ValueError("NEXUS_HUMAN_ACTOR e obrigatorio fora do DEV_MODE")
+        human_key = self.NEXUS_HUMAN_ACTION_KEY.strip()
+        if human_key:
+            for existing_authority in (
+                self.DASHBOARD_API_KEY,
+                self.INTERNAL_API_TOKEN,
+                self.DERIV_API_TOKEN,
+            ):
+                existing_key = existing_authority.strip()
+                if existing_key and secrets.compare_digest(human_key, existing_key):
+                    raise ValueError(
+                        "NEXUS_HUMAN_ACTION_KEY deve ser exclusiva das demais credenciais"
+                    )
         if self.EVENT_QUEUE_MAX < 100:
             raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:
