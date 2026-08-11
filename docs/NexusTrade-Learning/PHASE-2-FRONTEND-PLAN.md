@@ -21,6 +21,7 @@
 - A credencial humana de governança nunca é persistida. Ela existe apenas no campo `password` durante a confirmação, segue no header `X-Nexus-Human-Key` e é apagada do DOM e da memória no `finally` da requisição.
 - Estados compartilháveis usam apenas IDs públicos no URL: aba, `week_start`, `report_id`, `campaign_id` e `proposal_id`. Credenciais e payloads brutos nunca entram no URL.
 - Visualizações usam SVG/DOM leve e tabelas equivalentes; nenhum valor essencial depende de hover, animação ou cor isolada.
+- Cada task termina com testes focados e regressão proporcional. Tasks com UI são abertas na stack Docker local e inspecionadas em navegador real; o fechamento repete a matriz integral.
 
 ---
 
