@@ -391,8 +391,8 @@ class NexusTradeSmoke:
     def verify_restart(cls, before: dict, after: dict) -> dict:
         cls._validate_snapshot(before)
         cls._validate_snapshot(after)
-        if after["snapshot_version"] < before["snapshot_version"]:
-            raise SmokeSafetyError("snapshot_version_decreased_on_restart")
+        if after["snapshot_version"] != before["snapshot_version"]:
+            raise SmokeSafetyError("snapshot_version_changed_on_restart")
         durable_counts = {}
         for field in cls.DURABLE_COLLECTIONS:
             before_rows = before.get(field)

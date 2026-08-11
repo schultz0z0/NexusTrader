@@ -167,6 +167,25 @@ O segundo round também foi executado totalmente offline, sem Docker ou rede:
 Este hardening preserva a evidência Champion V1 e os ponteiros validados no restart
 original; nenhuma nova execução externa foi realizada.
 
+## Hardening pós-review — round 3
+
+O terceiro round foi executado totalmente offline, sem Docker ou rede:
+
+- RED de revisão durável: 1 subfalha esperada, pois 7→8 ainda era aceito; 7→6 já
+  falhava e 7→7 passava. GREEN 1/1 após exigir igualdade exata.
+- `snapshot_version` é a projeção de `bot_instances.config_revision`, portanto um
+  restart puro preserva o valor exato. O crescimento de decisions/trades/reports/
+  proposals permanece separado e monotônico; o teste aceita decisions 0→1 com a
+  revisão durável inalterada.
+- A falha usa diagnóstico constante, sem incluir revisão ou identidade de conta.
+- Regressão focused smoke/start/auth: 29/29 em 7.568s.
+- Suíte Python completa pós-review: 462/462 em 41.758s.
+- JavaScript pós-review: 17/17 em 105.664ms; `node --check`, `compileall` e
+  `pip check` exit 0.
+
+Este hardening não altera a evidência externa original nem executa uma nova
+validação live.
+
 ## Comandos repetíveis
 
 ```powershell

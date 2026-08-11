@@ -408,7 +408,7 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
         """Catches loss of durable lane pointers/campaign or duplicate contracts on restart."""
         self.require_subject()
         before = canonical_snapshot()
-        after = canonical_snapshot(snapshot_version=8)
+        after = canonical_snapshot()
         after["trades"] = [
             {"contract_id": 201, "lane": "challenger_trial", "status": "closed"}
         ]
@@ -417,15 +417,14 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
         result = smoke.verify_restart(before, after)
 
         self.assertEqual(result["outcome"], "PASS_RESTART")
-        changed = canonical_snapshot(snapshot_version=8)
+        changed = canonical_snapshot()
         changed["lanes"][1]["version"]["version_hash"] = "c" * 64
         with self.assertRaises(SmokeSafetyError):
             smoke.verify_restart(before, changed)
 
-    def test_restart_refuses_snapshot_or_durable_counter_decrease(self):
-        """Catches a restart accepting rollback or loss of durable journal rows."""
+    def test_restart_refuses_durable_counter_decrease(self):
+        """Catches a restart accepting loss of durable journal rows."""
         before = canonical_snapshot(
-            snapshot_version=8,
             decisions=[{"id": "decision-1"}, {"id": "decision-2"}],
             trades=[
                 {"contract_id": 401, "lane": "champion_baseline", "status": "closed"},
@@ -435,10 +434,6 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
             proposals=[{"id": "proposal-1"}, {"id": "proposal-2"}],
         )
         cases = {
-            "snapshot_version": canonical_snapshot(**{
-                **before,
-                "snapshot_version": 7,
-            }),
             "decisions": canonical_snapshot(**{
                 **before,
                 "decisions": before["decisions"][:1],
@@ -463,6 +458,32 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
                 "decreased",
             ):
                 NexusTradeSmoke.verify_restart(before, after)
+
+    def test_restart_requires_exact_durable_revision_and_keeps_event_growth_separate(self):
+        """Catches treating config revision as a monotonic event sequence on restart."""
+        account_sentinel = "revision-account-private-sentinel"
+        before = canonical_snapshot()
+        before["runtime"]["champion_account_id"] = account_sentinel
+        equal = copy.deepcopy(before)
+        equal["decisions"] = [{
+            "id": "decision-after-restart",
+            "snapshot_version": 8,
+        }]
+
+        result = NexusTradeSmoke.verify_restart(before, equal)
+
+        self.assertEqual(result["outcome"], "PASS_RESTART")
+        self.assertEqual(result["decisions_before"], 0)
+        self.assertEqual(result["decisions_after"], 1)
+        for changed_revision in (8, 6):
+            changed = copy.deepcopy(equal)
+            changed["snapshot_version"] = changed_revision
+            with self.subTest(changed_revision=changed_revision):
+                with self.assertRaises(SmokeSafetyError) as caught:
+                    NexusTradeSmoke.verify_restart(before, changed)
+                diagnostic = str(caught.exception)
+                self.assertNotIn(account_sentinel, diagnostic)
+                self.assertNotIn(str(changed_revision), diagnostic)
 
     def test_restart_refuses_missing_or_malformed_durable_counters(self):
         """Catches treating absent/non-list durable collections as a zero counter."""
@@ -571,7 +592,6 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
                 self.assertNotIn(str(changed_value), str(caught.exception))
 
         unchanged = copy.deepcopy(before)
-        unchanged["snapshot_version"] += 1
         summary = NexusTradeSmoke.verify_restart(before, unchanged)
         self.assertNotIn(account_sentinel, json.dumps(summary, sort_keys=True))
 
