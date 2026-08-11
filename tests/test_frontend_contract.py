@@ -53,6 +53,7 @@ class FrontendContractTests(unittest.TestCase):
         for filename in (
             "api.js", "store.js", "chart.js", "app.js",
             "nexus_trade_api.js", "nexus_trade_store.js", "nexus_trade_view.js",
+            "nexus_trade_metrics.js",
         ):
             self.assertTrue(os.path.isfile(os.path.join(root, "static", "js", filename)))
 
@@ -80,6 +81,28 @@ class FrontendContractTests(unittest.TestCase):
             html_source.index('id="nexus-trial-card"'):html_source.index('</article>', html_source.index('id="nexus-trial-card"'))
         ]
         self.assertNotIn('button', trial_source)
+
+    def test_nexus_trade_exposes_weekly_reports_and_accumulated_evolution_panels(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html_source = stream.read()
+        with open(os.path.join(root, "static", "js", "nexus_trade_view.js"), encoding="utf-8") as stream:
+            view_source = stream.read()
+
+        parser = LandmarkParser()
+        parser.feed(html_source)
+        self.assertTrue({
+            "nexus-reports-panel", "nexus-report-week", "nexus-report-days",
+            "nexus-report-metrics", "nexus-evolution-panel",
+            "nexus-evolution-progress", "nexus-evolution-metrics",
+            "nexus-evolution-gates", "nexus-recommendation",
+        }.issubset(parser.ids))
+        self.assertIn('data-nexus-tab="reports"', html_source)
+        self.assertIn('data-nexus-tab="evolution"', html_source)
+        self.assertIn('from "./nexus_trade_metrics.js"', view_source)
+        with open(os.path.join(root, "static", "styles.css"), encoding="utf-8") as stream:
+            styles = stream.read()
+        self.assertIn(".nexus-tabs button{flex:1;min-width:105px;min-height:44px}", styles)
 
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))

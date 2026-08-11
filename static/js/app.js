@@ -28,7 +28,7 @@ const nexusView = mountNexusTradeView({
   api: nexusTradeApi,
   getAccount: activeAccount,
   confirmReal: confirmNexusReal,
-  onOpenEvolution: () => toast("A central de evolução será aberta na próxima etapa."),
+  onOpenEvolution: () => {},
   onToast: toast,
 });
 nexusStore.subscribe(() => { if (store.get().selectedId === NEXUS_BOT_ID) renderBots(); });

@@ -1,4 +1,10 @@
 import { NEXUS_BOT_ID } from "./nexus_trade_store.js";
+import {
+  buildReportPresentation,
+  normalizeReportLocation,
+  reportLocationSearch,
+  shiftAlignedWeek,
+} from "./nexus_trade_metrics.js";
 
 export function resolveDashboardView(botId) {
   return botId === NEXUS_BOT_ID ? "nexus" : "standard";
@@ -101,6 +107,90 @@ function renderOperational(root, model) {
   if (evolution) evolution.classList.toggle("has-pending", model.proposalPending);
 }
 
+const REPORT_METRICS = [
+  ["Operações totais", "nTotal"],
+  ["Operações decisivas", "nDecisive"],
+  ["Wins", "wins"],
+  ["Losses", "losses"],
+  ["Empates", "ties"],
+  ["Assertividade", "accuracy"],
+  ["Breakeven", "breakeven"],
+  ["Payout médio", "payout"],
+  ["Capital arriscado", "capitalAtRisk"],
+  ["Payout total", "totalPayout"],
+  ["P&L", "profit"],
+  ["ROI", "roi"],
+  ["Expectancy", "expectancy"],
+  ["Profit factor", "profitFactor"],
+  ["Drawdown máximo", "drawdown"],
+  ["Drawdown normalizado", "drawdownNormalized"],
+  ["Recovery factor", "recovery"],
+  ["Pior bloco de 50", "worstBlock"],
+  ["Pior bloco normalizado", "worstBlockNormalized"],
+  ["Maior loss streak", "lossStreak"],
+];
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+  })[character]);
+}
+
+function showNode(root, selector, visible) {
+  const node = root?.querySelector?.(selector);
+  if (node) node.hidden = !visible;
+}
+
+function metricRows(view) {
+  if (!view) return "";
+  return REPORT_METRICS.map(([label, key]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(view.weekTotal.champion[key])}</td><td>${escapeHtml(view.weekTotal.trial[key])}</td></tr>`).join("");
+}
+
+function evidenceLabel(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function renderReports(root, report) {
+  const view = buildReportPresentation(report);
+  const available = Boolean(view);
+  showNode(root, "#nexus-report-empty", !available);
+  showNode(root, "#nexus-report-content", available);
+  showNode(root, "#nexus-evolution-empty", !available);
+  showNode(root, "#nexus-evolution-content", available);
+  if (!view) return;
+
+  setText(root, "#nexus-report-week", `ENCERRADA ${view.week || "—"}`);
+  const daily = root.querySelector?.("#nexus-report-days");
+  if (daily) {
+    daily.innerHTML = [
+      ...view.days.map((day) => `<tr><td>${escapeHtml(day.date)}</td><td>${escapeHtml(day.champion.nTotal)}</td><td>${escapeHtml(`${day.champion.wins}/${day.champion.losses}/${day.champion.ties}`)}</td><td>${escapeHtml(day.champion.accuracy)}</td><td>${escapeHtml(day.trial.nTotal)}</td><td>${escapeHtml(`${day.trial.wins}/${day.trial.losses}/${day.trial.ties}`)}</td><td>${escapeHtml(day.trial.accuracy)}</td></tr>`),
+      `<tr class="nexus-week-total"><td>SEMANA COMPLETA</td><td>${escapeHtml(view.weekTotal.champion.nTotal)}</td><td>${escapeHtml(`${view.weekTotal.champion.wins}/${view.weekTotal.champion.losses}/${view.weekTotal.champion.ties}`)}</td><td>${escapeHtml(view.weekTotal.champion.accuracy)}</td><td>${escapeHtml(view.weekTotal.trial.nTotal)}</td><td>${escapeHtml(`${view.weekTotal.trial.wins}/${view.weekTotal.trial.losses}/${view.weekTotal.trial.ties}`)}</td><td>${escapeHtml(view.weekTotal.trial.accuracy)}</td></tr>`,
+    ].join("");
+  }
+  const rows = metricRows(view);
+  const reportMetrics = root.querySelector?.("#nexus-report-metrics");
+  const evolutionMetrics = root.querySelector?.("#nexus-evolution-metrics");
+  if (reportMetrics) reportMetrics.innerHTML = rows;
+  if (evolutionMetrics) evolutionMetrics.innerHTML = rows;
+
+  setText(root, "#nexus-evolution-progress", view.progress.label);
+  setText(root, "#nexus-evolution-eligibility", view.progress.eligible
+    ? `Elegível para decisão humana · ${view.versions.champion} × ${view.versions.trial}`
+    : `Aguardando amostra/tempo · ${view.versions.champion} × ${view.versions.trial}`);
+  const progress = root.querySelector?.("#nexus-evolution-progress-bar");
+  if (progress) progress.style.width = `${view.progress.percent}%`;
+  const recommendation = root.querySelector?.("#nexus-recommendation");
+  if (recommendation) {
+    recommendation.textContent = view.recommendation;
+    recommendation.className = view.recommendation.toLowerCase();
+  }
+  setText(root, "#nexus-recommendation-reasons", view.recommendationReasons.join(" · ") || "Todos os gates disponíveis foram satisfeitos.");
+  const gates = root.querySelector?.("#nexus-evolution-gates");
+  if (gates) gates.innerHTML = view.gates.map((gate) => `<tr><td>${escapeHtml(gate.code)}</td><td><span class="nexus-gate-status ${escapeHtml(gate.status.toLowerCase())}">${escapeHtml(gate.status)}</span></td><td>${escapeHtml(`${gate.reason} · observado: ${evidenceLabel(gate.observed)} · limite: ${evidenceLabel(gate.threshold)}`)}</td></tr>`).join("");
+}
+
 export function mountNexusTradeView({
   root = null,
   standardRoot = null,
@@ -111,8 +201,74 @@ export function mountNexusTradeView({
   onOpenEvolution = () => {},
   onToast = () => {},
 } = {}) {
-  const render = () => renderOperational(root, buildNexusOperationalModel(store?.get?.() || {}, getAccount()));
+  const locationState = normalizeReportLocation(globalThis.location?.search || "");
+  let activeTab = locationState.tab;
+  let selectedWeek = locationState.week;
+  let selectedReport = null;
+
+  const renderTabs = () => {
+    for (const button of root?.querySelectorAll?.("[data-nexus-tab]") || []) {
+      const selected = button.dataset.nexusTab === activeTab;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-selected", String(selected));
+    }
+    showNode(root, "#nexus-operational-panel", activeTab === "operations");
+    showNode(root, "#nexus-reports-panel", activeTab === "reports");
+    showNode(root, "#nexus-evolution-panel", activeTab === "evolution");
+  };
+  const render = () => {
+    renderOperational(root, buildNexusOperationalModel(store?.get?.() || {}, getAccount()));
+    renderTabs();
+    renderReports(root, selectedReport);
+  };
   store?.subscribe?.(render);
+
+  const writeLocation = () => {
+    if (!globalThis.history?.replaceState || !globalThis.location) return;
+    const search = reportLocationSearch(globalThis.location.search, { tab: activeTab, week: selectedWeek });
+    globalThis.history.replaceState(null, "", `${globalThis.location.pathname}${search}${globalThis.location.hash || ""}`);
+  };
+
+  const loadReportWeek = async (week) => {
+    if (!api || !week) return;
+    try {
+      selectedReport = await api.weeklyReport(week);
+    } catch (error) {
+      selectedReport = null;
+      if (error?.status !== 404) onToast(error.message || "Falha ao carregar a semana.", "error");
+    }
+    render();
+  };
+
+  const loadReports = async () => {
+    if (!api) return;
+    try {
+      const reports = await api.reports();
+      const weekly = (Array.isArray(reports) ? reports : [])
+        .map((item) => ({ item, view: buildReportPresentation(item) }))
+        .filter(({ view }) => view?.type === "weekly");
+      if (selectedWeek) {
+        selectedReport = weekly.find(({ view }) => view.week === selectedWeek)?.item || null;
+        if (!selectedReport) await loadReportWeek(selectedWeek);
+      } else {
+        selectedReport = weekly[0]?.item || null;
+        selectedWeek = weekly[0]?.view?.week || null;
+      }
+      writeLocation();
+      render();
+    } catch (error) {
+      selectedReport = null;
+      render();
+      onToast(error.message || "Falha ao carregar relatórios.", "error");
+    }
+  };
+
+  const openTab = (tab) => {
+    activeTab = ["operations", "reports", "evolution"].includes(tab) ? tab : "operations";
+    writeLocation();
+    render();
+    if (activeTab !== "operations") loadReports();
+  };
 
   const handleToggle = async () => {
     if (!api || !store) return;
@@ -162,10 +318,20 @@ export function mountNexusTradeView({
   };
 
   root?.addEventListener?.("click", (event) => {
+    const tab = event.target?.closest?.("[data-nexus-tab]")?.dataset?.nexusTab;
+    if (tab) openTab(tab);
     const action = event.target?.closest?.("[data-nexus-action]")?.dataset?.nexusAction;
     if (action === "champion-toggle") handleToggle();
     if (action === "emergency-stop") handleEmergency();
-    if (action === "open-evolution") onOpenEvolution();
+    if (action === "open-evolution") { openTab("evolution"); onOpenEvolution(); }
+    if (["previous-week", "next-week"].includes(action)) {
+      const target = shiftAlignedWeek(selectedWeek, action === "previous-week" ? -1 : 1);
+      if (target) {
+        selectedWeek = target;
+        writeLocation();
+        loadReportWeek(target);
+      }
+    }
   });
   render();
 
@@ -174,11 +340,14 @@ export function mountNexusTradeView({
       if (root) root.hidden = false;
       if (standardRoot) standardRoot.hidden = true;
       render();
+      if (activeTab !== "operations") loadReports();
     },
     hide() {
       if (root) root.hidden = true;
       if (standardRoot) standardRoot.hidden = false;
     },
     render,
+    openTab,
+    refreshReports: loadReports,
   };
 }

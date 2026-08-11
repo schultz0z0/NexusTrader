@@ -123,6 +123,13 @@
         </div>
       </section>
 
+      <nav class="nexus-tabs" aria-label="Áreas NexusTrade">
+        <button type="button" class="active" data-nexus-tab="operations" aria-selected="true">OPERAÇÃO</button>
+        <button type="button" data-nexus-tab="reports" aria-selected="false">RELATÓRIOS</button>
+        <button type="button" data-nexus-tab="evolution" aria-selected="false">EVOLUÇÃO</button>
+      </nav>
+
+      <section id="nexus-operational-panel" class="nexus-tab-panel nexus-operational-content">
       <section class="nexus-lanes" aria-label="Lanes NexusTrade">
         <article id="nexus-champion-card" class="panel nexus-lane-card champion">
           <header>
@@ -166,6 +173,63 @@
             <li><strong>Decisão humana</strong><span>para o Champion</span></li>
           </ul>
         </article>
+      </section>
+      </section>
+
+      <section id="nexus-reports-panel" class="nexus-tab-panel" hidden aria-labelledby="nexus-reports-title">
+        <article class="panel nexus-report-shell">
+          <header class="panel-head nexus-report-head">
+            <div><div class="eyebrow">FECHAMENTO 10H · BRASÍLIA</div><h2 id="nexus-reports-title">Relatórios diários e semanais</h2></div>
+            <div class="nexus-week-nav" aria-label="Calendário semanal">
+              <button type="button" class="secondary-button" data-nexus-action="previous-week" aria-label="Semana anterior">‹</button>
+              <strong id="nexus-report-week">SEMANA ATUAL</strong>
+              <button type="button" class="secondary-button" data-nexus-action="next-week" aria-label="Próxima semana">›</button>
+            </div>
+          </header>
+          <div id="nexus-report-empty" class="nexus-empty-state"><strong>Nenhum fechamento disponível</strong><p>Os relatórios imutáveis aparecerão após o primeiro fechamento diário das 10h.</p></div>
+          <div id="nexus-report-content" hidden>
+            <div class="table-wrap nexus-daily-table">
+              <table>
+                <thead><tr><th>PERÍODO</th><th>CHAMPION · N</th><th>CHAMPION · W/L/T</th><th>CHAMPION · ASSERT.</th><th>TRIAL · N</th><th>TRIAL · W/L/T</th><th>TRIAL · ASSERT.</th></tr></thead>
+                <tbody id="nexus-report-days"></tbody>
+              </table>
+            </div>
+            <div class="table-wrap nexus-metric-table">
+              <table>
+                <thead><tr><th>MÉTRICA DA SEMANA COMPLETA</th><th>CHAMPION</th><th>TRIAL</th></tr></thead>
+                <tbody id="nexus-report-metrics"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="nexus-evolution-panel" class="nexus-tab-panel" hidden aria-labelledby="nexus-evolution-title">
+        <div id="nexus-evolution-empty" class="panel nexus-empty-state"><strong>Evolução ainda sem fechamento semanal</strong><p>A campanha continua no backend; este painel será preenchido pelo próximo relatório semanal imutável.</p></div>
+        <div id="nexus-evolution-content" hidden>
+          <section class="nexus-evolution-summary">
+            <article class="panel nexus-progress-panel">
+              <header class="panel-head"><div><div class="eyebrow">EVOLUÇÃO ACUMULADA</div><h2 id="nexus-evolution-title">Campanha do Trial</h2></div><strong id="nexus-evolution-progress">0/300</strong></header>
+              <div class="nexus-progress-track" aria-hidden="true"><i id="nexus-evolution-progress-bar"></i></div>
+              <p id="nexus-evolution-eligibility">Aguardando amostra e tempo mínimos.</p>
+            </article>
+            <article class="panel nexus-recommendation-card">
+              <div class="eyebrow">RECOMENDAÇÃO GOVERNADA</div>
+              <strong id="nexus-recommendation">INCONCLUSIVE</strong>
+              <p id="nexus-recommendation-reasons">Aguardando evidência completa.</p>
+            </article>
+          </section>
+          <section class="nexus-evolution-grid">
+            <article class="panel">
+              <header class="panel-head"><div><div class="eyebrow">COMPARAÇÃO</div><h2>Champion × Trial</h2></div></header>
+              <div class="table-wrap nexus-metric-table"><table><thead><tr><th>MÉTRICA</th><th>CHAMPION</th><th>TRIAL</th></tr></thead><tbody id="nexus-evolution-metrics"></tbody></table></div>
+            </article>
+            <article class="panel">
+              <header class="panel-head"><div><div class="eyebrow">GATES</div><h2>Critérios de evolução</h2></div></header>
+              <div class="table-wrap nexus-gate-table"><table><thead><tr><th>GATE</th><th>STATUS</th><th>MOTIVO</th></tr></thead><tbody id="nexus-evolution-gates"></tbody></table></div>
+            </article>
+          </section>
+        </div>
       </section>
     </main>
   </div>
