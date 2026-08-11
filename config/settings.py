@@ -1,7 +1,11 @@
 import os
 import secrets
-from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class SettingsConfigurationError(ValueError):
+    """Sanitized post-load settings contract failure."""
+
 
 class Settings(BaseSettings):
     # Credenciais da Deriv (Novo Sistema OAuth + PAT)
@@ -52,16 +56,27 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    @model_validator(mode="after")
-    def validate_production_secrets(self):
+    def __init__(self, **values):
+        super().__init__(**values)
+        self._validate_loaded_configuration()
+
+    def _validate_loaded_configuration(self) -> None:
         if not self.DEV_MODE and not self.INTERNAL_API_TOKEN.strip():
-            raise ValueError("INTERNAL_API_TOKEN e obrigatorio fora do DEV_MODE")
+            raise SettingsConfigurationError(
+                "INTERNAL_API_TOKEN e obrigatorio fora do DEV_MODE"
+            )
         if not self.DEV_MODE and not self.DASHBOARD_API_KEY.strip():
-            raise ValueError("DASHBOARD_API_KEY e obrigatorio fora do DEV_MODE")
+            raise SettingsConfigurationError(
+                "DASHBOARD_API_KEY e obrigatorio fora do DEV_MODE"
+            )
         if not self.DEV_MODE and not self.NEXUS_HUMAN_ACTION_KEY.strip():
-            raise ValueError("NEXUS_HUMAN_ACTION_KEY e obrigatorio fora do DEV_MODE")
+            raise SettingsConfigurationError(
+                "NEXUS_HUMAN_ACTION_KEY e obrigatorio fora do DEV_MODE"
+            )
         if not self.DEV_MODE and not self.NEXUS_HUMAN_ACTOR.strip():
-            raise ValueError("NEXUS_HUMAN_ACTOR e obrigatorio fora do DEV_MODE")
+            raise SettingsConfigurationError(
+                "NEXUS_HUMAN_ACTOR e obrigatorio fora do DEV_MODE"
+            )
         human_key = self.NEXUS_HUMAN_ACTION_KEY.strip()
         if human_key:
             for existing_authority in (
@@ -71,25 +86,36 @@ class Settings(BaseSettings):
             ):
                 existing_key = existing_authority.strip()
                 if existing_key and secrets.compare_digest(human_key, existing_key):
-                    raise ValueError(
+                    raise SettingsConfigurationError(
                         "NEXUS_HUMAN_ACTION_KEY deve ser exclusiva das demais credenciais"
                     )
         if self.EVENT_QUEUE_MAX < 100:
-            raise ValueError("EVENT_QUEUE_MAX deve ser pelo menos 100")
+            raise SettingsConfigurationError("EVENT_QUEUE_MAX deve ser pelo menos 100")
         if self.SETTLEMENT_WAIT_TIMEOUT_SECONDS < 1:
-            raise ValueError("SETTLEMENT_WAIT_TIMEOUT_SECONDS deve ser positivo")
+            raise SettingsConfigurationError(
+                "SETTLEMENT_WAIT_TIMEOUT_SECONDS deve ser positivo"
+            )
         if self.CONTRACT_RECONCILE_INTERVAL_SECONDS < 1:
-            raise ValueError("CONTRACT_RECONCILE_INTERVAL_SECONDS deve ser pelo menos 1")
+            raise SettingsConfigurationError(
+                "CONTRACT_RECONCILE_INTERVAL_SECONDS deve ser pelo menos 1"
+            )
         if self.CONTRACT_EXPIRY_GRACE_SECONDS < 0:
-            raise ValueError("CONTRACT_EXPIRY_GRACE_SECONDS nao pode ser negativo")
+            raise SettingsConfigurationError(
+                "CONTRACT_EXPIRY_GRACE_SECONDS nao pode ser negativo"
+            )
         if self.MARKET_HISTORY_RESYNC_SECONDS < 5:
-            raise ValueError("MARKET_HISTORY_RESYNC_SECONDS deve ser pelo menos 5")
+            raise SettingsConfigurationError(
+                "MARKET_HISTORY_RESYNC_SECONDS deve ser pelo menos 5"
+            )
         if self.NEXUS_DEMO_STAKE != 0.35:
-            raise ValueError("NEXUS_DEMO_STAKE deve ser 0.35")
+            raise SettingsConfigurationError("NEXUS_DEMO_STAKE deve ser 0.35")
         if not 0 <= self.NEXUS_DAILY_CLOSE_HOUR <= 23:
-            raise ValueError("NEXUS_DAILY_CLOSE_HOUR deve estar entre 0 e 23")
+            raise SettingsConfigurationError(
+                "NEXUS_DAILY_CLOSE_HOUR deve estar entre 0 e 23"
+            )
         if self.NEXUS_ENTRY_MAX_DELAY_SECONDS != 2:
-            raise ValueError("NEXUS_ENTRY_MAX_DELAY_SECONDS deve ser 2")
-        return self
+            raise SettingsConfigurationError(
+                "NEXUS_ENTRY_MAX_DELAY_SECONDS deve ser 2"
+            )
 
 settings = Settings()

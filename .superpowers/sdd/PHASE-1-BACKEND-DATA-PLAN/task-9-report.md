@@ -82,3 +82,20 @@ O validator de `Settings` agora normaliza valores não vazios e usa `secrets.com
 - JavaScript: **17/17**.
 - `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos arquivos protegidos: verdes/limpos.
 - Nenhum secret foi registrado; nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.
+
+## Fix round 3/5 — redação estrutural de erros de settings
+
+O RED serializou as exceções de colisão e de campos obrigatórios por `str`, `repr`, `errors()` e `json()`. Embora a forma textual estivesse ocultada, `ValidationError.errors()` ainda continha o dicionário completo de input com credenciais sentinel; foram dez subfalhas exatas entre colisões em produção/DEV e quatro authorities obrigatórias ausentes.
+
+As regras pós-carregamento agora executam depois de `BaseSettings.__init__` e levantam `SettingsConfigurationError`, uma subclasse simples de `ValueError` que não carrega o input estruturado do Pydantic. Parsing de campos, `.env`, variáveis de ambiente e overrides continuam sob `BaseSettings`; required/collisions/DEV e todos os limites anteriores permanecem iguais. A remoção do `model_validator` também impede que outros checks pós-load recriem a mesma superfície de vazamento.
+
+### Evidência do fix
+
+- RED: **2 métodos / 10 subfalhas**, com sentinels visíveis em `errors()`.
+- Focados settings/NexusTrade promotion: **45/45**, 5,955 s.
+- Integração Task 6–9, settings e deploy: **151/151**, 20,432 s.
+- Regressões protegidas: **78/78**, 4,001 s.
+- Full Python: **432/432**, 43,483 s.
+- JavaScript: **17/17**.
+- `compileall`, `pip check`, `docker compose config --quiet`, `git diff --check` e diff dos arquivos protegidos: verdes/limpos.
+- Nenhum secret foi logado; nenhum acesso Deriv, ordem REAL, Task 10, push ou deploy foi realizado.
