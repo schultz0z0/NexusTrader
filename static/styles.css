@@ -32,3 +32,5 @@
 @media(max-width:560px){.nexus-governance-dialog-card{padding:20px}.nexus-governance-actions button{min-height:44px}.nexus-diff-panel table{min-width:620px}}
 .nexus-report-tools{display:grid;justify-items:end;gap:7px}.nexus-export-actions{display:flex;gap:7px}.nexus-export-actions button{min-height:36px}.nexus-report-tools>small{min-height:12px;color:var(--green);font:8px var(--mono)}
 @media(max-width:680px){.nexus-report-tools{width:100%;justify-items:stretch}.nexus-export-actions{display:grid;grid-template-columns:1fr 1fr}.nexus-export-actions button{min-height:44px}.nexus-report-tools>small{text-align:center}}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+@media(max-width:820px){.nexus-tabs button{min-height:44px}}

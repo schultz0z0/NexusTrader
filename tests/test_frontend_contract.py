@@ -136,6 +136,21 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('data-nexus-action="export-xlsx"', html)
         self.assertIn('id="nexus-export-status"', html)
 
+    def test_nexus_live_regions_and_modal_accessibility_are_explicit(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html = stream.read()
+        with open(os.path.join(root, "static", "styles.css"), encoding="utf-8") as stream:
+            styles = stream.read()
+
+        self.assertIn('id="connection-status" class="connection is-offline" role="status" aria-live="polite"', html)
+        self.assertIn('aria-describedby="nexus-governance-summary"', html)
+        self.assertIn('id="nexus-governance-error" class="form-error" hidden role="alert"', html)
+        self.assertIn('aria-label="Comparativo diário Champion e Trial"', html)
+        self.assertIn('aria-label="Métricas semanais Champion e Trial"', html)
+        self.assertIn(":focus-visible", styles)
+        self.assertIn("@media(max-width:820px){.nexus-tabs button{min-height:44px}}", styles)
+
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:

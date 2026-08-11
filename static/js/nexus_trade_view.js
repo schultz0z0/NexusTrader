@@ -39,6 +39,27 @@ export function saveNexusDownload(download, documentRef = globalThis.document, u
   }
 }
 
+export function handleGovernanceDialogKeydown(event, dialog, onClose = () => {}) {
+  if (!event || !dialog) return false;
+  if (event.key === "Escape") {
+    event.preventDefault?.();
+    onClose();
+    return true;
+  }
+  if (event.key !== "Tab") return false;
+  const controls = [...(dialog.querySelectorAll?.('button,input,select,textarea,[href],[tabindex]:not([tabindex="-1"])') || [])]
+    .filter((node) => !node.disabled && !node.hidden && !node.closest?.("[hidden]"));
+  if (!controls.length) return false;
+  const current = controls.indexOf(dialog.ownerDocument?.activeElement);
+  const step = event.shiftKey ? -1 : 1;
+  const next = current < 0
+    ? (event.shiftKey ? controls.length - 1 : 0)
+    : (current + step + controls.length) % controls.length;
+  event.preventDefault?.();
+  controls[next].focus?.();
+  return true;
+}
+
 function lane(state, name) {
   return (state?.lanes || []).find((item) => item?.lane === name) || {};
 }
@@ -296,6 +317,7 @@ export function mountNexusTradeView({
   let versions = [];
   let actionMode = null;
   let catalogRefreshQueued = false;
+  let governanceReturnFocus = null;
 
   const renderTabs = () => {
     for (const button of root?.querySelectorAll?.("[data-nexus-tab]") || []) {
@@ -460,6 +482,9 @@ export function mountNexusTradeView({
     if (reinforced) reinforced.checked = false;
     if (error) error.hidden = true;
     actionMode = null;
+    const returnFocus = governanceReturnFocus;
+    governanceReturnFocus = null;
+    returnFocus?.focus?.();
   };
 
   const openGovernance = (mode) => {
@@ -491,6 +516,7 @@ export function mountNexusTradeView({
     if (reinforcedField) reinforcedField.hidden = !(mode === "approve" && readiness.requiresReinforced);
     if (rollbackField) rollbackField.hidden = mode !== "rollback";
     if (rollbackSelect) rollbackSelect.innerHTML = rollbackTargets.map((version) => `<option value="${escapeHtml(version.id)}" data-version-hash="${escapeHtml(version.version_hash)}">${escapeHtml(version.id)}</option>`).join("");
+    governanceReturnFocus = globalThis.document?.activeElement || null;
     if (dialog) dialog.hidden = false;
     globalThis.document?.querySelector?.("#nexus-governance-justification")?.focus?.();
   };
@@ -572,6 +598,9 @@ export function mountNexusTradeView({
 
   globalThis.document?.querySelector?.("#nexus-governance-form")?.addEventListener?.("submit", submitGovernance);
   globalThis.document?.querySelector?.("#nexus-cancel-governance")?.addEventListener?.("click", closeGovernance);
+  globalThis.document?.querySelector?.("#nexus-governance-dialog")?.addEventListener?.("keydown", (event) => {
+    handleGovernanceDialogKeydown(event, event.currentTarget, closeGovernance);
+  });
 
   root?.addEventListener?.("click", (event) => {
     const tab = event.target?.closest?.("[data-nexus-tab]")?.dataset?.nexusTab;

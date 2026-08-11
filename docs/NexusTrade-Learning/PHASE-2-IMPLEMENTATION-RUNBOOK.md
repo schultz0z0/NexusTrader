@@ -88,12 +88,27 @@ All commands finish with exit code zero. The Git diff for
 ## 6. VPS deploy
 
 Run from the existing `nexus-trader` directory. Do not use `docker compose down -v`.
+No push was performed during development. Move the reviewed commit to the VPS either
+through your normal protected remote workflow or with a Git bundle:
+
+```powershell
+git bundle create nexustrade-phase2.bundle feature/nexustrade-frontend
+scp .\nexustrade-phase2.bundle usuario@vps:/tmp/
+```
+
+On the VPS, import the bundle before deployment:
+
+```bash
+git fetch /tmp/nexustrade-phase2.bundle \
+  feature/nexustrade-frontend:feature/nexustrade-frontend
+```
+
+If the branch is intentionally published later, the usual protected remote workflow is
+also valid.
 
 ```bash
 git status --short
-git fetch --all --prune
 git switch feature/nexustrade-frontend
-git pull --ff-only
 mkdir -p backups
 docker compose stop nexus-bot
 docker compose stop nexus-api
@@ -112,6 +127,10 @@ Before `up`, the VPS `.env` contains distinct non-empty values for
 `INTERNAL_API_TOKEN`, `DASHBOARD_API_KEY`, `NEXUS_HUMAN_ACTION_KEY` and
 `NEXUS_HUMAN_ACTOR`. Keep `ALLOW_REAL_TRADING=false` and `REAL_MAX_STAKE_USD=0` during
 the validation window.
+
+The optional REAL acceptance is deliberately outside automated deploy. Follow the
+bounded USD 0.35 procedure in `PHASE-2-VALIDATION.md`, then restore the two REAL safety
+variables to `false` and `0` immediately.
 
 ## 7. VPS manual QA and rollback
 

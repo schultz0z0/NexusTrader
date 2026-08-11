@@ -5,7 +5,10 @@ import {
   createNexusTradeStore,
   reconcileNexusTradeStore,
 } from "../../static/js/nexus_trade_store.js";
-import { saveNexusDownload } from "../../static/js/nexus_trade_view.js";
+import {
+  handleGovernanceDialogKeydown,
+  saveNexusDownload,
+} from "../../static/js/nexus_trade_view.js";
 import { evaluatePromotionReadiness } from "../../static/js/nexus_trade_diff.js";
 
 const snapshot = (revision, overrides = {}) => ({
@@ -105,4 +108,28 @@ test("download is saved once, keeps the server filename and always revokes its U
   assert.deepEqual(clicks, ["clicked"]);
   assert.deepEqual(revoked, ["blob:nexus-export"]);
   assert.throws(() => saveNexusDownload({ filename: "empty.csv.zip", blob: new Blob([]) }, documentRef, urlRef), /vazio/i);
+});
+
+test("governance dialog traps tab focus and Escape returns control to its opener", () => {
+  const focused = [];
+  const controls = ["reason", "key", "cancel", "confirm"].map((id) => ({
+    id,
+    disabled: false,
+    hidden: false,
+    closest: () => null,
+    focus: () => focused.push(id),
+  }));
+  const ownerDocument = { activeElement: controls[3] };
+  const dialog = { ownerDocument, querySelectorAll: () => controls };
+  const tabEvent = { key: "Tab", shiftKey: false, preventDefault() { this.prevented = true; } };
+
+  assert.equal(handleGovernanceDialogKeydown(tabEvent, dialog), true);
+  assert.equal(tabEvent.prevented, true);
+  assert.deepEqual(focused, ["reason"]);
+
+  let closed = false;
+  const escapeEvent = { key: "Escape", preventDefault() { this.prevented = true; } };
+  assert.equal(handleGovernanceDialogKeydown(escapeEvent, dialog, () => { closed = true; }), true);
+  assert.equal(closed, true);
+  assert.equal(escapeEvent.prevented, true);
 });
