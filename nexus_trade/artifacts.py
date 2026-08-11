@@ -9,7 +9,7 @@ import ntpath
 import re
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -25,7 +25,20 @@ _MANIFEST_REQUIRED = frozenset({
     "metrics", "ablations", "trial_count", "split_counts", "direction_source",
     "gate_actions",
 })
-_MANIFEST_OPTIONAL = frozenset({"candidate_name"})
+_MANIFEST_OPTIONAL = frozenset({"candidate_name", "fitted_model"})
+_MAX_FEATURES = 128
+_MAX_TREES = 10_000
+_MAX_NODES_PER_TREE = 65_535
+_MAX_ABS_NODE_VALUE = 1_000_000.0
+_MAX_ABS_THRESHOLD = 1e100
+RUNTIME_GATE_FEATURES = frozenset({
+    "adx", "bollinger_percent_b", "bollinger_z_score", "bollinger_width",
+    "bollinger_slope", "adx_pdi", "adx_mdi", "chop", "atr", "atrp",
+    "rsi", "stoch_k", "stoch_d", "cci", "keltner_upper",
+    "keltner_center", "keltner_lower", "roc", "aroon_up", "aroon_down",
+    "sma", "ema", "wma", "hma", "kama", "body", "body_ratio",
+    "upper_wick", "lower_wick", "upper_wick_ratio", "lower_wick_ratio",
+})
 
 
 class ArtifactIntegrityError(ValueError):
@@ -95,8 +108,13 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
         raise _manifest_error("is missing required fields")
     if fields - _MANIFEST_REQUIRED - _MANIFEST_OPTIONAL:
         raise _manifest_error("contains unknown fields")
-    if metadata["schema_version"] != 1:
-        raise _manifest_error("schema_version must be 1")
+    schema_version = metadata["schema_version"]
+    if schema_version not in {1, 2}:
+        raise _manifest_error("schema_version must be 1 or 2")
+    if schema_version == 1 and "fitted_model" in metadata:
+        raise _manifest_error("schema_version 1 cannot contain fitted state")
+    if schema_version == 2 and "fitted_model" not in metadata:
+        raise _manifest_error("schema_version 2 requires fitted state")
     if metadata["artifact_type"] != "nexus_trade_shadow_candidate":
         raise _manifest_error("artifact_type is invalid")
     if "candidate_name" in metadata and (
@@ -177,6 +195,7 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
     if (
         not isinstance(schema, list)
         or not schema
+        or len(schema) > _MAX_FEATURES
         or any(type(name) is not str or not name for name in schema)
         or len(schema) != len(set(schema))
         or {"direction", "contract_type", "signal_direction"}.intersection(
@@ -184,6 +203,8 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
         )
     ):
         raise _manifest_error("feature_schema is invalid")
+    if schema_version == 2 and not set(schema).issubset(RUNTIME_GATE_FEATURES):
+        raise _manifest_error("feature_schema contains unsupported runtime features")
     model = metadata["model"]
     required_model = {"family", "inputs", "output", "serialization"}
     optional_model = {"library", "library_version", "parameters"}
@@ -194,9 +215,19 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
         or model["family"] != "HistGradientBoostingClassifier"
         or model["inputs"] != schema
         or model["output"] != "win_probability"
-        or model["serialization"] != "retrain_from_content_addressed_dataset"
+        or model["serialization"] != (
+            "retrain_from_content_addressed_dataset"
+            if schema_version == 1 else "hgb_tree_json_v1"
+        )
     ):
         raise _manifest_error("model must be the reproducible gate-only classifier")
+    if schema_version == 2:
+        _validate_fitted_model(
+            metadata["fitted_model"],
+            feature_count=len(schema),
+            max_iter=config["max_iter"],
+            max_leaf_nodes=config["max_leaf_nodes"],
+        )
 
     threshold = metadata["operate_threshold"]
     threshold_fields = {
@@ -233,6 +264,7 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
             threshold["value"], 1.0 / multiplier + margin,
             rel_tol=0, abs_tol=1e-12,
         )
+        or not 0.0 < threshold["value"] <= 1.0
     ):
         raise _manifest_error("economic threshold is inconsistent")
 
@@ -261,6 +293,206 @@ def _validate_manifest(metadata: dict[str, Any]) -> None:
         raise _manifest_error("split_counts values are invalid")
 
 
+def _validate_fitted_model(
+    state: Any,
+    *,
+    feature_count: int,
+    max_iter: int,
+    max_leaf_nodes: int,
+) -> None:
+    required = {
+        "schema_version", "family", "link", "n_features", "classes",
+        "baseline", "trees",
+    }
+    if not isinstance(state, dict) or set(state) != required:
+        raise _manifest_error("fitted_model fields are invalid")
+    if (
+        state["schema_version"] != 1
+        or state["family"] != "HistGradientBoostingClassifier"
+        or state["link"] != "logit"
+        or type(state["n_features"]) is not int
+        or state["n_features"] != feature_count
+        or state["classes"] != [0, 1]
+    ):
+        raise _manifest_error("fitted_model contract is invalid")
+    baseline = state["baseline"]
+    if (
+        isinstance(baseline, bool)
+        or not isinstance(baseline, (int, float))
+        or not math.isfinite(float(baseline))
+        or abs(float(baseline)) > _MAX_ABS_NODE_VALUE
+    ):
+        raise _manifest_error("fitted_model baseline is invalid")
+    trees = state["trees"]
+    if (
+        not isinstance(trees, list)
+        or not trees
+        or len(trees) > _MAX_TREES
+        or len(trees) != max_iter
+    ):
+        raise _manifest_error("fitted_model tree count is invalid")
+    max_nodes = min(_MAX_NODES_PER_TREE, 2 * max_leaf_nodes - 1)
+    for tree in trees:
+        _validate_tree(tree, feature_count=feature_count, max_nodes=max_nodes)
+
+
+def _validate_tree(tree: Any, *, feature_count: int, max_nodes: int) -> None:
+    node_fields = {
+        "value", "feature_index", "threshold", "missing_go_to_left",
+        "left", "right", "is_leaf",
+    }
+    if not isinstance(tree, list) or not tree or len(tree) > max_nodes:
+        raise _manifest_error("fitted_model tree size is invalid")
+    for node in tree:
+        if not isinstance(node, dict) or set(node) != node_fields:
+            raise _manifest_error("fitted_model node fields are invalid")
+        if type(node["is_leaf"]) is not bool or type(node["missing_go_to_left"]) is not bool:
+            raise _manifest_error("fitted_model node flags are invalid")
+        for field, limit in (("value", _MAX_ABS_NODE_VALUE), ("threshold", _MAX_ABS_THRESHOLD)):
+            value = node[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or abs(float(value)) > limit
+            ):
+                raise _manifest_error(f"fitted_model node {field} is invalid")
+        for field in ("feature_index", "left", "right"):
+            if type(node[field]) is not int or node[field] < 0:
+                raise _manifest_error(f"fitted_model node {field} is invalid")
+        if node["is_leaf"]:
+            if node["left"] != 0 or node["right"] != 0:
+                raise _manifest_error("fitted_model leaf children are invalid")
+        elif (
+            node["feature_index"] >= feature_count
+            or node["left"] >= len(tree)
+            or node["right"] >= len(tree)
+            or node["left"] == node["right"]
+        ):
+            raise _manifest_error("fitted_model split is invalid")
+
+    visited: set[int] = set()
+    pending = [0]
+    while pending:
+        index = pending.pop()
+        if index in visited:
+            raise _manifest_error("fitted_model tree contains a cycle")
+        visited.add(index)
+        node = tree[index]
+        if not node["is_leaf"]:
+            pending.extend((node["left"], node["right"]))
+    if len(visited) != len(tree):
+        raise _manifest_error("fitted_model tree contains unreachable nodes")
+
+
+def serialize_fitted_hgb(model: Any, *, feature_count: int) -> dict[str, Any]:
+    """Convert the supported numeric binary HGB subset into inert JSON data."""
+    if type(feature_count) is not int or not 0 < feature_count <= _MAX_FEATURES:
+        raise ValueError("feature_count is invalid")
+    classes = getattr(model, "classes_", None)
+    predictors = getattr(model, "_predictors", None)
+    baseline = getattr(model, "_baseline_prediction", None)
+    if (
+        classes is None
+        or list(classes) != [0, 1]
+        or getattr(model, "n_features_in_", None) != feature_count
+        or getattr(model, "n_trees_per_iteration_", None) != 1
+        or getattr(model, "is_categorical_", None) is not None
+        or predictors is None
+        or baseline is None
+    ):
+        raise ValueError("fitted HGB model uses an unsupported executable contract")
+    trees = []
+    for iteration in predictors:
+        if len(iteration) != 1:
+            raise ValueError("fitted HGB model must have one binary tree per iteration")
+        predictor = iteration[0]
+        if getattr(predictor, "raw_left_cat_bitsets", ()).size:
+            raise ValueError("categorical HGB trees are unsupported")
+        nodes = []
+        for raw in predictor.nodes:
+            if bool(raw["is_categorical"]):
+                raise ValueError("categorical HGB nodes are unsupported")
+            nodes.append({
+                "value": float(raw["value"]),
+                "feature_index": int(raw["feature_idx"]),
+                "threshold": float(raw["num_threshold"]),
+                "missing_go_to_left": bool(raw["missing_go_to_left"]),
+                "left": int(raw["left"]),
+                "right": int(raw["right"]),
+                "is_leaf": bool(raw["is_leaf"]),
+            })
+        trees.append(nodes)
+    return {
+        "schema_version": 1,
+        "family": "HistGradientBoostingClassifier",
+        "link": "logit",
+        "n_features": feature_count,
+        "classes": [0, 1],
+        "baseline": float(baseline[0][0]),
+        "trees": trees,
+    }
+
+
+@dataclass(frozen=True)
+class ExecutableHGBGate:
+    """Validated pure-Python inference for one immutable candidate artifact."""
+
+    feature_schema: tuple[str, ...]
+    operate_threshold: float
+    baseline: float
+    trees: tuple[tuple[Mapping[str, Any], ...], ...]
+    artifact_hash: str
+
+    def predict_probability(self, values: Sequence[Any]) -> float:
+        if isinstance(values, (str, bytes)) or len(values) != len(self.feature_schema):
+            raise ValueError("gate feature vector does not match feature_schema")
+        features: list[float] = []
+        missing: list[bool] = []
+        for value in values:
+            if value is None:
+                features.append(0.0)
+                missing.append(True)
+                continue
+            if isinstance(value, bool):
+                raise ValueError("gate features must be numeric or missing")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("gate features must be numeric or missing") from exc
+            if math.isinf(number):
+                raise ValueError("gate features cannot be infinite")
+            features.append(0.0 if math.isnan(number) else number)
+            missing.append(math.isnan(number))
+
+        raw_score = self.baseline
+        for tree in self.trees:
+            index = 0
+            while not tree[index]["is_leaf"]:
+                node = tree[index]
+                feature_index = node["feature_index"]
+                go_left = (
+                    node["missing_go_to_left"]
+                    if missing[feature_index]
+                    else features[feature_index] <= node["threshold"]
+                )
+                index = node["left"] if go_left else node["right"]
+            raw_score += tree[index]["value"]
+        if not math.isfinite(raw_score):
+            raise ValueError("gate produced a non-finite score")
+        if raw_score >= 0.0:
+            probability = 1.0 / (1.0 + math.exp(-raw_score))
+        else:
+            exp_score = math.exp(raw_score)
+            probability = exp_score / (1.0 + exp_score)
+        if not 0.0 <= probability <= 1.0 or not math.isfinite(probability):
+            raise ValueError("gate produced an invalid probability")
+        return probability
+
+    def should_operate(self, values: Sequence[Any]) -> bool:
+        return self.predict_probability(values) >= self.operate_threshold
+
+
 def _loads_json(payload: str) -> Any:
     if type(payload) is not str:
         raise ArtifactIntegrityError("artifact envelope must be JSON text")
@@ -276,7 +508,7 @@ def _loads_json(payload: str) -> Any:
 
 @dataclass(frozen=True)
 class CandidateArtifact:
-    """A reproducible candidate description; executable model bytes are forbidden."""
+    """A content-addressed candidate containing only inert validated JSON."""
 
     artifact_hash: str
     metadata_hash: str
@@ -291,7 +523,12 @@ class CandidateArtifact:
         _validate_manifest(plain)
         encoded = canonical_json(plain).encode("utf-8")
         metadata_hash = hashlib.sha256(encoded).hexdigest()
-        artifact_hash = hashlib.sha256(b"nexus-candidate-json-v1\0" + encoded).hexdigest()
+        domain = (
+            b"nexus-candidate-json-v2\0"
+            if plain["schema_version"] == 2
+            else b"nexus-candidate-json-v1\0"
+        )
+        artifact_hash = hashlib.sha256(domain + encoded).hexdigest()
         return cls(
             artifact_hash=artifact_hash,
             metadata_hash=metadata_hash,
@@ -323,6 +560,23 @@ class CandidateArtifact:
             }
         )
 
+    def executable_gate(self) -> ExecutableHGBGate:
+        self.verify()
+        metadata = _plain(self.metadata)
+        if metadata.get("schema_version") != 2:
+            raise ArtifactIntegrityError("candidate artifact is not executable")
+        state = metadata["fitted_model"]
+        return ExecutableHGBGate(
+            feature_schema=tuple(metadata["feature_schema"]),
+            operate_threshold=float(metadata["operate_threshold"]["value"]),
+            baseline=float(state["baseline"]),
+            trees=tuple(
+                tuple(MappingProxyType(dict(node)) for node in tree)
+                for tree in state["trees"]
+            ),
+            artifact_hash=self.artifact_hash,
+        )
+
     @classmethod
     def from_json(cls, payload: str) -> "CandidateArtifact":
         envelope = _loads_json(payload)
@@ -342,6 +596,9 @@ class CandidateArtifact:
 __all__ = [
     "ArtifactIntegrityError",
     "CandidateArtifact",
+    "ExecutableHGBGate",
+    "RUNTIME_GATE_FEATURES",
     "canonical_json",
+    "serialize_fitted_hgb",
     "validate_safe_json",
 ]

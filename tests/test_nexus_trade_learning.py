@@ -1,16 +1,28 @@
 import concurrent.futures
 import contextlib
+import hashlib
+import inspect
 import json
+import math
 import os
 import sqlite3
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingClassifier
+
 from database.models import DatabaseModels
-from nexus_trade.artifacts import CandidateArtifact, ArtifactIntegrityError
+from nexus_trade.artifacts import (
+    ArtifactIntegrityError,
+    CandidateArtifact,
+    canonical_json,
+)
 from nexus_trade.candidates import CandidateRegistry
 from nexus_trade.dataset import DatasetBuilder, DatasetRejectedError
+from nexus_trade.indicators import IndicatorFrame
+from nexus_trade.strategy import NexusTradeStrategy
 from nexus_trade.training import (
     SQLiteTrialLedger,
     Trainer,
@@ -188,6 +200,21 @@ class TrainerTests(unittest.TestCase):
             )
         )
 
+    @staticmethod
+    def with_threshold(artifact, *, multiplier, margin):
+        metadata = json.loads(artifact.to_json())["metadata"]
+        metadata["training_config"]["offered_payout_multiplier"] = multiplier
+        metadata["training_config"]["safety_margin"] = margin
+        metadata["configuration_hash"] = hashlib.sha256(
+            canonical_json(metadata["training_config"]).encode("utf-8")
+        ).hexdigest()
+        threshold = metadata["operate_threshold"]
+        threshold["value"] = 1.0 / multiplier + margin
+        threshold["break_even_probability"] = 1.0 / multiplier
+        threshold["offered_payout_multiplier"] = multiplier
+        threshold["safety_margin"] = margin
+        return CandidateArtifact.create(metadata)
+
     def test_training_is_reproducible_and_gate_never_learns_direction(self):
         first = self.trainer().fit(self.dataset, self.ledger)
         second = self.trainer().fit(self.dataset, self.ledger)
@@ -243,6 +270,136 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(set(attempt["metrics"]), {"train", "validation", "test"})
         self.assertEqual(len(attempt["ablations"]), len(self.dataset.feature_schema))
 
+    def test_fitted_artifact_round_trip_matches_sklearn_for_numeric_and_missing_values(self):
+        artifact = self.trainer().fit(self.dataset, self.ledger)
+        self.assertEqual(artifact.metadata["schema_version"], 2)
+        self.assertEqual(artifact.metadata["model"]["serialization"], "hgb_tree_json_v1")
+        self.assertIn("fitted_model", artifact.metadata)
+
+        restored = CandidateArtifact.from_json(artifact.to_json())
+        executable_gate = getattr(restored, "executable_gate", None)
+        self.assertTrue(callable(executable_gate), "artifact must expose its executable gate")
+        gate = executable_gate()
+
+        train_x = np.asarray(
+            [
+                [row.features[name] for name in self.dataset.feature_schema]
+                for row in self.dataset.train.rows
+            ],
+            dtype=np.float64,
+        )
+        train_y = np.asarray(
+            [row.label for row in self.dataset.train.rows], dtype=np.int64,
+        )
+        reference = HistGradientBoostingClassifier(
+            random_state=73,
+            early_stopping=False,
+            max_iter=25,
+            learning_rate=0.1,
+            max_leaf_nodes=15,
+        ).fit(train_x, train_y)
+        samples = np.asarray(
+            [
+                [20.0, 0.5, 0.7],
+                [np.nan, 0.25, 0.8],
+                [15.0, np.nan, np.nan],
+            ],
+            dtype=np.float64,
+        )
+        expected = reference.predict_proba(samples)[:, 1]
+        observed = np.asarray(
+            [gate.predict_probability(row) for row in samples], dtype=np.float64,
+        )
+        np.testing.assert_allclose(observed, expected, rtol=0.0, atol=1e-15)
+
+    def test_executable_artifact_rejects_invalid_threshold_and_tampered_fitted_state(self):
+        artifact = self.trainer().fit(self.dataset, self.ledger)
+        self.assertIn("fitted_model", artifact.metadata)
+        envelope = json.loads(artifact.to_json())
+
+        for invalid_threshold in (0.0, -0.01, 1.01, float("inf")):
+            with self.subTest(threshold=invalid_threshold):
+                invalid = json.loads(json.dumps(envelope))
+                invalid["metadata"]["operate_threshold"]["value"] = invalid_threshold
+                with self.assertRaises((ValueError, ArtifactIntegrityError)):
+                    CandidateArtifact.create(invalid["metadata"])
+
+        tampered = json.loads(json.dumps(envelope))
+        tampered["metadata"]["fitted_model"]["trees"][0][0]["left"] = 999999
+        with self.assertRaises((ValueError, ArtifactIntegrityError)):
+            CandidateArtifact.create(tampered["metadata"])
+
+    def test_ml_gate_only_blocks_a_deterministic_direction_and_permissive_gate_preserves_it(self):
+        self.assertIn("gate", inspect.signature(NexusTradeStrategy).parameters)
+        artifact = self.trainer().fit(self.dataset, self.ledger)
+        high_gate = self.with_threshold(
+            artifact, multiplier=2.0, margin=0.5,
+        ).executable_gate()
+        permissive_gate = self.with_threshold(
+            artifact, multiplier=1000.0, margin=0.0,
+        ).executable_gate()
+        candle = {
+            "time": 0, "open": 99.0, "high": 101.0, "low": 99.0,
+            "close": 101.0, "is_closed": True, "close_epoch": 60,
+        }
+        indicators = IndicatorFrame(
+            epoch=0, upper=110.0, middle=100.0, lower=90.0, adx=20.0,
+            values={"bollinger_percent_b": 0.5, "bollinger_width": 0.7},
+        )
+
+        blocked = NexusTradeStrategy(gate=high_gate).on_closed_candle(
+            candle, indicators,
+        )[0]
+        allowed = NexusTradeStrategy(gate=permissive_gate).on_closed_candle(
+            candle, indicators,
+        )[0]
+
+        self.assertEqual((blocked.contract_type, blocked.blocked_reason), ("CALL", "ML_BLOCKED"))
+        self.assertEqual(blocked.reason_codes[-1], "ml_probability_below_threshold")
+        self.assertEqual((allowed.contract_type, allowed.blocked_reason), ("CALL", None))
+
+    def test_ml_gate_cannot_create_no_trade_bypass_adx_or_operate_on_invalid_features(self):
+        self.assertIn("gate", inspect.signature(NexusTradeStrategy).parameters)
+        artifact = self.trainer().fit(self.dataset, self.ledger)
+        gate = self.with_threshold(
+            artifact, multiplier=1000.0, margin=0.0,
+        ).executable_gate()
+        no_trade = NexusTradeStrategy(gate=gate).on_closed_candle(
+            {
+                "time": 0, "open": 99.0, "high": 100.0, "low": 99.0,
+                "close": 100.0, "is_closed": True, "close_epoch": 60,
+            },
+            IndicatorFrame(
+                epoch=0, upper=110.0, middle=100.0, lower=90.0, adx=20.0,
+                values={"bollinger_percent_b": 0.5, "bollinger_width": 0.7},
+            ),
+        )[0]
+        adx_blocked = NexusTradeStrategy(gate=gate).on_closed_candle(
+            {
+                "time": 0, "open": 99.0, "high": 101.0, "low": 99.0,
+                "close": 101.0, "is_closed": True, "close_epoch": 60,
+            },
+            IndicatorFrame(
+                epoch=0, upper=110.0, middle=100.0, lower=90.0, adx=23.0,
+                values={"bollinger_percent_b": 0.5, "bollinger_width": 0.7},
+            ),
+        )[0]
+        missing_feature = NexusTradeStrategy(gate=gate).on_closed_candle(
+            {
+                "time": 0, "open": 99.0, "high": 101.0, "low": 99.0,
+                "close": 101.0, "is_closed": True, "close_epoch": 60,
+            },
+            IndicatorFrame(
+                epoch=0, upper=110.0, middle=100.0, lower=90.0, adx=20.0,
+                values={"bollinger_percent_b": 0.5},
+            ),
+        )[0]
+
+        self.assertEqual((no_trade.contract_type, no_trade.blocked_reason), (None, "NO_TRADE"))
+        self.assertEqual((adx_blocked.contract_type, adx_blocked.blocked_reason), ("CALL", "ADX_BLOCKED"))
+        self.assertEqual((missing_feature.contract_type, missing_feature.blocked_reason), ("CALL", "ML_BLOCKED"))
+        self.assertEqual(missing_feature.reason_codes[-1], "ml_gate_input_invalid")
+
 
 class ArtifactAndRegistryTests(unittest.TestCase):
     def setUp(self):
@@ -272,7 +429,7 @@ class ArtifactAndRegistryTests(unittest.TestCase):
         ).hexdigest()
         return CandidateArtifact.create(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "artifact_type": "nexus_trade_shadow_candidate",
                 "candidate_name": name,
                 "contract": {
@@ -294,7 +451,27 @@ class ArtifactAndRegistryTests(unittest.TestCase):
                     "family": "HistGradientBoostingClassifier",
                     "inputs": ["adx"],
                     "output": "win_probability",
-                    "serialization": "retrain_from_content_addressed_dataset",
+                    "serialization": "hgb_tree_json_v1",
+                },
+                "fitted_model": {
+                    "schema_version": 1,
+                    "family": "HistGradientBoostingClassifier",
+                    "link": "logit",
+                    "n_features": 1,
+                    "classes": [0, 1],
+                    "baseline": math.log(4.0),
+                    "trees": [
+                        [{
+                            "value": 0.0,
+                            "feature_index": 0,
+                            "threshold": 0.0,
+                            "missing_go_to_left": False,
+                            "left": 0,
+                            "right": 0,
+                            "is_leaf": True,
+                        }]
+                        for _ in range(25)
+                    ],
                 },
                 "feature_schema": ["adx"],
                 "operate_threshold": {

@@ -16,7 +16,12 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from database.models import DatabaseModels
 from database.nexus_models import NexusModels
-from nexus_trade.artifacts import CandidateArtifact, canonical_json, validate_safe_json
+from nexus_trade.artifacts import (
+    CandidateArtifact,
+    canonical_json,
+    serialize_fitted_hgb,
+    validate_safe_json,
+)
 from nexus_trade.dataset import DatasetSplit, LearningDataset
 
 
@@ -262,7 +267,7 @@ class Trainer:
             canonical_json(training_config).encode("utf-8")
         ).hexdigest()
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_type": "nexus_trade_shadow_candidate",
             "contract": {
                 "symbol": "R_100",
@@ -287,8 +292,11 @@ class Trainer:
                     "learning_rate": float(self.config.learning_rate),
                     "max_leaf_nodes": self.config.max_leaf_nodes,
                 },
-                "serialization": "retrain_from_content_addressed_dataset",
+                "serialization": "hgb_tree_json_v1",
             },
+            "fitted_model": serialize_fitted_hgb(
+                model, feature_count=len(dataset.feature_schema),
+            ),
             "indicator_configuration": {
                 "bollinger": {"period": 20, "std_dev": 2.0, "ma": "SMA"},
                 "adx": {"period": 14},

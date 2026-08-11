@@ -9,6 +9,7 @@ from dataclasses import replace
 
 from core.accounts import normalize_account
 from core.events import runtime_event
+from nexus_trade.artifacts import CandidateArtifact, canonical_json
 from nexus_trade.clock import CausalCycleResult, EntryClock
 from nexus_trade.constants import (
     NEXUS_DEMO_STAKE,
@@ -504,6 +505,10 @@ class NexusTradeRuntime:
             Lane(item["lane"]): (item.get("version") or {}).get("id")
             for item in lanes
         }
+        next_gates = {
+            Lane(item["lane"]): self._gate_from_version(item.get("version") or {})
+            for item in lanes
+        }
         active_campaigns = snapshot.get("active_campaigns") or []
         next_trial_campaign = next(
             (
@@ -564,14 +569,33 @@ class NexusTradeRuntime:
             or current_identity != desired_identity
             or desired_dispatcher is not current_dispatcher
         )
+        version_changes = {
+            lane
+            for lane in Lane
+            if self._versions[lane] is not None
+            and self._versions[lane] != next_versions.get(lane)
+        }
         if (
-            route_changes
-            and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+            (
+                route_changes
+                and self.strategies[Lane.CHAMPION].state.position_status != "IDLE"
+            )
+            or any(
+                self.strategies[lane].state.position_status != "IDLE"
+                for lane in version_changes
+            )
         ):
             self._pending_runtime_snapshot = snapshot
             return False
 
         # Commit the route only after all validation/factory work succeeds.
+        for lane in Lane:
+            if self._versions[lane] != next_versions.get(lane):
+                self.strategies[lane] = NexusTradeStrategy(
+                    lane=lane,
+                    state=self.strategies[lane].state,
+                    gate=next_gates.get(lane),
+                )
         self.dispatchers[Lane.TRIAL] = self._shared_demo_dispatcher
         self.dispatchers[Lane.CHAMPION] = desired_dispatcher
         self._champion_enabled = desired_enabled
@@ -602,6 +626,14 @@ class NexusTradeRuntime:
             dispatcher.set_emergency_stop(self._emergency_stop)
         self._pending_runtime_snapshot = None
         return True
+
+    @staticmethod
+    def _gate_from_version(version: dict):
+        snapshot = version.get("snapshot")
+        if not isinstance(snapshot, dict) or "artifact" not in snapshot:
+            return None
+        artifact = CandidateArtifact.from_json(canonical_json(snapshot["artifact"]))
+        return artifact.executable_gate()
 
     def _apply_persisted_emergency_stop(self, runtime: dict) -> None:
         if "emergency_stop" not in runtime:
@@ -1047,7 +1079,7 @@ class NexusTradeRuntime:
         self._lane_owners[lane] = None
         if not callable(atomic_settler):
             await self._save_lane_state(lane)
-        if lane is Lane.CHAMPION and self._pending_runtime_snapshot is not None:
+        if self._pending_runtime_snapshot is not None:
             pending = self._pending_runtime_snapshot
             if self._managed_champion_factory:
                 await self._provision_champion_dispatcher(pending)

@@ -8,6 +8,7 @@ import math
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 
+from nexus_trade.artifacts import ExecutableHGBGate
 from nexus_trade.constants import NEXUS_TIMEFRAME_SECONDS
 from nexus_trade.domain import Lane
 from nexus_trade.indicators import IndicatorFrame
@@ -15,7 +16,9 @@ from nexus_trade.indicators import IndicatorFrame
 
 ADX_ENTRY_MAX = 22.0
 POSITION_STATUSES = frozenset({"IDLE", "RESERVED", "ACTIVE", "QUARANTINED"})
-DECISION_BLOCKS = frozenset({"NO_TRADE", "ADX_BLOCKED", "POSITION_ACTIVE"})
+DECISION_BLOCKS = frozenset({
+    "NO_TRADE", "ADX_BLOCKED", "ML_BLOCKED", "POSITION_ACTIVE",
+})
 CONTRACT_TYPES = frozenset({"CALL", "PUT"})
 RECONCILIATION_OUTCOMES = frozenset({"CONTRACT_FOUND", "PURCHASE_ABSENT"})
 
@@ -296,6 +299,7 @@ class NexusTradeStrategy:
         *,
         state: SetupState | Mapping[str, Any] | None = None,
         lane: Lane | str = Lane.CHAMPION,
+        gate: ExecutableHGBGate | None = None,
     ):
         self.state = (
             SetupState()
@@ -308,6 +312,9 @@ class NexusTradeStrategy:
             self.lane = Lane(lane).value
         except ValueError as exc:
             raise ValueError("lane must be champion_baseline or challenger_trial") from exc
+        if gate is not None and type(gate) is not ExecutableHGBGate:
+            raise TypeError("gate must be an ExecutableHGBGate")
+        self.gate = gate
 
     def snapshot(self) -> dict[str, Any]:
         return self.state.to_dict()
@@ -510,6 +517,22 @@ class NexusTradeStrategy:
             blocked_reason = "ADX_BLOCKED"
             upper_break_epoch = None
             lower_break_epoch = None
+        elif self.gate is not None:
+            try:
+                gate_values = self._gate_values(indicators, adx=adx)
+                operate = self.gate.should_operate(gate_values)
+            except (TypeError, ValueError, KeyError):
+                operate = False
+                reason_codes.append("ml_gate_input_invalid")
+            if operate:
+                blocked_reason = None
+                reserve = True
+            else:
+                blocked_reason = "ML_BLOCKED"
+                if "ml_gate_input_invalid" not in reason_codes:
+                    reason_codes.append("ml_probability_below_threshold")
+            upper_break_epoch = None
+            lower_break_epoch = None
         else:
             blocked_reason = None
             reserve = True
@@ -538,6 +561,26 @@ class NexusTradeStrategy:
             reconciliation_outcome=self.state.reconciliation_outcome,
         )
         return [decision]
+
+    def _gate_values(
+        self,
+        indicators: IndicatorFrame | Mapping[str, Any],
+        *,
+        adx: float,
+    ) -> tuple[float, ...]:
+        raw_values = _field(indicators, "values")
+        if not isinstance(raw_values, Mapping):
+            raise ValueError("indicator values must be a mapping")
+        mapped: list[float] = []
+        for feature in self.gate.feature_schema:
+            value = adx if feature == "adx" else raw_values.get(feature)
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"runtime gate feature is unavailable: {feature}")
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"runtime gate feature is non-finite: {feature}")
+            mapped.append(number)
+        return tuple(mapped)
 
     @staticmethod
     def _no_trade_reasons(

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 
 from config.settings import settings
@@ -13,6 +14,7 @@ from nexus_trade.strategy import (
     SetupState,
 )
 from trading.safety import RealTradingDisabled
+from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
 
 class FakeRepository:
@@ -323,14 +325,104 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "champion_dispatcher_factory", lambda config: self.separate,
         )
         publisher = kwargs.pop("publisher", LiveStorePublisher(self.repository))
+        runtime_snapshot = kwargs.pop("runtime_snapshot", self.snapshot)
         return NexusTradeRuntime(
             self.repository,
             {"id": "nexus-trade", "strategy_id": "nexus_trade", "desired_state": "STOPPED"},
             shared_demo_dispatcher=self.shared,
             champion_dispatcher_factory=champion_factory,
-            runtime_snapshot=self.snapshot,
+            runtime_snapshot=runtime_snapshot,
             publisher=publisher,
             **kwargs,
+        )
+
+    def executable_snapshot(self, *, champion_artifact=None, trial_artifact=None):
+        snapshot = json.loads(json.dumps(self.snapshot))
+        for item in snapshot["lanes"]:
+            artifact = (
+                champion_artifact
+                if item["lane"] == Lane.CHAMPION.value
+                else trial_artifact
+            )
+            if artifact is not None:
+                item["version"]["snapshot"] = {
+                    "schema_version": 1,
+                    "candidate_id": f"candidate-{artifact.artifact_hash[:24]}",
+                    "artifact": json.loads(artifact.to_json()),
+                }
+        return snapshot
+
+    def test_trial_rotation_and_restart_load_exact_artifact_and_champion_transition_loads_gate(self):
+        trial_artifact = ArtifactAndRegistryTests.artifact("runtime-trial")
+        snapshot = self.executable_snapshot(trial_artifact=trial_artifact)
+        runtime = self.runtime()
+        self.assertTrue(runtime.apply_champion_mode(snapshot))
+        self.assertTrue(hasattr(runtime.strategies[Lane.TRIAL], "gate"))
+        self.assertIsNotNone(runtime.strategies[Lane.TRIAL].gate)
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].gate.artifact_hash,
+            trial_artifact.artifact_hash,
+        )
+
+        restarted = self.runtime(runtime_snapshot=snapshot)
+        self.assertTrue(restarted.apply_champion_mode(snapshot))
+        self.assertIsNotNone(restarted.strategies[Lane.TRIAL].gate)
+        self.assertEqual(
+            restarted.strategies[Lane.TRIAL].gate.artifact_hash,
+            trial_artifact.artifact_hash,
+        )
+
+        champion_artifact = ArtifactAndRegistryTests.artifact("runtime-champion")
+        promoted = self.executable_snapshot(
+            champion_artifact=champion_artifact,
+            trial_artifact=trial_artifact,
+        )
+        promoted["lanes"][0]["version"]["id"] = "champion-v2"
+        self.assertTrue(runtime.apply_champion_mode(promoted))
+        self.assertIsNotNone(runtime.strategies[Lane.CHAMPION].gate)
+        self.assertEqual(
+            runtime.strategies[Lane.CHAMPION].gate.artifact_hash,
+            champion_artifact.artifact_hash,
+        )
+
+    def test_v1_stays_deterministic_and_corrupt_executable_transition_fails_closed(self):
+        runtime = self.runtime()
+        self.assertTrue(runtime.apply_champion_mode(self.snapshot))
+        self.assertIsNone(runtime.strategies[Lane.CHAMPION].gate)
+        self.assertIsNone(runtime.strategies[Lane.TRIAL].gate)
+
+        artifact = ArtifactAndRegistryTests.artifact("corrupt-runtime")
+        corrupt = self.executable_snapshot(trial_artifact=artifact)
+        corrupt["lanes"][1]["version"]["id"] = "trial-v2"
+        corrupt["lanes"][1]["version"]["snapshot"]["artifact"]["artifact_hash"] = "0" * 64
+        with self.assertRaises(ValueError):
+            runtime.apply_champion_mode(corrupt)
+        self.assertEqual(runtime._versions[Lane.TRIAL], "trial-v1")
+        self.assertIsNone(runtime.strategies[Lane.TRIAL].gate)
+
+    def test_trial_version_transition_waits_for_its_owned_position_to_close(self):
+        runtime = self.runtime()
+        self.assertTrue(runtime.apply_champion_mode(self.snapshot))
+        runtime.strategies[Lane.TRIAL].state = SetupState(
+            position_status="ACTIVE",
+            owner_decision_id="owned-trial",
+            contract_id=901,
+        )
+        artifact = ArtifactAndRegistryTests.artifact("safe-trial-boundary")
+        rotated = self.executable_snapshot(trial_artifact=artifact)
+        rotated["lanes"][1]["version"]["id"] = "trial-v2"
+        rotated["runtime"]["trial_version_id"] = "trial-v2"
+
+        self.assertFalse(runtime.apply_champion_mode(rotated))
+        self.assertEqual(runtime._versions[Lane.TRIAL], "trial-v1")
+        self.assertIsNone(runtime.strategies[Lane.TRIAL].gate)
+
+        runtime.strategies[Lane.TRIAL].mark_position_closed("owned-trial", 901)
+        self.assertTrue(runtime.apply_champion_mode(rotated))
+        self.assertEqual(runtime._versions[Lane.TRIAL], "trial-v2")
+        self.assertEqual(
+            runtime.strategies[Lane.TRIAL].gate.artifact_hash,
+            artifact.artifact_hash,
         )
 
     async def test_champion_off_and_trial_share_demo_dispatcher_at_exact_stake(self):

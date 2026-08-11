@@ -13,7 +13,7 @@ from api.app import create_app
 from api.live_store import LiveStore
 from config.settings import settings
 from database.repository import DatabaseRepository
-from nexus_trade.artifacts import canonical_json
+from nexus_trade.artifacts import CandidateArtifact, canonical_json
 from nexus_trade.candidates import CandidateRegistry
 from nexus_trade.promotion import PromotionConflict, PromotionRejected, PromotionService
 from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
@@ -628,6 +628,55 @@ class PromotionServiceTests(unittest.TestCase):
         self.assertEqual(transition[0:2], (old_candidate_id, candidate["id"]))
         self.assertEqual(transition[2], after["runtime"]["trial_version_id"])
         self.assertEqual(transition[3], new_campaign)
+
+    def test_weekly_trial_replacement_never_selects_a_qualified_non_executable_candidate(self):
+        registry = CandidateRegistry(self.db_path)
+        registry.register(ArtifactAndRegistryTests.artifact("current-executable"))
+        legacy_metadata = json.loads(
+            ArtifactAndRegistryTests.artifact("unsupported-shadow").to_json()
+        )["metadata"]
+        legacy_metadata["schema_version"] = 1
+        legacy_metadata["model"]["serialization"] = (
+            "retrain_from_content_addressed_dataset"
+        )
+        legacy_metadata.pop("fitted_model")
+        unsupported = CandidateArtifact.create(legacy_metadata)
+        candidate = registry.register(unsupported)
+        qualification = {
+            "candidate_id": candidate["id"],
+            "artifact_hash": unsupported.artifact_hash,
+            "qualification": {
+                "status": "PASS",
+                "gates": [{"code": "ARTIFACT_INTEGRITY", "status": "PASS"}],
+            },
+        }
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO nexus_training_attempts "
+                "(attempt_hash,status,dataset_hash,provenance_hash,seed,payload) "
+                "VALUES (?,'SUCCEEDED',?,?,?,?)",
+                (
+                    "e" * 64,
+                    unsupported.metadata["dataset_hash"],
+                    unsupported.metadata["provenance_hash"],
+                    73,
+                    canonical_json(qualification),
+                ),
+            )
+            db.commit()
+
+        before = self.snapshot()
+        result = asyncio.run(self.service.replace_trial(
+            datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc),
+            actor="system:scheduler",
+            request_id="weekly-unsupported",
+            reason="unsupported candidates fail closed",
+            candidate_id=candidate["id"],
+        ))
+
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["reason"], "NO_QUALIFIED_CANDIDATE")
+        self.assertEqual(self.snapshot()["runtime"], before["runtime"])
 
     def test_trial_role_transition_rolls_back_completely_on_injected_failure(self):
         candidate, _ = self.seed_qualified_shadow()

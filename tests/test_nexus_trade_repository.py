@@ -45,13 +45,160 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             {Lane.CHAMPION.value, Lane.TRIAL.value},
         )
         champion = next(lane for lane in snapshot["lanes"] if lane["lane"] == Lane.CHAMPION.value)
+        trial = next(lane for lane in snapshot["lanes"] if lane["lane"] == Lane.TRIAL.value)
         self.assertEqual(champion["version"]["status"], VersionStatus.CHAMPION.value)
+        self.assertEqual(trial["version"]["status"], VersionStatus.TRIAL.value)
+        self.assertNotEqual(champion["version"]["id"], trial["version"]["id"])
         self.assertEqual(champion["version"]["name"], "Champion V1")
         self.assertEqual(champion["version"]["snapshot"]["bollinger"], {"period": 20, "std_dev": 2, "ma": "SMA"})
         self.assertEqual(champion["version"]["snapshot"]["adx"], {"period": 14, "max_entry": 22})
         self.assertEqual(len(snapshot["active_campaigns"]), 1)
         self.assertEqual(snapshot["active_campaigns"][0]["lane"], Lane.TRIAL.value)
         self.assertEqual(snapshot["active_campaigns"][0]["status"], CampaignStatus.ACTIVE.value)
+        self.assertEqual(
+            snapshot["active_campaigns"][0]["nexus_version_id"],
+            snapshot["runtime"]["trial_version_id"],
+        )
+
+    async def test_exact_legacy_v1_pointer_and_campaign_are_migrated_to_a_trial_role(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        champion_id = snapshot["runtime"]["champion_version_id"]
+        trial_id = snapshot["runtime"]["trial_version_id"]
+        if champion_id != trial_id:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "DELETE FROM nexus_campaigns WHERE lane = ? AND status = 'ACTIVE'",
+                    (Lane.TRIAL.value,),
+                )
+                await db.execute(
+                    "UPDATE nexus_runtime SET trial_version_id = ? WHERE bot_id = ?",
+                    (champion_id, NEXUS_TRADE_BOT_ID),
+                )
+                await db.execute("DELETE FROM nexus_versions WHERE id = ?", (trial_id,))
+                await db.execute(
+                    "INSERT INTO nexus_campaigns (id,lane,nexus_version_id,status) "
+                    "VALUES (?,?,?,'ACTIVE')",
+                    (f"trial-{champion_id}", Lane.TRIAL.value, champion_id),
+                )
+                await db.commit()
+
+        await self.repo.init_db()
+        migrated = await self.nexus.get_runtime_snapshot()
+        trial = next(
+            item["version"] for item in migrated["lanes"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        self.assertEqual(trial["status"], VersionStatus.TRIAL.value)
+        self.assertNotEqual(
+            migrated["runtime"]["champion_version_id"],
+            migrated["runtime"]["trial_version_id"],
+        )
+        self.assertEqual(
+            migrated["active_campaigns"][0]["nexus_version_id"], trial["id"],
+        )
+
+    async def test_snapshot_and_reinitialization_reject_wrong_role_pointers(self):
+        for pointer, source_lane in (
+            ("champion_version_id", Lane.TRIAL),
+            ("trial_version_id", Lane.CHAMPION),
+        ):
+            with self.subTest(pointer=pointer), tempfile.TemporaryDirectory() as directory:
+                db_path = str(Path(directory) / "wrong-role.db")
+                repository = DatabaseRepository(db_path)
+                nexus = NexusTradeRepository(db_path)
+                await repository.init_db()
+                snapshot = await nexus.get_runtime_snapshot()
+                source_id = next(
+                    item["version"]["id"] for item in snapshot["lanes"]
+                    if item["lane"] == source_lane.value
+                )
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        f"UPDATE nexus_runtime SET {pointer} = ? WHERE bot_id = ?",
+                        (source_id, NEXUS_TRADE_BOT_ID),
+                    )
+                    if pointer == "trial_version_id":
+                        await db.execute(
+                            "UPDATE nexus_campaigns SET nexus_version_id = ? "
+                            "WHERE lane = ? AND status = 'ACTIVE'",
+                            (source_id, Lane.TRIAL.value),
+                        )
+                    await db.commit()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await nexus.get_runtime_snapshot()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await repository.init_db()
+
+    async def test_snapshot_and_reinitialization_reject_missing_or_mismatched_trial_campaign(self):
+        for corruption in ("missing", "mismatched"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                db_path = str(Path(directory) / "campaign-corrupt.db")
+                repository = DatabaseRepository(db_path)
+                nexus = NexusTradeRepository(db_path)
+                await repository.init_db()
+                snapshot = await nexus.get_runtime_snapshot()
+                champion_id = snapshot["runtime"]["champion_version_id"]
+                async with aiosqlite.connect(db_path) as db:
+                    if corruption == "missing":
+                        await db.execute(
+                            "DELETE FROM nexus_campaigns WHERE lane = ? AND status = 'ACTIVE'",
+                            (Lane.TRIAL.value,),
+                        )
+                    else:
+                        await db.execute(
+                            "UPDATE nexus_campaigns SET nexus_version_id = ? "
+                            "WHERE lane = ? AND status = 'ACTIVE'",
+                            (champion_id, Lane.TRIAL.value),
+                        )
+                    await db.commit()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await nexus.get_runtime_snapshot()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await repository.init_db()
+
+    async def test_duplicate_active_trial_campaign_fails_closed_on_snapshot_and_reinit(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        trial_id = snapshot["runtime"]["trial_version_id"]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DROP INDEX ux_nexus_campaigns_active_trial")
+            await db.execute(
+                "INSERT INTO nexus_campaigns (id,lane,nexus_version_id,status) "
+                "VALUES ('duplicate-trial','challenger_trial',?,'ACTIVE')",
+                (trial_id,),
+            )
+            await db.commit()
+
+        with self.assertRaises(NexusTradeSingletonError):
+            await self.nexus.get_runtime_snapshot()
+        with self.assertRaises((NexusTradeSingletonError, aiosqlite.IntegrityError)):
+            await self.repo.init_db()
+
+    async def test_malformed_pointer_and_campaign_identity_fail_closed(self):
+        for corruption in ("pointer", "campaign"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                db_path = str(Path(directory) / "malformed.db")
+                repository = DatabaseRepository(db_path)
+                nexus = NexusTradeRepository(db_path)
+                await repository.init_db()
+                async with aiosqlite.connect(db_path) as db:
+                    if corruption == "pointer":
+                        await db.execute(
+                            "UPDATE nexus_runtime SET trial_version_id = '' WHERE bot_id = ?",
+                            (NEXUS_TRADE_BOT_ID,),
+                        )
+                    else:
+                        await db.execute(
+                            "UPDATE nexus_campaigns SET id = '' "
+                            "WHERE lane = ? AND status = 'ACTIVE'",
+                            (Lane.TRIAL.value,),
+                        )
+                    await db.commit()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await nexus.get_runtime_snapshot()
+                with self.assertRaises(NexusTradeSingletonError):
+                    await repository.init_db()
 
     async def test_fresh_repository_has_separate_active_campaign_provenance_for_both_lanes(self):
         await self.repo.init_db()

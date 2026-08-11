@@ -798,6 +798,10 @@ class PromotionService:
         async with db.execute(query, params) as cursor:
             candidates = await cursor.fetchall()
         for candidate in candidates:
+            try:
+                CandidateArtifact.from_json(candidate["metadata"]).executable_gate()
+            except (ArtifactIntegrityError, TypeError, ValueError):
+                continue
             async with db.execute(
                 "SELECT payload FROM nexus_training_attempts WHERE status='SUCCEEDED' "
                 "AND payload LIKE ? ORDER BY created_at DESC,id DESC",
