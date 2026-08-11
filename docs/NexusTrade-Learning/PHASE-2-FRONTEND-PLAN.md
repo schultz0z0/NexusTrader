@@ -1,6 +1,6 @@
 # NexusTrade Phase 2 — Frontend Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution mode approved by the user:** inline execution in one Codex session, without subagents. Use `superpowers:executing-plans`, TDD, the checklist below and local commits after each task. Never push.
 
 **Goal:** Integrar o NexusTrade ao painel atual com operação do Champion, relatórios, evolução, aprovação e histórico completos, responsivos e atualizados sem F5.
 
@@ -18,8 +18,55 @@
 - Todos os relatórios mostram N, wins, losses, empates e assertividade com denominador.
 - Ações de promoção/rollback obedecem às travas retornadas pelo backend; frontend nunca simula autorização.
 - Segredos, tokens Deriv e OTP não entram no DOM, WebSocket, export ou log do navegador.
+- A credencial humana de governança nunca é persistida. Ela existe apenas no campo `password` durante a confirmação, segue no header `X-Nexus-Human-Key` e é apagada do DOM e da memória no `finally` da requisição.
+- Estados compartilháveis usam apenas IDs públicos no URL: aba, `week_start`, `report_id`, `campaign_id` e `proposal_id`. Credenciais e payloads brutos nunca entram no URL.
+- Visualizações usam SVG/DOM leve e tabelas equivalentes; nenhum valor essencial depende de hover, animação ou cor isolada.
 
 ---
+
+### Task 0: Congelar contratos e runbook de execução
+
+**Files:**
+- Create: `docs/NexusTrade-Learning/PHASE-2-IMPLEMENTATION-RUNBOOK.md`
+- Modify: `docs/NexusTrade-Learning/PHASE-2-FRONTEND-PLAN.md`
+- Modify: `docs/NexusTrade-Learning/FRONTEND.md`
+
+**Interfaces:**
+- Consumes: rotas FastAPI e os oito eventos `nexus.*` da Fase 1.
+- Produces: contrato vinculante de API, segurança, deploy e QA manual da Fase 2.
+
+- [x] **Step 1: Verificar as rotas reais**
+
+Snapshot/modo: `GET /api/v1/nexus-trade`, `POST /mode`, `POST /real-confirmation`
+e `POST /emergency-stop`. Catálogos: `/versions`, `/campaigns`, `/reports`,
+`/reports/weekly/{aligned_week}`, `/reports/{id}`, `/proposals` e `/exports`.
+Ações: `POST /proposals/{id}/approve`, `POST /proposals/{id}/reanalyze` e
+`POST /rollback`.
+
+- [x] **Step 2: Verificar os eventos reais**
+
+`nexus.runtime`, `nexus.decision`, `nexus.trade`, `nexus.campaign`, `nexus.report`,
+`nexus.trial_changed`, `nexus.proposal` e `nexus.version_changed`, todos com
+`event_id`, `schema_version=1`, `snapshot_version>=1`, `bot_id=nexus-trade` e
+`payload` sanitizado.
+
+- [x] **Step 3: Congelar recomendações e relatórios**
+
+Os estados reais são `EVOLVE`, `REANALYZE` e `INCONCLUSIVE`. Relatórios usam `days`,
+`full_totals`, `accumulated_progress`, `diffs`, `gates`, `recommendation`,
+`recommendation_reasons`, `audit` e `disclosure`.
+
+- [x] **Step 4: Registrar deploy e testes manuais**
+
+O runbook define localhost, VPS, backup, build, health, restart, rollback, logs,
+breakpoints, teclado, WebSocket, relatórios, exports e governança sem operação REAL.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/NexusTrade-Learning
+git commit -m "docs: freeze NexusTrade frontend execution contracts"
+```
 
 ### Task 1: Contrato do cliente, store e roteamento da view
 

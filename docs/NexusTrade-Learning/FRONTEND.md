@@ -144,10 +144,9 @@ apenas por lucro bruto ou assertividade.
 A máquina de decisão do aprendizado avalia a campanha acumulada no fechamento semanal
 e retorna um estado:
 
-- `RECOMMEND_EVOLUTION`: candidato elegível e superior nos gates conservadores.
+- `EVOLVE`: candidato elegível e superior nos gates conservadores.
 - `REANALYZE`: candidato não demonstrou superioridade estável ou falhou em gates.
-- `INSUFFICIENT_SAMPLE`: campanha ainda não atingiu uma semana completa e 300 operações.
-- `DATA_INVALID`: lacunas ou inconsistências impedem decisão confiável.
+- `INCONCLUSIVE`: amostra, integridade ou evidência ainda não permite uma recomendação.
 
 A recomendação mostra:
 
@@ -256,3 +255,6 @@ Após reconexão, o cliente busca snapshot persistido para reparar eventos perdi
 - Se o Champion ficar ON durante a revisão, `Aprovar` é desabilitado imediatamente.
 - Falha durante promoção mantém ou restaura o Champion anterior.
 - Nenhum token, OTP ou dado secreto aparece no relatório ou WebSocket.
+- Aprovar, reanalisar e fazer rollback pede a credencial humana em um campo `password`
+  transitório. O cliente envia apenas `X-Nexus-Human-Key`, nunca persiste o valor e
+  limpa campo e referência em memória ao concluir ou cancelar a ação.
