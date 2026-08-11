@@ -205,6 +205,85 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(restarted["runtime"]["trial_version_id"], champion_id)
         self.assertEqual(restarted["active_campaigns"][0]["id"], campaign_id)
 
+    async def test_wrong_role_state_with_another_valid_trial_is_not_legacy_migrated(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        champion_id = snapshot["runtime"]["champion_version_id"]
+        trial_v1_id = snapshot["runtime"]["trial_version_id"]
+        artifact = ArtifactAndRegistryTests.artifact("alternative-valid-trial")
+        candidate_id = f"candidate-{artifact.artifact_hash[:24]}"
+        version_snapshot = {
+            "schema_version": 1,
+            "candidate_id": candidate_id,
+            "artifact": json.loads(artifact.to_json()),
+            "trial_selection": {"request_id": "alternative-valid-trial"},
+        }
+        encoded = canonical_json(version_snapshot)
+        version_hash = hashlib.sha256(
+            b"nexus-trial-version-v1\0" + encoded.encode("utf-8")
+        ).hexdigest()
+        alternative_trial_id = f"nexus-trial-{version_hash[:16]}"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute(
+                "DELETE FROM nexus_campaigns WHERE lane = ? AND status = 'ACTIVE'",
+                (Lane.TRIAL.value,),
+            )
+            await db.execute(
+                "UPDATE nexus_runtime SET trial_version_id = ? WHERE bot_id = ?",
+                (champion_id, NEXUS_TRADE_BOT_ID),
+            )
+            await db.execute("DELETE FROM nexus_versions WHERE id = ?", (trial_v1_id,))
+            await db.execute(
+                "INSERT INTO nexus_candidates "
+                "(id,nexus_version_id,artifact_hash,status,metadata) "
+                "VALUES (?,?,?,'TRIAL',?)",
+                (
+                    candidate_id,
+                    alternative_trial_id,
+                    artifact.artifact_hash,
+                    artifact.to_json(),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO nexus_versions(id,name,status,version_hash,snapshot) "
+                "VALUES (?,?,'TRIAL',?,?)",
+                (
+                    alternative_trial_id,
+                    "Alternative Valid Trial",
+                    version_hash,
+                    encoded,
+                ),
+            )
+            await db.execute(
+                "INSERT INTO nexus_campaigns(id,lane,nexus_version_id,status) "
+                "VALUES ('fresh-wrong-role-state',?,?, 'ACTIVE')",
+                (Lane.TRIAL.value, champion_id),
+            )
+            await db.commit()
+
+        with self.assertRaises(NexusTradeSingletonError):
+            await self.repo.init_db()
+
+        trial_v1_id, _, _ = NexusTradeRepository._v1_identity(VersionStatus.TRIAL)
+        async with aiosqlite.connect(self.db_path) as db:
+            runtime = await (await db.execute(
+                "SELECT trial_version_id FROM nexus_runtime WHERE bot_id = ?",
+                (NEXUS_TRADE_BOT_ID,),
+            )).fetchone()
+            campaign = await (await db.execute(
+                "SELECT id,nexus_version_id FROM nexus_campaigns "
+                "WHERE lane = ? AND status = 'ACTIVE'",
+                (Lane.TRIAL.value,),
+            )).fetchone()
+            created_trial_v1 = await (await db.execute(
+                "SELECT COUNT(*) FROM nexus_versions WHERE id = ?", (trial_v1_id,),
+            )).fetchone()
+        self.assertEqual(runtime[0], champion_id)
+        self.assertEqual(tuple(campaign), ("fresh-wrong-role-state", champion_id))
+        self.assertEqual(created_trial_v1[0], 0)
+
     async def test_snapshot_and_reinitialization_reject_wrong_role_pointers(self):
         for pointer, source_lane in (
             ("champion_version_id", Lane.TRIAL),

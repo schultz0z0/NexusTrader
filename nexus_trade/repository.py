@@ -264,6 +264,23 @@ class NexusTradeRepository:
         ):
             return
         campaign_id = campaigns[0]["id"]
+        if not (
+            campaign_id == f"trial-{champion_version_id}"
+            or any(
+                campaign_id.startswith(prefix) and len(campaign_id) > len(prefix)
+                for prefix in ("trial-reanalyze-", "trial-after-")
+            )
+        ):
+            return
+        async with db.execute(
+            "SELECT * FROM nexus_versions WHERE status = ? AND id != ? ORDER BY id",
+            (VersionStatus.TRIAL.value, trial_version_id),
+        ) as cursor:
+            alternative_trials = await cursor.fetchall()
+        for alternative in alternative_trials:
+            await cls._validated_version(db, alternative, lane=Lane.TRIAL)
+        if alternative_trials:
+            return
         await db.execute(
             "UPDATE nexus_runtime SET trial_version_id = ?, "
             "updated_at = CURRENT_TIMESTAMP WHERE bot_id = ?",

@@ -149,3 +149,41 @@ Secret/path scans: pass
 ```
 
 No network, Deriv call, REAL order, Docker live run, push, PR, or GitHub mutation was performed. The only warning remains the pre-existing Starlette/FastAPI TestClient deprecation warning.
+
+## Final-review fix round 2/5
+
+### Finding
+
+The shared-V1 compatibility path still classified an arbitrary fresh campaign as legacy whenever Trial V1 was absent. If another content-valid TRIAL candidate/version already existed, initialization silently rewrote the wrong-role runtime pointer and campaign to the newly recreated Trial V1 instead of failing closed on the ambiguous state.
+
+### TDD evidence
+
+```text
+rtk ... python.exe -m unittest tests.test_nexus_trade_repository.NexusTradeRepositoryTests.test_wrong_role_state_with_another_valid_trial_is_not_legacy_migrated -v
+Ran 1 test: FAILED (failures=1)
+Observed: NexusTradeSingletonError was not raised for fresh-wrong-role-state with another valid TRIAL candidate/version.
+```
+
+### Correction
+
+- Legacy migration now recognizes only the exact initial `trial-{shared Champion V1 id}` identity or non-empty `trial-reanalyze-*` / `trial-after-*` identities tied to shared V1.
+- Before any rewrite, every alternative TRIAL version is validated through the canonical artifact, hash, executable-gate, and candidate-provenance path. A valid alternative makes the state ambiguous, so the existing snapshot validation raises and initialization rolls back the recreated Trial V1 atomically. Corrupt alternatives also remain fail-closed.
+- The approved initial, reanalysis, after-action, restart, and injected rollback migration paths remain unchanged.
+
+### Verification
+
+```text
+Focused ambiguity/preservation matrix: 4/4 pass
+Repository module: 31/31 pass
+Integrated NexusTrade modules: 293/293 pass
+Protected Python regressions: 78/78 pass
+Full Python discovery without DEV_MODE: 496/496 pass (70.104s)
+JavaScript node tests: 17/17 pass
+compileall: pass
+pip check: No broken requirements found
+git diff --check: pass
+Protected diff (Donchian/ZigZag/Nexus Speed): empty
+Secret/path scans: pass
+```
+
+No network, Deriv call, REAL order, Docker live run, push, PR, or GitHub mutation was performed. The only warning remains the pre-existing Starlette/FastAPI TestClient deprecation warning.
