@@ -15,6 +15,30 @@ export function resolveDashboardView(botId) {
   return botId === NEXUS_BOT_ID ? "nexus" : "standard";
 }
 
+export function saveNexusDownload(download, documentRef = globalThis.document, urlRef = globalThis.URL) {
+  if (!download?.blob || typeof download.blob.size !== "number" || download.blob.size < 1) {
+    throw new Error("O arquivo de exportação está vazio.");
+  }
+  const filename = String(download.filename || "").split(/[\\/]/).pop();
+  if (!filename) throw new Error("Nome do arquivo de exportação inválido.");
+  const anchor = documentRef?.createElement?.("a");
+  if (!anchor || !urlRef?.createObjectURL || !urlRef?.revokeObjectURL) {
+    throw new Error("Download indisponível neste navegador.");
+  }
+  const objectUrl = urlRef.createObjectURL(download.blob);
+  try {
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    documentRef.body?.append?.(anchor);
+    anchor.click();
+    return true;
+  } finally {
+    anchor.remove?.();
+    urlRef.revokeObjectURL(objectUrl);
+  }
+}
+
 function lane(state, name) {
   return (state?.lanes || []).find((item) => item?.lane === name) || {};
 }
@@ -271,6 +295,7 @@ export function mountNexusTradeView({
   let proposals = [];
   let versions = [];
   let actionMode = null;
+  let catalogRefreshQueued = false;
 
   const renderTabs = () => {
     for (const button of root?.querySelectorAll?.("[data-nexus-tab]") || []) {
@@ -282,15 +307,25 @@ export function mountNexusTradeView({
     showNode(root, "#nexus-reports-panel", activeTab === "reports");
     showNode(root, "#nexus-evolution-panel", activeTab === "evolution");
   };
-  const render = () => {
-    renderOperational(root, buildNexusOperationalModel(store?.get?.() || {}, getAccount()));
+  const render = (notifiedState = null) => {
+    const state = notifiedState || store?.get?.() || {};
+    const reportId = reportSnapshot(selectedReport)?.id || selectedReport?.id;
+    const eventReport = reportId ? (state.reports || []).find((item) => (reportSnapshot(item)?.id || item?.id) === reportId) : null;
+    if (eventReport) selectedReport = eventReport;
+    if (Array.isArray(state.proposals) && state.proposals.length) {
+      const eventIds = new Set(state.proposals.map((item) => item?.id).filter(Boolean));
+      proposals = [...state.proposals, ...proposals.filter((item) => !eventIds.has(item?.id))];
+    }
+    renderOperational(root, buildNexusOperationalModel(state, getAccount()));
     renderTabs();
     renderReports(root, selectedReport);
     const report = reportSnapshot(selectedReport);
     const proposal = proposals.find((item) => item?.status === "PENDING_USER_REVIEW" && (!report?.campaign_id || item?.campaign_id === report.campaign_id)) || null;
     renderGovernance(root, { store, report: selectedReport, proposal, versions });
+    for (const button of root?.querySelectorAll?.('[data-nexus-action^="export-"]') || []) {
+      button.disabled = !reportId;
+    }
   };
-  store?.subscribe?.(render);
 
   const writeLocation = () => {
     if (!globalThis.history?.replaceState || !globalThis.location) return;
@@ -335,6 +370,22 @@ export function mountNexusTradeView({
       onToast(error.message || "Falha ao carregar relatórios.", "error");
     }
   };
+
+  const scheduleCatalogRefresh = () => {
+    if (catalogRefreshQueued || !api) return;
+    catalogRefreshQueued = true;
+    const enqueue = globalThis.queueMicrotask || ((callback) => Promise.resolve().then(callback));
+    enqueue(async () => {
+      try { await loadReports(); } finally { catalogRefreshQueued = false; }
+    });
+  };
+
+  store?.subscribe?.((state, change) => {
+    render(state);
+    if (change?.kind === "event" && [
+      "nexus.report", "nexus.proposal", "nexus.campaign", "nexus.trial_changed", "nexus.version_changed",
+    ].includes(change.type)) scheduleCatalogRefresh();
+  });
 
   const openTab = (tab) => {
     activeTab = ["operations", "reports", "evolution"].includes(tab) ? tab : "operations";
@@ -496,6 +547,29 @@ export function mountNexusTradeView({
     }
   };
 
+  const handleExport = async (format) => {
+    const report = reportSnapshot(selectedReport);
+    const reportId = report?.id || selectedReport?.id;
+    if (!api || !reportId) {
+      onToast("Selecione uma semana com relatório antes de exportar.", "error");
+      return;
+    }
+    const buttons = [...(root?.querySelectorAll?.('[data-nexus-action^="export-"]') || [])];
+    buttons.forEach((button) => { button.disabled = true; });
+    setText(root, "#nexus-export-status", "Gerando arquivo imutável…");
+    try {
+      const download = await api.downloadReport(reportId, format);
+      saveNexusDownload(download);
+      setText(root, "#nexus-export-status", download.filename);
+      onToast(`Exportação pronta: ${download.filename}`);
+    } catch (error) {
+      setText(root, "#nexus-export-status", "Falha na exportação");
+      onToast(error.message || "Falha na exportação.", "error");
+    } finally {
+      buttons.forEach((button) => { button.disabled = false; });
+    }
+  };
+
   globalThis.document?.querySelector?.("#nexus-governance-form")?.addEventListener?.("submit", submitGovernance);
   globalThis.document?.querySelector?.("#nexus-cancel-governance")?.addEventListener?.("click", closeGovernance);
 
@@ -507,6 +581,8 @@ export function mountNexusTradeView({
     if (action === "emergency-stop") handleEmergency();
     if (action === "open-evolution") { openTab("evolution"); onOpenEvolution(); }
     if (["approve", "reanalyze", "rollback"].includes(action)) openGovernance(action);
+    if (action === "export-zip") handleExport("csv.zip");
+    if (action === "export-xlsx") handleExport("xlsx");
     if (["previous-week", "next-week"].includes(action)) {
       const target = shiftAlignedWeek(selectedWeek, action === "previous-week" ? -1 : 1);
       if (target) {

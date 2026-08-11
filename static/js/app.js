@@ -4,7 +4,7 @@ import { TradingChart } from "./chart.js";
 import { contractPresentation } from "./trade_state.js";
 import { configuredBotPayload, strategyProfile } from "./bot_config.js";
 import { nexusTradeApi } from "./nexus_trade_api.js";
-import { createNexusTradeStore, NEXUS_BOT_ID } from "./nexus_trade_store.js";
+import { createNexusTradeStore, NEXUS_BOT_ID, reconcileNexusTradeStore } from "./nexus_trade_store.js";
 import { buildNexusOperationalModel, mountNexusTradeView, resolveDashboardView } from "./nexus_trade_view.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -198,10 +198,13 @@ async function selectBot(id) {
     nexusStore.setConnection("connecting");
     connectLive(id, token);
     try {
-      const snapshot = await nexusTradeApi.snapshot();
+      const snapshotApplied = await reconcileNexusTradeStore(nexusStore, async () => {
+        const snapshot = await nexusTradeApi.snapshot();
+        if (token !== socketToken) throw new Error("Seleção NexusTrade substituída.");
+        return snapshot;
+      });
       if (token !== socketToken) return;
-      nexusStore.hydrate(snapshot);
-      renderBots();
+      if (snapshotApplied) renderBots();
     } catch (error) { handleError(error); }
     return;
   }
@@ -232,10 +235,12 @@ async function connectLive(botId, token) {
       if (token !== socketToken) return;
       setConnection(true, "Tempo real"); activeSocket.send("ready");
       if (botId === NEXUS_BOT_ID) {
-        nexusStore.setConnection("live");
         try {
-          const snapshot = await nexusTradeApi.snapshot();
-          if (token === socketToken) nexusStore.hydrate(snapshot);
+          await reconcileNexusTradeStore(nexusStore, async () => {
+            const snapshot = await nexusTradeApi.snapshot();
+            if (token !== socketToken) throw new Error("Socket NexusTrade substituído.");
+            return snapshot;
+          });
         } catch { nexusStore.setConnection("stale"); }
       }
     };

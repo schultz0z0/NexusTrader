@@ -73,6 +73,9 @@ function championPosition(snapshot) {
 
 export function evaluatePromotionReadiness({ snapshot = {}, proposal = null, report = null } = {}) {
   const reasons = [];
+  if (snapshot.connection && snapshot.connection.status !== "live") {
+    reasons.push("A conexão precisa reconciliar um snapshot atual antes de liberar ações.");
+  }
   const expectedRevision = Number.isInteger(snapshot.snapshotVersion) && snapshot.snapshotVersion > 0
     ? snapshot.snapshotVersion : null;
   if (!expectedRevision) reasons.push("Revisão durável indisponível.");

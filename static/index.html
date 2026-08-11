@@ -180,10 +180,17 @@
         <article class="panel nexus-report-shell">
           <header class="panel-head nexus-report-head">
             <div><div class="eyebrow">FECHAMENTO 10H · BRASÍLIA</div><h2 id="nexus-reports-title">Relatórios diários e semanais</h2></div>
-            <div class="nexus-week-nav" aria-label="Calendário semanal">
-              <button type="button" class="secondary-button" data-nexus-action="previous-week" aria-label="Semana anterior">‹</button>
-              <strong id="nexus-report-week">SEMANA ATUAL</strong>
-              <button type="button" class="secondary-button" data-nexus-action="next-week" aria-label="Próxima semana">›</button>
+            <div class="nexus-report-tools">
+              <div class="nexus-week-nav" aria-label="Calendário semanal">
+                <button type="button" class="secondary-button" data-nexus-action="previous-week" aria-label="Semana anterior">‹</button>
+                <strong id="nexus-report-week">SEMANA ATUAL</strong>
+                <button type="button" class="secondary-button" data-nexus-action="next-week" aria-label="Próxima semana">›</button>
+              </div>
+              <div class="nexus-export-actions" aria-label="Exportar relatório selecionado">
+                <button id="nexus-export-zip" type="button" class="secondary-button" data-nexus-action="export-zip" disabled>CSV · ZIP</button>
+                <button id="nexus-export-xlsx" type="button" class="secondary-button" data-nexus-action="export-xlsx" disabled>EXCEL · XLSX</button>
+              </div>
+              <small id="nexus-export-status" role="status"></small>
             </div>
           </header>
           <div id="nexus-report-empty" class="nexus-empty-state"><strong>Nenhum fechamento disponível</strong><p>Os relatórios imutáveis aparecerão após o primeiro fechamento diário das 10h.</p></div>

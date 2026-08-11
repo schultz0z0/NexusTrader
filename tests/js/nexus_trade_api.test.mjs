@@ -87,9 +87,20 @@ test("report download preserves server filename mime and bytes", async () => {
     arrayBuffer: async () => bytes.buffer,
   }));
 
-  const artifact = await api.downloadReport("weekly-32", "zip");
+  const artifact = await api.downloadReport("weekly-32", "csv.zip");
 
   assert.equal(artifact.filename, "nexus-week-32.zip");
   assert.equal(artifact.mediaType, "application/zip");
   assert.deepEqual([...new Uint8Array(await artifact.blob.arrayBuffer())], [...bytes]);
+});
+
+test("empty export responses fail before a browser download can be created", async () => {
+  const api = createNexusTradeApi(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => "application/zip" },
+    arrayBuffer: async () => new ArrayBuffer(0),
+  }));
+
+  await assert.rejects(api.downloadReport("weekly-empty", "csv.zip"), /vazio/i);
 });

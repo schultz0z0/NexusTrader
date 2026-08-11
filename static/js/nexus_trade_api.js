@@ -86,7 +86,7 @@ export function createNexusTradeApi(fetchImpl = (...args) => globalThis.fetch(..
     rollback: (payload, humanKey) => governance(`${BASE}/rollback`, payload, humanKey),
     async downloadReport(reportId, formatName) {
       const format = String(formatName || "").toLowerCase();
-      if (!["zip", "xlsx"].includes(format)) throw new ApiError("Formato de exportação inválido", 422);
+      if (!["csv.zip", "xlsx"].includes(format)) throw new ApiError("Formato de exportação inválido", 422);
       const safeId = safeSegment(reportId, "Relatório");
       const response = await fetchImpl(`${BASE}/reports/${safeId}/exports/${format}`, {
         method: "GET",
@@ -95,6 +95,7 @@ export function createNexusTradeApi(fetchImpl = (...args) => globalThis.fetch(..
       if (!response.ok) return parseFailure(response);
       const mediaType = response.headers?.get?.("content-type") || "application/octet-stream";
       const buffer = await response.arrayBuffer();
+      if (!buffer?.byteLength) throw new ApiError("O arquivo de exportação veio vazio", 502);
       return {
         filename: filenameFrom(response, `nexustrade-${reportId}.${format}`),
         mediaType,

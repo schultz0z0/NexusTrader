@@ -25,7 +25,7 @@ IndexedDB, URL, logs, WebSocket state or exports.
 | Versions/campaigns/reports/proposals/exports | `GET /api/v1/nexus-trade/{collection}` |
 | Weekly lookup | `GET /api/v1/nexus-trade/reports/weekly/{YYYY-MM-DD}` |
 | Report detail | `GET /api/v1/nexus-trade/reports/{report_id}` |
-| ZIP/XLSX | `GET /api/v1/nexus-trade/reports/{report_id}/exports/{zip|xlsx}` |
+| CSV ZIP/XLSX | `GET /api/v1/nexus-trade/reports/{report_id}/exports/{csv.zip|xlsx}` |
 | Approve | `POST /api/v1/nexus-trade/proposals/{proposal_id}/approve` |
 | Reanalyze | `POST /api/v1/nexus-trade/proposals/{proposal_id}/reanalyze` |
 | Rollback | `POST /api/v1/nexus-trade/rollback` |

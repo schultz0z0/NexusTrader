@@ -103,9 +103,10 @@ export function createNexusTradeStore(initial = {}) {
   const listeners = new Set();
   const seenEventIds = new Set();
 
-  const notify = () => {
+  const notify = (change = { kind: "state", type: "state" }) => {
     const snapshot = clone(state);
-    listeners.forEach((listener) => listener(snapshot));
+    const detail = clone(change);
+    listeners.forEach((listener) => listener(snapshot, detail));
   };
 
   const hydrate = (snapshot, emit = true) => {
@@ -130,7 +131,7 @@ export function createNexusTradeStore(initial = {}) {
     for (const item of state.auditEvents) {
       if (typeof item?.event_id === "string") seenEventIds.add(item.event_id);
     }
-    if (emit) notify();
+    if (emit) notify({ kind: "snapshot", type: "snapshot", snapshotVersion: state.snapshotVersion });
     return true;
   };
 
@@ -178,14 +179,14 @@ export function createNexusTradeStore(initial = {}) {
     next.auditEvents = [...state.auditEvents, clone(event)].slice(-200);
     next.connection = { status: "live", lastUpdated: Date.now() };
     state = next;
-    notify();
+    notify({ kind: "event", type: event.type, eventId: event.event_id, snapshotVersion: event.snapshot_version });
     return true;
   };
 
   const setConnection = (status) => {
     if (!["idle", "connecting", "live", "stale", "offline"].includes(status)) return false;
     state = { ...state, connection: { ...state.connection, status } };
-    notify();
+    notify({ kind: "connection", type: status });
     return true;
   };
 
@@ -201,6 +202,21 @@ export function createNexusTradeStore(initial = {}) {
       return () => listeners.delete(listener);
     },
   };
+}
+
+export async function reconcileNexusTradeStore(store, snapshotLoader) {
+  if (!store?.hydrate || !store?.setConnection || typeof snapshotLoader !== "function") {
+    throw new Error("Reconciliação NexusTrade inválida");
+  }
+  store.setConnection("connecting");
+  try {
+    const snapshot = await snapshotLoader();
+    if (!store.hydrate(snapshot)) throw new Error("Snapshot de reconnect stale ou inválido");
+    return true;
+  } catch (error) {
+    store.setConnection("stale");
+    throw error;
+  }
 }
 
 export { NEXUS_BOT_ID };

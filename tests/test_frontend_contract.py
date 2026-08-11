@@ -128,6 +128,14 @@ class FrontendContractTests(unittest.TestCase):
             styles = stream.read()
         self.assertIn(".nexus-reinforced-confirmation[hidden]{display:none!important}", styles)
 
+    def test_reports_offer_historical_csv_zip_and_excel_exports(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html = stream.read()
+        self.assertIn('data-nexus-action="export-zip"', html)
+        self.assertIn('data-nexus-action="export-xlsx"', html)
+        self.assertIn('id="nexus-export-status"', html)
+
     def test_account_catalog_and_dynamic_account_type_are_wired(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
