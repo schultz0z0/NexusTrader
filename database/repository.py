@@ -1,5 +1,6 @@
 import aiosqlite
 import json
+import math
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -9,12 +10,19 @@ from config.settings import settings
 from database.models import DatabaseModels
 from database.nexus_models import NexusModels
 from nexus_trade.repository import NexusTradeRepository
+from nexus_trade.constants import (
+    NEXUS_PROVENANCE_HASH,
+    NEXUS_SYMBOL,
+    NEXUS_TIMEFRAME_SECONDS,
+    NEXUS_TRADE_BOT_ID,
+)
 from risk.state import advance_risk_state, initial_risk_state
 from utils.logger import setup_logger
 
 logger = setup_logger("Database")
 
 _NEXUS_LANE_MATERIALIZATION_KEY = "nexus_lane_heads_v1"
+_NEXUS_DECISION_PROVENANCE_KEY = "nexus_decision_provenance_v1"
 
 
 class ActiveOrderIntentError(RuntimeError):
@@ -44,6 +52,7 @@ class DatabaseRepository:
             await self._migrate_nexus_runtime(db)
             await self._migrate_nexus_reports(db)
             await db.executescript(NexusModels.create_tables_sql())
+            await self._migrate_nexus_decision_provenance(db)
             await self._migrate_nexus_governance(db)
             await db.executescript(NexusModels.create_journal_guards_sql())
             await db.execute("BEGIN IMMEDIATE")
@@ -65,6 +74,96 @@ class DatabaseRepository:
                 await db.rollback()
                 raise
         logger.info(f"Banco de dados SQLite '{self.db_path}' pronto.")
+
+    async def _migrate_nexus_decision_provenance(self, db) -> None:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT value FROM nexus_repository_meta WHERE key=?",
+            (_NEXUS_DECISION_PROVENANCE_KEY,),
+        ) as cursor:
+            if await cursor.fetchone() is not None:
+                return
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute(
+                "SELECT id,lane,nexus_version_id,campaign_id,symbol,payload "
+                "FROM nexus_decisions AS decision "
+                "WHERE EXISTS (SELECT 1 FROM trades AS trade "
+                "WHERE trade.bot_id=? AND trade.status='closed' "
+                "AND trade.decision_id=decision.id) ORDER BY rowid",
+                (NEXUS_TRADE_BOT_ID,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("legacy Nexus decision payload is invalid") from exc
+                decision = payload.get("decision")
+                if not isinstance(decision, dict):
+                    continue
+                campaign_id = row["campaign_id"]
+                if campaign_id is None:
+                    async with db.execute(
+                        "SELECT id FROM nexus_campaigns "
+                        "WHERE lane=? AND nexus_version_id=? AND status='ACTIVE'",
+                        (row["lane"], row["nexus_version_id"]),
+                    ) as campaign_cursor:
+                        campaign_rows = await campaign_cursor.fetchall()
+                    if len(campaign_rows) != 1:
+                        raise ValueError(
+                            "legacy Nexus decision campaign is not uniquely inferable"
+                        )
+                    campaign_id = campaign_rows[0]["id"]
+                exact = {
+                    "lane": row["lane"],
+                    "nexus_version_id": row["nexus_version_id"],
+                    "campaign_id": campaign_id,
+                }
+                if (
+                    row["symbol"] != NEXUS_SYMBOL
+                    or exact["lane"] not in {"champion_baseline", "challenger_trial"}
+                    or any(type(value) is not str or not value for value in exact.values())
+                    or decision.get("id", decision.get("decision_id")) != row["id"]
+                    or decision.get("lane") != row["lane"]
+                ):
+                    raise ValueError("legacy Nexus decision identity is not migratable")
+                for key, value in exact.items():
+                    existing = payload.get(key)
+                    if existing is not None and existing != value:
+                        raise ValueError("legacy Nexus decision provenance is inconsistent")
+                    payload[key] = value
+                for envelope in (payload, decision):
+                    existing = envelope.get("provenance_hash")
+                    if existing is not None and existing != NEXUS_PROVENANCE_HASH:
+                        raise ValueError("legacy Nexus decision provenance hash is inconsistent")
+                    envelope["provenance_hash"] = NEXUS_PROVENANCE_HASH
+                await db.execute(
+                    "UPDATE nexus_decisions SET campaign_id=?,payload=? WHERE id=?",
+                    (
+                        campaign_id,
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        row["id"],
+                    ),
+                )
+                await db.execute(
+                    "UPDATE trades SET campaign_id=? "
+                    "WHERE bot_id=? AND decision_id=? AND campaign_id IS NULL",
+                    (campaign_id, NEXUS_TRADE_BOT_ID, row["id"]),
+                )
+                await db.execute(
+                    "UPDATE order_intents SET campaign_id=? "
+                    "WHERE bot_id=? AND decision_id=? AND campaign_id IS NULL",
+                    (campaign_id, NEXUS_TRADE_BOT_ID, row["id"]),
+                )
+            await db.execute(
+                "INSERT INTO nexus_repository_meta(key,value) VALUES (?,?)",
+                (_NEXUS_DECISION_PROVENANCE_KEY, "complete"),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def _ensure_nexus_lane_materialization(self, db) -> None:
         """One-time linear upgrade from the append-only decision journal."""
@@ -1114,10 +1213,17 @@ class DatabaseRepository:
         state: dict,
         owner: dict = None,
     ) -> None:
+        provenance_hash = decision.get("provenance_hash", NEXUS_PROVENANCE_HASH)
+        if provenance_hash != NEXUS_PROVENANCE_HASH:
+            raise ValueError("NexusTrade decision provenance is invalid")
         payload = {
             "decision": dict(decision),
             "state": dict(state),
             "owner": self._normalize_nexus_owner(owner),
+            "lane": decision["lane"],
+            "nexus_version_id": nexus_version_id,
+            "campaign_id": campaign_id,
+            "provenance_hash": provenance_hash,
         }
         decision_id = decision.get("id") or decision["decision_id"]
         owner_decision_id = payload["state"].get("owner_decision_id")
@@ -1166,6 +1272,209 @@ class DatabaseRepository:
             except BaseException:
                 await db.rollback()
                 raise
+
+    async def record_nexus_cycle_evidence(
+        self,
+        *,
+        candle: dict,
+        indicators,
+        version_ids: dict,
+        provenance_hash: str,
+    ) -> None:
+        """Persist one closed candle and its causal features after dispatch."""
+        if provenance_hash != NEXUS_PROVENANCE_HASH:
+            raise ValueError("NexusTrade feature provenance is invalid")
+        if not isinstance(candle, dict) or not isinstance(version_ids, dict):
+            raise TypeError("candle and version_ids must be mappings")
+        open_epoch = candle.get("open_epoch", candle.get("time"))
+        close_epoch = candle.get("close_epoch")
+        if (
+            isinstance(open_epoch, bool)
+            or type(open_epoch) is not int
+            or open_epoch <= 0
+            or open_epoch % NEXUS_TIMEFRAME_SECONDS
+            or type(close_epoch) is not int
+            or close_epoch != open_epoch + NEXUS_TIMEFRAME_SECONDS
+            or getattr(indicators, "epoch", None) != open_epoch
+        ):
+            raise ValueError("NexusTrade cycle evidence is not a closed causal M1")
+        ohlc = []
+        for name in ("open", "high", "low", "close"):
+            value = candle.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("NexusTrade candle values must be finite")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("NexusTrade candle values must be finite")
+            ohlc.append(value)
+        raw_features = {"adx": getattr(indicators, "adx", None)}
+        raw_features.update(dict(getattr(indicators, "values", {}) or {}))
+        features = {}
+        for name, value in raw_features.items():
+            if type(name) is not str or not name:
+                raise ValueError("NexusTrade feature name is invalid")
+            if value is None:
+                features[name] = None
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("NexusTrade feature values must be finite or null")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("NexusTrade feature values must be finite or null")
+            features[name] = value
+        lanes = {"champion_baseline", "challenger_trial"}
+        if not version_ids or not set(version_ids).issubset(lanes):
+            raise ValueError("NexusTrade feature versions contain an invalid lane")
+        if any(type(value) is not str or not value for value in version_ids.values()):
+            raise ValueError("NexusTrade feature version identity is invalid")
+        encoded = json.dumps(
+            {
+                "schema_version": 1,
+                "provenance_hash": provenance_hash,
+                "features": features,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        async with self._connection() as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO nexus_candles
+                        (symbol,open_epoch,close_epoch,open,high,low,close)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(symbol,open_epoch) DO NOTHING
+                    """,
+                    (NEXUS_SYMBOL, open_epoch, close_epoch, *ohlc),
+                )
+                async with db.execute(
+                    "SELECT close_epoch,open,high,low,close FROM nexus_candles "
+                    "WHERE symbol=? AND open_epoch=?",
+                    (NEXUS_SYMBOL, open_epoch),
+                ) as cursor:
+                    stored_candle = await cursor.fetchone()
+                if stored_candle is None or tuple(stored_candle) != (
+                    close_epoch, *ohlc,
+                ):
+                    raise ValueError("NexusTrade candle evidence conflicts with durable data")
+                for version_id in version_ids.values():
+                    await db.execute(
+                        """
+                        INSERT INTO nexus_features
+                            (symbol,open_epoch,nexus_version_id,values_json)
+                        VALUES (?,?,?,?)
+                        ON CONFLICT(symbol,open_epoch,nexus_version_id) DO NOTHING
+                        """,
+                        (NEXUS_SYMBOL, open_epoch, version_id, encoded),
+                    )
+                    async with db.execute(
+                        "SELECT values_json FROM nexus_features "
+                        "WHERE symbol=? AND open_epoch=? AND nexus_version_id=?",
+                        (NEXUS_SYMBOL, open_epoch, version_id),
+                    ) as cursor:
+                        stored_feature = await cursor.fetchone()
+                    if stored_feature is None or stored_feature[0] != encoded:
+                        raise ValueError("NexusTrade feature evidence conflicts with durable data")
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def list_nexus_learning_rows(
+        self,
+        *,
+        campaign_id: str,
+        cutoff_epoch: int,
+        feature_names: tuple[str, ...],
+    ) -> list[dict]:
+        if type(campaign_id) is not str or not campaign_id:
+            raise ValueError("campaign_id is required")
+        if isinstance(cutoff_epoch, bool) or type(cutoff_epoch) is not int or cutoff_epoch <= 0:
+            raise ValueError("cutoff_epoch must be a positive integer")
+        if (
+            type(feature_names) is not tuple
+            or not feature_names
+            or any(type(name) is not str or not name for name in feature_names)
+            or len(feature_names) != len(set(feature_names))
+        ):
+            raise ValueError("feature_names must be a unique non-empty tuple")
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT t.contract_id,t.contract_type,t.stake,t.payout,t.profit,
+                       t.result,t.status,t.purchase_time,t.expiry_time,
+                       t.nexus_version_id,t.campaign_id,d.signal_epoch,d.payload,
+                       f.values_json
+                FROM trades AS t
+                JOIN nexus_decisions AS d ON d.id=t.decision_id
+                JOIN nexus_features AS f
+                  ON f.symbol=t.symbol AND f.open_epoch=d.signal_epoch
+                 AND f.nexus_version_id=t.nexus_version_id
+                WHERE t.bot_id=? AND t.lane='challenger_trial'
+                  AND t.campaign_id=? AND t.status='closed'
+                  AND t.expiry_time IS NOT NULL AND t.expiry_time < ?
+                ORDER BY d.signal_epoch,t.contract_id
+                """,
+                (NEXUS_TRADE_BOT_ID, campaign_id, cutoff_epoch),
+            ) as cursor:
+                stored = await cursor.fetchall()
+        result = []
+        for row in stored:
+            try:
+                decision_payload = json.loads(row["payload"])
+                envelope = json.loads(row["values_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("NexusTrade learning evidence is invalid JSON") from exc
+            provenance = envelope.get("provenance_hash")
+            if (
+                provenance != NEXUS_PROVENANCE_HASH
+                or decision_payload.get("provenance_hash") != provenance
+                or decision_payload.get("lane") != "challenger_trial"
+                or decision_payload.get("campaign_id") != row["campaign_id"]
+                or decision_payload.get("nexus_version_id") != row["nexus_version_id"]
+            ):
+                raise ValueError("NexusTrade learning provenance is inconsistent")
+            available = envelope.get("features")
+            if not isinstance(available, dict):
+                raise ValueError("NexusTrade feature evidence is malformed")
+            selected = {}
+            incomplete = False
+            for name in feature_names:
+                value = available.get(name)
+                if value is None:
+                    incomplete = True
+                    break
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("NexusTrade stored feature is invalid")
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError("NexusTrade stored feature is invalid")
+                selected[name] = value
+            if incomplete:
+                continue
+            result.append({
+                "contract_id": int(row["contract_id"]),
+                "symbol": NEXUS_SYMBOL,
+                "timeframe_seconds": NEXUS_TIMEFRAME_SECONDS,
+                "feature_epoch": int(row["signal_epoch"]),
+                "entry_epoch": int(row["purchase_time"]),
+                "label_epoch": int(row["expiry_time"]),
+                "settled": True,
+                "status": "closed",
+                "contract_type": row["contract_type"],
+                "provenance_hash": provenance,
+                "features": selected,
+                "label": 1 if row["result"] == "won" else 0,
+                "stake": float(row["stake"]),
+                "payout": float(row["payout"]),
+                "profit": float(row["profit"]),
+                "result": row["result"],
+            })
+        return result
 
     async def save_nexus_lane_state(
         self, lane: str, state: dict, owner: dict = None,

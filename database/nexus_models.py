@@ -206,6 +206,23 @@ class NexusModels:
             UNIQUE(job_type, window_end_utc)
         );
 
+        CREATE TABLE IF NOT EXISTS nexus_learning_jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL CHECK (job_type IN ('daily_learning', 'weekly_rotation')),
+            campaign_id TEXT NOT NULL,
+            window_start_utc TEXT NOT NULL,
+            window_end_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+            owner_id TEXT NOT NULL,
+            claimed_at_utc TEXT NOT NULL,
+            result_json TEXT,
+            error_code TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_type, campaign_id, window_end_utc),
+            FOREIGN KEY (campaign_id) REFERENCES nexus_campaigns(id)
+        );
+
         CREATE TABLE IF NOT EXISTS nexus_proposals (
             id TEXT PRIMARY KEY,
             campaign_id TEXT,

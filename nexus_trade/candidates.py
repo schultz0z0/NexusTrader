@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 
@@ -17,6 +18,45 @@ from nexus_trade.artifacts import (
 
 class CandidateRegistryIntegrityError(ValueError):
     """Raised when restart discovers an unsafe legacy candidate registry."""
+
+
+BASELINE_CANDIDATE_ID = "candidate-nexus-trial-v1"
+
+
+def deterministic_baseline_candidate(version_id: str, version_hash: str) -> dict:
+    if type(version_id) is not str or not version_id:
+        raise ValueError("baseline version_id is required")
+    if type(version_hash) is not str or len(version_hash) != 64:
+        raise ValueError("baseline version_hash must be a SHA-256 digest")
+    metadata = {
+        "schema_version": 1,
+        "artifact_type": "nexus_trade_deterministic_baseline",
+        "version_id": version_id,
+        "version_hash": version_hash,
+        "contract": {
+            "symbol": "R_100",
+            "timeframe_seconds": 60,
+            "duration_seconds": 58,
+        },
+        "indicator_configuration": {
+            "bollinger": {"period": 20, "std_dev": 2.0, "ma": "SMA"},
+            "adx": {"period": 14, "max_entry": 22.0},
+        },
+        "direction_source": "bollinger_v1_deterministic",
+        "gate": "deterministic_rules_only",
+    }
+    encoded = canonical_json(metadata)
+    artifact_hash = hashlib.sha256(
+        b"nexus-deterministic-baseline-v1\0" + encoded.encode("utf-8")
+    ).hexdigest()
+    return {
+        "id": BASELINE_CANDIDATE_ID,
+        "nexus_version_id": version_id,
+        "artifact_hash": artifact_hash,
+        "metadata_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "metadata": metadata,
+        "encoded": encoded,
+    }
 
 
 class CandidateRegistry:
@@ -110,21 +150,24 @@ class CandidateRegistry:
                 raise CandidateRegistryIntegrityError(
                     "candidate registry contains an invalid legacy status"
                 )
-            try:
-                artifact = CandidateArtifact.from_json(row["metadata"])
-            except (ArtifactIntegrityError, TypeError, ValueError) as exc:
-                raise CandidateRegistryIntegrityError(
-                    "candidate registry contains corrupt artifact metadata"
-                ) from exc
-            expected_id = f"candidate-{artifact.artifact_hash[:24]}"
-            if (
-                row["id"] != expected_id
-                or row["artifact_hash"] != artifact.artifact_hash
-                or row["nexus_version_id"] is not None
-            ):
-                raise CandidateRegistryIntegrityError(
-                    "candidate registry identity does not match its artifact"
-                )
+            if row["id"] == BASELINE_CANDIDATE_ID:
+                self._decode_baseline(row)
+            else:
+                try:
+                    artifact = CandidateArtifact.from_json(row["metadata"])
+                except (ArtifactIntegrityError, TypeError, ValueError) as exc:
+                    raise CandidateRegistryIntegrityError(
+                        "candidate registry contains corrupt artifact metadata"
+                    ) from exc
+                expected_id = f"candidate-{artifact.artifact_hash[:24]}"
+                if (
+                    row["id"] != expected_id
+                    or row["artifact_hash"] != artifact.artifact_hash
+                    or row["nexus_version_id"] is not None
+                ):
+                    raise CandidateRegistryIntegrityError(
+                        "candidate registry identity does not match its artifact"
+                    )
 
     def list_candidates(self) -> list[dict]:
         with self._connection() as db:
@@ -135,6 +178,8 @@ class CandidateRegistry:
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict:
+        if row["id"] == BASELINE_CANDIDATE_ID:
+            return CandidateRegistry._decode_baseline(row)
         artifact = CandidateArtifact.from_json(row["metadata"])
         return {
             "id": row["id"],
@@ -146,5 +191,39 @@ class CandidateRegistry:
             "created_at": row["created_at"],
         }
 
+    @staticmethod
+    def _decode_baseline(row: sqlite3.Row) -> dict:
+        try:
+            metadata = json.loads(row["metadata"])
+            expected = deterministic_baseline_candidate(
+                row["nexus_version_id"], metadata["version_hash"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CandidateRegistryIntegrityError(
+                "candidate registry contains corrupt deterministic baseline"
+            ) from exc
+        if (
+            row["id"] != expected["id"]
+            or row["artifact_hash"] != expected["artifact_hash"]
+            or row["metadata"] != expected["encoded"]
+        ):
+            raise CandidateRegistryIntegrityError(
+                "deterministic baseline identity does not match its content"
+            )
+        return {
+            "id": row["id"],
+            "nexus_version_id": row["nexus_version_id"],
+            "artifact_hash": row["artifact_hash"],
+            "metadata_hash": expected["metadata_hash"],
+            "status": row["status"],
+            "metadata": metadata,
+            "created_at": row["created_at"],
+        }
 
-__all__ = ["CandidateRegistry", "CandidateRegistryIntegrityError"]
+
+__all__ = [
+    "BASELINE_CANDIDATE_ID",
+    "CandidateRegistry",
+    "CandidateRegistryIntegrityError",
+    "deterministic_baseline_candidate",
+]

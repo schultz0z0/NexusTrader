@@ -351,6 +351,41 @@ class BotSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ContractSettlementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expected_expiry_reconciles_even_without_initial_stream_payload(self):
+        connection = FakeConnection()
+        connection.contract_responses.append({
+            "proposal_open_contract": {
+                "contract_id": 43,
+                "contract_type": "CALL",
+                "currency": "USD",
+                "is_sold": 1,
+                "is_expired": 1,
+                "date_expiry": 1,
+                "status": "lost",
+                "profit": "-0.35",
+                "payout": "0",
+            }
+        })
+        settlements = []
+        monitor = ContractMonitor(
+            connection,
+            reconcile_interval_seconds=30,
+            expiry_grace_seconds=0,
+        )
+
+        await monitor.monitor_contract(
+            43,
+            lambda contract: settlements.append(contract["contract_id"]) or _done(),
+            expected_expiry_epoch=1,
+        )
+
+        await asyncio.wait_for(_wait_until(lambda: settlements == [43]), timeout=0.5)
+        self.assertIn(
+            {"proposal_open_contract": 1, "contract_id": 43},
+            connection.sent,
+        )
+        await monitor.close()
+
     async def test_failed_settlement_callback_is_retried_on_next_sold_update(self):
         connection = FakeConnection()
         monitor = ContractMonitor(connection)

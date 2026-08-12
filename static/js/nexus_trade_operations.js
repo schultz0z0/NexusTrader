@@ -9,6 +9,33 @@ function closeOf(point) {
   return finite(point?.close ?? point?.value);
 }
 
+export function nexusPositionPresentation(position = {}, nowEpoch = Date.now() / 1000) {
+  const stake = finite(position.stake ?? position.buy_price) ?? 0;
+  const entrySpot = finite(position.entry_spot);
+  const currentSpot = finite(position.current_spot ?? position.exit_spot);
+  const profit = finite(position.profit) ?? 0;
+  const expiry = finite(position.date_expiry ?? position.expiry_time);
+  const now = finite(nowEpoch) ?? 0;
+  const secondsRemaining = expiry === null ? null : Math.max(0, Math.ceil(expiry - now));
+  const settlementPending = expiry !== null && secondsRemaining === 0;
+  let countdown = "Sincronizando";
+  if (settlementPending) countdown = "Aguardando liquidação";
+  else if (secondsRemaining !== null) {
+    const minutes = Math.floor(secondsRemaining / 60);
+    const seconds = secondsRemaining % 60;
+    countdown = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return {
+    stake,
+    entrySpot,
+    currentSpot,
+    profit,
+    secondsRemaining,
+    countdown,
+    settlementPending,
+  };
+}
+
 export function calculateBollingerHistory(points = [], period = 20, deviation = 2) {
   const size = Number(period);
   const multiplier = Number(deviation);

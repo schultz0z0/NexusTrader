@@ -16,6 +16,7 @@ from nexus_trade.clock import CausalCycleResult, EntryClock
 from nexus_trade.constants import (
     NEXUS_DEMO_STAKE,
     NEXUS_DURATION_SECONDS,
+    NEXUS_PROVENANCE_HASH,
     NEXUS_SYMBOL,
     NEXUS_TIMEFRAME_SECONDS,
     NEXUS_TRADE_BOT_ID,
@@ -34,6 +35,10 @@ from nexus_trade.repository import NexusTradeRepository
 from nexus_trade.strategy import NexusTradeStrategy
 from strategies.base import MoneyManager
 from trading.safety import ensure_account_allowed
+from utils.logger import setup_logger
+
+
+logger = setup_logger("NexusTradeRuntime")
 
 
 class NexusTradeRuntime:
@@ -98,6 +103,7 @@ class NexusTradeRuntime:
         self._champion_enabled = False
         self._pending_runtime_snapshot = None
         self._lane_owners = {lane: None for lane in Lane}
+        self._restored_expected_expiries = {lane: None for lane in Lane}
         # Lock order is strict: runtime lane -> dispatcher internals (lane/buy)
         # -> repository transaction. Repository and dispatcher internals never
         # call back into the runtime while holding their locks, avoiding inversion.
@@ -311,7 +317,7 @@ class NexusTradeRuntime:
         for field in (
             "stake", "buy_price", "entry_spot", "current_spot", "exit_spot", "profit",
         ):
-            if field in values:
+            if values.get(field) is not None:
                 payload[field] = self._optional_position_number(values[field])
         if values.get("date_expiry") is not None:
             try:
@@ -707,14 +713,16 @@ class NexusTradeRuntime:
             for item in lanes
         }
         active_campaigns = snapshot.get("active_campaigns") or []
-        next_trial_campaign = next(
-            (
-                item.get("id")
-                for item in active_campaigns
-                if item.get("lane") == Lane.TRIAL.value
-            ),
-            None,
-        )
+        next_campaigns = {
+            lane: next(
+                (
+                    item.get("id") for item in active_campaigns
+                    if item.get("lane") == lane.value
+                ),
+                None,
+            )
+            for lane in Lane
+        }
         if self._shared_demo_dispatcher is None:
             raise ValueError("the shared DEMO dispatcher is not configured")
         shared_identity = self._dispatcher_identity(self._shared_demo_dispatcher)
@@ -837,7 +845,7 @@ class NexusTradeRuntime:
         self.dispatchers[Lane.CHAMPION] = desired_dispatcher
         self._champion_enabled = desired_enabled
         self._versions.update(next_versions)
-        self._campaigns[Lane.TRIAL] = next_trial_campaign
+        self._campaigns.update(next_campaigns)
         if not desired_enabled:
             if self._shared_demo_monitor is not None:
                 self.monitors[Lane.CHAMPION] = self._shared_demo_monitor
@@ -1074,7 +1082,29 @@ class NexusTradeRuntime:
                     owner_decision_id,
                     contract_id,
                     entry_delay_ms=entry_delay_ms,
+                    expected_expiry_epoch=(
+                        decision.target_epoch + NEXUS_DURATION_SECONDS
+                    ),
                 )
+        await self._record_cycle_evidence(cycle)
+
+    async def _record_cycle_evidence(self, cycle: CausalCycleResult) -> None:
+        recorder = getattr(self.repository, "record_nexus_cycle_evidence", None)
+        if not callable(recorder):
+            return
+        try:
+            await recorder(
+                candle=cycle.closed_candle,
+                indicators=cycle.indicators,
+                version_ids={lane.value: version_id for lane, version_id in self._versions.items()},
+                provenance_hash=NEXUS_PROVENANCE_HASH,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Falha ao persistir evidência causal do NexusTrade após o despacho"
+            )
 
     async def _process_lane_intent(self, lane, decision, intent):
         """Mutate and persist one lane while its runtime lock is held."""
@@ -1177,6 +1207,7 @@ class NexusTradeRuntime:
             return
         payload = decision.to_dict()
         payload["id"] = payload["decision_id"]
+        payload["provenance_hash"] = NEXUS_PROVENANCE_HASH
         if execution_blocked_reason is not None:
             payload["execution_blocked_reason"] = execution_blocked_reason
         lane = Lane(decision.lane)
@@ -1215,6 +1246,7 @@ class NexusTradeRuntime:
         contract_id: int,
         *,
         entry_delay_ms=None,
+        expected_expiry_epoch=None,
     ) -> None:
         monitor = self.monitors.get(lane)
         if monitor is None:
@@ -1262,6 +1294,7 @@ class NexusTradeRuntime:
             contract_id,
             on_settled,
             on_update_callback=on_update,
+            expected_expiry_epoch=expected_expiry_epoch,
         )
 
     async def settle_contract(
@@ -1400,6 +1433,7 @@ class NexusTradeRuntime:
         dispatcher = self.dispatchers[lane]
         dispatcher.release_position(lane, contract_id)
         self._lane_owners[lane] = None
+        self._restored_expected_expiries[lane] = None
         if not callable(atomic_settler):
             await self._save_lane_state(lane)
         closed_epoch = int(
@@ -1497,6 +1531,15 @@ class NexusTradeRuntime:
                     strategy.mark_position_active(
                         state.owner_decision_id, contract_id,
                     )
+                    target_epoch = entry_intent.get("target_epoch")
+                    if (
+                        not isinstance(target_epoch, bool)
+                        and isinstance(target_epoch, (int, float))
+                        and math.isfinite(float(target_epoch))
+                    ):
+                        self._restored_expected_expiries[lane] = (
+                            float(target_epoch) + NEXUS_DURATION_SECONDS
+                        )
                 else:
                     strategy.mark_position_quarantined(
                         state.owner_decision_id, correlation_id,
@@ -1552,6 +1595,7 @@ class NexusTradeRuntime:
             if state.position_status == "ACTIVE":
                 await self._start_monitor(
                     lane, state.owner_decision_id, state.contract_id,
+                    expected_expiry_epoch=self._restored_expected_expiries[lane],
                 )
 
     async def _refresh_runtime_snapshot(self) -> None:

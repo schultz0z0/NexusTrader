@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildNexusLiveModel,
   calculateBollingerHistory,
+  nexusPositionPresentation,
 } from "../../static/js/nexus_trade_operations.js";
 
 test("Bollinger history is causal, warmup-aware and uses the configured sample deviation", () => {
@@ -21,6 +22,37 @@ test("Bollinger history is causal, warmup-aware and uses the configured sample d
   assert.equal(bands.middle[0].value, 10.5);
   assert.ok(Math.abs(bands.upper[0].value - 22.332159566199232) < 1e-12);
   assert.ok(Math.abs(bands.lower[0].value - -1.3321595661992323) < 1e-12);
+});
+
+test("position presentation keeps live financial details and an honest expiry countdown", () => {
+  const open = nexusPositionPresentation({
+    stake: 0.35,
+    buy_price: 0.35,
+    entry_spot: 101.25,
+    current_spot: 102.5,
+    profit: 0.12,
+    date_expiry: 1_058,
+  }, 1_000);
+  assert.deepEqual(open, {
+    stake: 0.35,
+    entrySpot: 101.25,
+    currentSpot: 102.5,
+    profit: 0.12,
+    secondsRemaining: 58,
+    countdown: "00:58",
+    settlementPending: false,
+  });
+
+  const pending = nexusPositionPresentation({
+    buy_price: 0.35,
+    entry_spot: 101.25,
+    current_spot: 101.1,
+    profit: -0.35,
+    date_expiry: 999,
+  }, 1_000);
+  assert.equal(pending.countdown, "Aguardando liquidação");
+  assert.equal(pending.settlementPending, true);
+  assert.equal(pending.stake, 0.35);
 });
 
 test("live model filters lanes and exposes ADX, decisions, trades and active positions", () => {

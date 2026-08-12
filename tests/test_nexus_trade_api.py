@@ -59,6 +59,13 @@ class NexusTradeApiTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["lanes"][0]["version"]["status"], "CHAMPION")
         self.assertTrue(snapshot["active_campaigns"])
+        self.assertEqual(
+            set(snapshot["learning"]),
+            {"jobs", "attempts", "candidates"},
+        )
+        self.assertEqual(snapshot["learning"]["jobs"], [])
+        self.assertEqual(snapshot["learning"]["attempts"], [])
+        self.assertEqual(snapshot["learning"]["candidates"][0]["status"], "TRIAL")
         self.assertEqual(snapshot["decisions"], [])
         self.assertEqual(snapshot["trades"], [])
 
@@ -408,6 +415,7 @@ class NexusLiveStoreTests(unittest.TestCase):
             "nexus.trial_changed",
             "nexus.proposal",
             "nexus.version_changed",
+            "nexus.learning",
         )
 
         for revision, event_type in enumerate(event_types, start=1):
@@ -464,6 +472,7 @@ class NexusLiveStoreTests(unittest.TestCase):
             "nexus.trial_changed",
             "nexus.proposal",
             "nexus.version_changed",
+            "nexus.learning",
         ):
             with self.subTest(event_type=event_type):
                 self.assertTrue(is_critical_event({"type": event_type}))

@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 
 from config.settings import settings
@@ -42,6 +43,7 @@ class ContractMonitor:
         contract_id: int,
         on_settled_callback,
         on_update_callback=None,
+        expected_expiry_epoch=None,
     ) -> None:
         if self._closed:
             return
@@ -55,6 +57,16 @@ class ContractMonitor:
             "contract_id": contract_id,
         }
         self._expiry_events.setdefault(contract_id, asyncio.Event())
+        if expected_expiry_epoch is not None:
+            if (
+                isinstance(expected_expiry_epoch, bool)
+                or not isinstance(expected_expiry_epoch, (int, float))
+                or not math.isfinite(float(expected_expiry_epoch))
+                or float(expected_expiry_epoch) <= 0
+            ):
+                raise ValueError("expected contract expiry must be a positive epoch")
+            self._expiry_times[contract_id] = float(expected_expiry_epoch)
+            self._expiry_events[contract_id].set()
         self._subscription_keys.add(subscription_key)
 
         async def on_update(data):

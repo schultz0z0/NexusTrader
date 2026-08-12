@@ -11,6 +11,7 @@ from nexus_trade.artifacts import (
     CandidateArtifact,
     canonical_json,
 )
+from nexus_trade.candidates import deterministic_baseline_candidate
 from nexus_trade.constants import (
     NEXUS_DEMO_STAKE,
     NEXUS_DURATION_SECONDS,
@@ -142,6 +143,8 @@ class NexusTradeRepository:
                 (trial_id, VersionStatus.TRIAL.value, trial_hash, trial_snapshot),
             )
 
+        await cls._ensure_trial_baseline_candidate(db, trial_id, trial_hash)
+
         if fresh:
             await db.execute(
                 "INSERT INTO nexus_runtime "
@@ -172,6 +175,46 @@ class NexusTradeRepository:
                 trial_v1_was_missing=trial_v1_was_missing,
             )
         return await cls._snapshot_from_connection(db)
+
+    @staticmethod
+    async def _ensure_trial_baseline_candidate(
+        db: aiosqlite.Connection,
+        trial_version_id: str,
+        trial_version_hash: str,
+    ) -> None:
+        baseline = deterministic_baseline_candidate(
+            trial_version_id, trial_version_hash,
+        )
+        async with db.execute(
+            "SELECT * FROM nexus_candidates ORDER BY created_at,id"
+        ) as cursor:
+            candidates = await cursor.fetchall()
+        if not candidates:
+            await db.execute(
+                "INSERT INTO nexus_candidates "
+                "(id,nexus_version_id,artifact_hash,status,metadata) "
+                "VALUES (?,?,?,'TRIAL',?)",
+                (
+                    baseline["id"], baseline["nexus_version_id"],
+                    baseline["artifact_hash"], baseline["encoded"],
+                ),
+            )
+            return
+        matches = [row for row in candidates if row["id"] == baseline["id"]]
+        if len(matches) != 1:
+            raise NexusTradeSingletonError(
+                "NexusTrade deterministic Trial candidate identity is missing or ambiguous"
+            )
+        row = matches[0]
+        if (
+            row["nexus_version_id"] != baseline["nexus_version_id"]
+            or row["artifact_hash"] != baseline["artifact_hash"]
+            or row["metadata"] != baseline["encoded"]
+            or row["status"] not in {"TRIAL", "SHADOW"}
+        ):
+            raise NexusTradeSingletonError(
+                "NexusTrade deterministic Trial candidate is corrupt"
+            )
 
     async def ensure_singleton(self) -> dict:
         async with self._connection() as db:
@@ -343,24 +386,34 @@ class NexusTradeRepository:
             version_data = await cls._validated_version(db, version, lane=lane)
             lanes.append({"lane": lane.value, "version": version_data})
         async with db.execute(
-            "SELECT * FROM nexus_campaigns WHERE lane = ? AND status = ? ORDER BY started_at, id",
-            (Lane.TRIAL.value, CampaignStatus.ACTIVE.value),
+            "SELECT * FROM nexus_campaigns WHERE status = ? "
+            "ORDER BY CASE lane WHEN 'challenger_trial' THEN 0 ELSE 1 END,started_at,id",
+            (CampaignStatus.ACTIVE.value,),
         ) as cursor:
             active_campaigns = [dict(row) for row in await cursor.fetchall()]
-        if len(active_campaigns) != 1:
+        grouped_campaigns = {
+            lane: [item for item in active_campaigns if item["lane"] == lane.value]
+            for lane in Lane
+        }
+        if any(len(items) != 1 for items in grouped_campaigns.values()):
             raise NexusTradeSingletonError(
-                "NexusTrade must have exactly one active Trial campaign"
+                "NexusTrade must have exactly one active campaign per lane"
             )
-        active_trial = active_campaigns[0]
-        if (
-            type(active_trial.get("id")) is not str
-            or not active_trial["id"]
-            or active_trial.get("nexus_version_id") != runtime["trial_version_id"]
-            or active_trial.get("ended_at") is not None
+        for lane, pointer in (
+            (Lane.CHAMPION, "champion_version_id"),
+            (Lane.TRIAL, "trial_version_id"),
         ):
-            raise NexusTradeSingletonError(
-                "active Trial campaign does not match the runtime pointer"
-            )
+            active = grouped_campaigns[lane][0]
+            if (
+                type(active.get("id")) is not str
+                or not active["id"]
+                or active.get("nexus_version_id") != runtime[pointer]
+                or active.get("ended_at") is not None
+            ):
+                raise NexusTradeSingletonError(
+                    f"active {lane.value} campaign does not match the runtime pointer"
+                )
+        active_trial = grouped_campaigns[Lane.TRIAL][0]
         async with db.execute(
             """
             SELECT COUNT(*) AS completed
@@ -847,6 +900,23 @@ class NexusTradeRepository:
             json_fields=("metadata",),
         )
         runtime = durable["runtime"]
+        learning = {
+            "jobs": await self._list_json_rows(
+                "SELECT * FROM nexus_learning_jobs "
+                "ORDER BY window_end_utc DESC,id DESC LIMIT 100",
+                json_fields=("result_json",),
+            ),
+            "attempts": await self._list_json_rows(
+                "SELECT id,attempt_hash,status,dataset_hash,provenance_hash,seed,"
+                "payload,created_at FROM nexus_training_attempts "
+                "ORDER BY id DESC LIMIT 100",
+                json_fields=("payload",),
+            ),
+            "candidates": await self._list_json_rows(
+                "SELECT * FROM nexus_candidates ORDER BY created_at DESC,id DESC LIMIT 100",
+                json_fields=("metadata",),
+            ),
+        }
         return {
             "schema_version": 1,
             "snapshot_version": int(durable["bot"].get("config_revision") or 1),
@@ -862,6 +932,7 @@ class NexusTradeRepository:
             "trades": trades,
             "reports": await self.list_reports(),
             "proposals": await self.list_proposals(),
+            "learning": learning,
         }
 
     async def list_versions(self) -> list:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -273,7 +274,9 @@ class AccountDispatcher:
                     "decision_id": intent.decision_id,
                     "entry_delay_ms": None,
                 })
-                preflight = intent.mark_dispatched(float(self._epoch_now()))
+                preflight = intent.mark_dispatched(
+                    self._causal_epoch(intent.prepared_epoch),
+                )
                 if preflight.status == "STALE_BEFORE_DISPATCH":
                     await self.repository.update_order_intent(
                         correlation_id,
@@ -319,7 +322,9 @@ class AccountDispatcher:
                         metadata=metadata,
                     )
                     raise
-                planned = intent.mark_dispatched(float(self._epoch_now()))
+                planned = intent.mark_dispatched(
+                    self._causal_epoch(intent.prepared_epoch),
+                )
                 sent_metadata = {**metadata, "entry_intent": planned.to_dict()}
                 await self.repository.update_order_intent(
                     correlation_id, "submitting", metadata=sent_metadata,
@@ -329,7 +334,7 @@ class AccountDispatcher:
                 # while still holding the account buy lock.
                 try:
                     self._ensure_trading_open()
-                    dispatch_epoch = float(self._epoch_now())
+                    dispatch_epoch = self._causal_epoch(intent.prepared_epoch)
                     sent = intent.mark_dispatched(dispatch_epoch)
                     if sent.status == "STALE_BEFORE_DISPATCH":
                         raise StaleIntentError(sent)
@@ -415,7 +420,7 @@ class AccountDispatcher:
                     )
                     raise OwnershipQuarantineError(quarantined, correlation_id)
 
-                accepted_epoch = float(self._epoch_now())
+                accepted_epoch = self._causal_epoch(dispatch_epoch)
                 receipt = DispatchReceipt(
                     decision_id=intent.decision_id,
                     contract_id=contract_id,
@@ -450,6 +455,14 @@ class AccountDispatcher:
             if not keep_reserved:
                 async with self._lane_lock:
                     self._blocked_lanes.discard(lane)
+
+    def _causal_epoch(self, minimum_epoch: float) -> float:
+        observed = float(self._epoch_now())
+        if not math.isfinite(observed):
+            raise ValueError("dispatcher clock must be finite")
+        if observed < minimum_epoch - 0.05:
+            raise ValueError("dispatcher clock drift exceeds the causal tolerance")
+        return max(observed, float(minimum_epoch))
 
     async def _reserve_lane(self, lane: str) -> None:
         async with self._lane_lock:

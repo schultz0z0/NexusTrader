@@ -9,6 +9,7 @@ const EVENT_TYPES = new Set([
   "nexus.trial_changed",
   "nexus.proposal",
   "nexus.version_changed",
+  "nexus.learning",
 ]);
 const SENSITIVE_KEY = /(authorization|credential|otp|password|secret|ticket|token|api[_-]?key|(?:^|_)path$)/i;
 
@@ -32,6 +33,7 @@ function emptyState() {
     trades: [],
     reports: [],
     proposals: [],
+    learning: { jobs: [], attempts: [], candidates: [] },
     trialChange: null,
     versionChange: null,
     auditEvents: [],
@@ -163,6 +165,7 @@ export function createNexusTradeStore(initial = {}) {
       trades: clone(snapshot.trades || []),
       reports: clone(snapshot.reports || []),
       proposals: clone(snapshot.proposals || []),
+      learning: clone(snapshot.learning || { jobs: [], attempts: [], candidates: [] }),
       auditEvents: clone(snapshot.nexus_events || state.auditEvents),
       connection: { status: "live", lastUpdated: Date.now() },
     };
@@ -210,6 +213,8 @@ export function createNexusTradeStore(initial = {}) {
       next.runtime = { ...state.runtime, ...runtime };
       next.emergencyStop = Boolean(payload.emergency_stop ?? next.runtime.emergency_stop ?? state.emergencyStop);
       next.championManagement = clone(payload.champion_management || state.championManagement);
+    } else if (event.type === "nexus.learning") {
+      next.learning = clone(payload.learning || state.learning);
     } else if (event.type === "nexus.decision") {
       next.decisions = upsert(state.decisions, payload, ["id", "decision_id"]);
     } else if (event.type === "nexus.trade") {

@@ -17,6 +17,7 @@ class LiveStore:
         "nexus.trial_changed",
         "nexus.proposal",
         "nexus.version_changed",
+        "nexus.learning",
     }
     _REDACTED = object()
 
@@ -49,6 +50,7 @@ class LiveStore:
             "positions": [],
             "reports": [],
             "proposals": [],
+            "learning": {"jobs": [], "attempts": [], "candidates": []},
         })
 
     @classmethod
@@ -214,6 +216,8 @@ class LiveStore:
                 return identity
             if version.get("id") or campaign.get("id"):
                 return f"{version.get('id')}:{campaign.get('id')}"
+        if event_type == "nexus.learning":
+            return payload.get("id")
         return None
 
     @classmethod
@@ -235,6 +239,7 @@ class LiveStore:
         for key in (
             "runtime", "lanes", "active_campaigns", "decisions", "trades",
             "reports", "proposals", "champion_management", "lane_states", "positions",
+            "learning",
         ):
             if key in durable:
                 state[key] = deepcopy(durable[key])
@@ -480,6 +485,10 @@ class LiveStore:
                 state["lanes"] = payload["lanes"]
             elif payload.get("lane") and isinstance(payload.get("version"), dict):
                 self._upsert(state.setdefault("lanes", []), payload, ("lane",))
+        elif event_type == "nexus.learning":
+            learning = payload.get("learning")
+            if isinstance(learning, dict):
+                state["learning"] = learning
         return True
 
     @staticmethod

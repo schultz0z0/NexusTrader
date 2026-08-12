@@ -73,7 +73,10 @@ test("report, proposal, campaign and version events notify one committed cross-v
 
   store.apply(event("nexus.report", "report-e", 5, { id: "weekly-5", report_type: "weekly" }));
   store.apply(event("nexus.proposal", "proposal-e", 5, { id: "proposal-5", status: "PENDING_USER_REVIEW" }));
-  store.apply(event("nexus.campaign", "campaign-e", 5, { id: "campaign-5", status: "ACTIVE", completed: 0, target: 300 }));
+  store.apply(event("nexus.campaign", "campaign-e", 5, {
+    id: "campaign-5", lane: "challenger_trial", status: "ACTIVE",
+    completed: 0, target: 300,
+  }));
   store.apply(event("nexus.version_changed", "version-e", 5, { lane: "champion_baseline", version: { id: "champion-v2", status: "CHAMPION" } }));
 
   assert.deepEqual(changes.map((item) => item.change.type), [

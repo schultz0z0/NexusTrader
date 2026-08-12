@@ -18,6 +18,7 @@ CRITICAL_EVENT_TYPES = {
     "nexus.trial_changed",
     "nexus.proposal",
     "nexus.version_changed",
+    "nexus.learning",
 }
 
 

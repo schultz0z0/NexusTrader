@@ -6,7 +6,7 @@ import { configuredBotPayload, strategyProfile } from "./bot_config.js";
 import { nexusTradeApi } from "./nexus_trade_api.js";
 import { createNexusTradeStore, NEXUS_BOT_ID, reconcileNexusTradeStore } from "./nexus_trade_store.js";
 import { buildNexusOperationalModel, mountNexusTradeView, resolveDashboardView } from "./nexus_trade_view.js";
-import { buildNexusLiveModel } from "./nexus_trade_operations.js";
+import { buildNexusLiveModel, nexusPositionPresentation } from "./nexus_trade_operations.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
@@ -18,6 +18,7 @@ let socket = null;
 let socketToken = 0;
 let reconnectTimer = null;
 let countdownTimer = null;
+let nexusCountdownTimer = null;
 let realConfirmationResolver = null;
 let activeAccountId = localStorage.getItem(ACCOUNT_STORAGE_KEY) || "";
 let nexusLaneFilter = "all";
@@ -141,6 +142,50 @@ function nexusDecisionLabel(decision) {
   return String(decision?.contract_type || decision?.action || decision?.signal || "NÃO OPERAR").toUpperCase();
 }
 
+function renderNexusPositions(positions = []) {
+  $("#nexus-position-count").textContent = `${positions.length} ${positions.length === 1 ? "aberta" : "abertas"}`;
+  $("#nexus-position-list").innerHTML = positions.length
+    ? positions.map((position) => {
+      const view = nexusPositionPresentation(position);
+      const status = view.settlementPending ? "LIQUIDANDO" : String(position.status || "OPEN");
+      return `<article class="nexus-position-card ${escapeHtml(position.lane)}"><header><strong>${nexusLaneLabel(position.lane)} · ${escapeHtml(position.contract_type || "CONTRATO")}</strong><small>#${escapeHtml(position.contract_id)}</small></header><dl><div><dt>STATUS</dt><dd>${escapeHtml(status)}</dd></div><div><dt>EXPIRA EM</dt><dd class="${view.settlementPending ? "waiting" : "positive"}">${escapeHtml(view.countdown)}</dd></div><div><dt>STAKE</dt><dd>${money.format(view.stake)}</dd></div><div><dt>ENTRADA</dt><dd>${price(view.entrySpot)}</dd></div><div><dt>SPOT ATUAL</dt><dd>${price(view.currentSpot)}</dd></div><div><dt>P&amp;L</dt><dd class="${view.profit >= 0 ? "positive" : "negative"}">${money.format(view.profit)}</dd></div></dl></article>`;
+    }).join("")
+    : `<div class="nexus-empty-state"><strong>Sem posição</strong><p>As lanes selecionadas continuam analisando R_100.</p></div>`;
+  clearInterval(nexusCountdownTimer);
+  nexusCountdownTimer = positions.length
+    ? setInterval(() => {
+      const current = buildNexusLiveModel(nexusStore.get(), nexusLaneFilter).positions;
+      renderNexusPositions(current);
+    }, 1000)
+    : null;
+}
+
+function renderNexusLearning(learning = {}) {
+  const jobs = Array.isArray(learning.jobs) ? learning.jobs : [];
+  const attempts = Array.isArray(learning.attempts) ? learning.attempts : [];
+  const candidates = Array.isArray(learning.candidates) ? learning.candidates : [];
+  const latest = jobs[0] || null;
+  const latestResult = latest?.result_json || {};
+  const qualifiedIds = new Set(attempts.filter((attempt) => (
+    attempt?.status === "SUCCEEDED"
+    && attempt?.payload?.qualification?.status === "PASS"
+  )).map((attempt) => attempt.payload.candidate_id));
+  const qualified = candidates.filter((candidate) => (
+    candidate?.status === "SHADOW" && qualifiedIds.has(candidate.id)
+  ));
+  $("#nexus-learning-status").textContent = latest
+    ? `${String(latest.status || "—").toUpperCase()} · ${String(latestResult.outcome || latest.job_type || "—").toUpperCase()}`
+    : "AGUARDANDO 10H";
+  $("#nexus-learning-last-job").textContent = latest
+    ? `${latest.job_type === "weekly_rotation" ? "Seleção semanal" : "Treino diário"} · ${formatTime(latest.window_end_utc)}`
+    : "Nenhum fechamento processado";
+  $("#nexus-learning-candidates").textContent = `${qualified.length} SHADOW ${qualified.length === 1 ? "qualificado" : "qualificados"}`;
+  $("#nexus-learning-attempts").textContent = `${attempts.length} ${attempts.length === 1 ? "registrada" : "registradas"}`;
+  $("#nexus-learning-next").textContent = latest?.status === "FAILED"
+    ? "Falha fechada; nova tentativa controlada"
+    : "Treino diário; seleção do Trial na segunda, 10h";
+}
+
 function renderNexusLive(state = nexusStore.get(), change = { kind: "state" }) {
   const model = buildNexusLiveModel(state, nexusLaneFilter);
   const market = model.market;
@@ -160,10 +205,8 @@ function renderNexusLive(state = nexusStore.get(), change = { kind: "state" }) {
   $("#nexus-live-connection").textContent = String(model.connectionStatus).toUpperCase();
   $("#nexus-journal-filter").textContent = `${nexusLaneLabel(nexusLaneFilter)} · R_100/M1`;
 
-  $("#nexus-position-count").textContent = `${model.positions.length} ${model.positions.length === 1 ? "aberta" : "abertas"}`;
-  $("#nexus-position-list").innerHTML = model.positions.length
-    ? model.positions.map((position) => `<article class="nexus-position-card ${escapeHtml(position.lane)}"><header><strong>${nexusLaneLabel(position.lane)} · ${escapeHtml(position.contract_type || "CONTRATO")}</strong><small>#${escapeHtml(position.contract_id)}</small></header><dl><div><dt>STATUS</dt><dd>${escapeHtml(position.status)}</dd></div><div><dt>STAKE</dt><dd>${money.format(Number(position.stake || position.buy_price || 0))}</dd></div><div><dt>SPOT ATUAL</dt><dd>${price(position.current_spot)}</dd></div><div><dt>P&amp;L</dt><dd class="${Number(position.profit || 0) >= 0 ? "positive" : "negative"}">${money.format(Number(position.profit || 0))}</dd></div></dl></article>`).join("")
-    : `<div class="nexus-empty-state"><strong>Sem posição</strong><p>As lanes selecionadas continuam analisando R_100.</p></div>`;
+  renderNexusLearning(state.learning);
+  renderNexusPositions(model.positions);
 
   if (["snapshot", "market.history", "nexus.position", "nexus.trade"].includes(change.type) || change.kind === "filter") {
     nexusChart.clearMarkers();

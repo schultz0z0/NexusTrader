@@ -5,6 +5,7 @@ import unittest
 from config.settings import settings
 from api.live_store import LiveStore
 from nexus_trade.clock import CausalCycleResult, DispatchReceipt, EntryIntent
+from nexus_trade.constants import NEXUS_PROVENANCE_HASH
 from nexus_trade.domain import Lane
 from nexus_trade.runtime import NexusTradeRuntime
 from nexus_trade.strategy import (
@@ -106,6 +107,24 @@ class FakeRepository:
                 "consecutive_losses": 1,
             },
         }
+
+
+class EvidenceRepository(FakeRepository):
+    def __init__(self, dispatcher, *, fail=False):
+        super().__init__()
+        self.dispatcher = dispatcher
+        self.fail = fail
+        self.evidence = []
+        self.evidence_attempts = 0
+
+    async def record_nexus_cycle_evidence(self, **payload):
+        self.evidence_attempts += 1
+        if self.fail:
+            raise RuntimeError("learning evidence unavailable")
+        self.evidence.append({
+            **payload,
+            "submitted_intents": len(self.dispatcher.intents),
+        })
 
 
 class LiveStorePublisher:
@@ -271,11 +290,16 @@ class FakeMonitor:
         self.contracts = []
         self.callbacks = {}
         self.update_callbacks = {}
+        self.expected_expiries = {}
 
-    async def monitor_contract(self, contract_id, callback, on_update_callback=None):
+    async def monitor_contract(
+        self, contract_id, callback, on_update_callback=None,
+        expected_expiry_epoch=None,
+    ):
         self.contracts.append(contract_id)
         self.callbacks[contract_id] = callback
         self.update_callbacks[contract_id] = on_update_callback
+        self.expected_expiries[contract_id] = expected_expiry_epoch
 
     async def close(self):
         pass
@@ -327,7 +351,10 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "champion_version_id": "champion-v1",
                 "trial_version_id": "trial-v1",
             },
-            "active_campaigns": [{"id": "campaign-1", "lane": Lane.TRIAL.value}],
+            "active_campaigns": [
+                {"id": "campaign-1", "lane": Lane.TRIAL.value},
+                {"id": "champion-campaign-1", "lane": Lane.CHAMPION.value},
+            ],
             "lanes": [
                 {"lane": Lane.CHAMPION.value, "version": {"id": "champion-v1"}},
                 {"lane": Lane.TRIAL.value, "version": {"id": "trial-v1"}},
@@ -1028,6 +1055,59 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             SetupState.from_dict(state),
         )
 
+    async def test_cycle_evidence_is_persisted_only_after_lane_dispatch(self):
+        self.repository = EvidenceRepository(self.shared)
+        runtime = self.runtime()
+        runtime.apply_champion_mode(self.snapshot)
+        decision, intent = decision_and_intent(Lane.CHAMPION)
+        candle = {
+            "open_epoch": 60,
+            "close_epoch": 120,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+        }
+        indicators = object()
+
+        await runtime.process_cycle(CausalCycleResult(
+            120, candle, indicators, (decision,), (intent,),
+        ))
+
+        self.assertEqual(len(self.repository.evidence), 1)
+        evidence = self.repository.evidence[0]
+        self.assertEqual(evidence["submitted_intents"], 1)
+        self.assertIs(evidence["candle"], candle)
+        self.assertIs(evidence["indicators"], indicators)
+        self.assertEqual(evidence["provenance_hash"], NEXUS_PROVENANCE_HASH)
+        self.assertEqual(evidence["version_ids"], {
+            Lane.CHAMPION.value: self.snapshot["runtime"]["champion_version_id"],
+            Lane.TRIAL.value: self.snapshot["runtime"]["trial_version_id"],
+        })
+
+    async def test_learning_evidence_failure_never_invalidates_a_dispatched_trade(self):
+        self.repository = EvidenceRepository(self.shared, fail=True)
+        runtime = self.runtime()
+        runtime.apply_champion_mode(self.snapshot)
+        decision, intent = decision_and_intent(Lane.CHAMPION)
+
+        with self.assertLogs("NexusTradeRuntime", level="ERROR") as captured:
+            await runtime.process_cycle(CausalCycleResult(
+                120,
+                {"open_epoch": 60, "close_epoch": 120},
+                object(),
+                (decision,),
+                (intent,),
+            ))
+
+        self.assertEqual(len(self.shared.intents), 1)
+        self.assertEqual(self.repository.evidence_attempts, 1)
+        self.assertIn("após o despacho", captured.output[0])
+        self.assertEqual(
+            runtime.strategies[Lane.CHAMPION].state.position_status,
+            "ACTIVE",
+        )
+
     async def test_persisted_decision_and_trade_are_published_in_causal_order(self):
         publisher = LiveStorePublisher(self.repository)
         runtime = self.runtime(publisher=publisher)
@@ -1066,6 +1146,44 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         live = publisher.store.snapshot("nexus-trade")
         self.assertEqual(live["decisions"][0]["decision_id"], decision.decision_id)
         self.assertEqual(live["trades"][0]["contract_id"], 701)
+
+    async def test_position_update_omits_unknown_values_instead_of_erasing_open_data(self):
+        publisher = LiveStorePublisher(self.repository)
+        runtime = self.runtime(publisher=publisher)
+
+        await runtime._publish_position(
+            lane=Lane.TRIAL,
+            owner_decision_id="position-owner",
+            contract_id=702,
+            status="OPEN",
+            update_epoch=60,
+            stake=0.35,
+            buy_price=0.35,
+            date_expiry=118,
+            contract_type="CALL",
+        )
+        await runtime._publish_position(
+            lane=Lane.TRIAL,
+            owner_decision_id="position-owner",
+            contract_id=702,
+            status="UPDATED",
+            update_epoch=61,
+            stake=None,
+            buy_price=None,
+            current_spot=101.25,
+            profit=0.1,
+            date_expiry=None,
+        )
+
+        update = publisher.events[-1]["payload"]
+        self.assertNotIn("stake", update)
+        self.assertNotIn("buy_price", update)
+        self.assertNotIn("date_expiry", update)
+        position = publisher.store.snapshot("nexus-trade")["positions"][0]
+        self.assertEqual(position["stake"], 0.35)
+        self.assertEqual(position["buy_price"], 0.35)
+        self.assertEqual(position["date_expiry"], 118)
+        self.assertEqual(position["current_spot"], 101.25)
 
     async def test_live_position_open_update_and_close_follow_persisted_ownership(self):
         monitor = FakeMonitor()
@@ -1652,7 +1770,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "account_id": "DOT-DEMO",
                 "account_type": "demo",
                 "management_active": False,
-                "entry_intent": {"decision_id": decision_id},
+                "entry_intent": {"decision_id": decision_id, "target_epoch": 600},
             },
         }]
         monitor = FakeMonitor()
@@ -1670,6 +1788,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.contract_id, 921)
         self.assertIn((Lane.CHAMPION.value, 921), self.shared.restored)
         self.assertEqual(monitor.contracts, [921])
+        self.assertEqual(monitor.expected_expiries[921], 658)
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 

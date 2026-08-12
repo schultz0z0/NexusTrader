@@ -299,6 +299,17 @@ class SharedDemoDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.connection.send_calls, 0)
         self.assertIn(("nexus-trial-stale", "cancelled"), self.repository.transitions)
 
+    async def test_wall_clock_micro_drift_cannot_precede_causal_preparation(self):
+        self.now = 60.219
+
+        receipt = await self.dispatcher.submit(
+            pending_intent("trial-clock-drift", Lane.TRIAL, prepared_epoch=60.220),
+        )
+
+        self.assertEqual(receipt.dispatch_epoch, 60.220)
+        self.assertGreaterEqual(receipt.accepted_epoch, receipt.dispatch_epoch)
+        self.assertEqual(self.connection.buy_calls, 1)
+
     async def test_post_send_exception_enters_correlated_quarantine_without_retry(self):
         self.connection.buy_exception = ConnectionError("response lost")
 

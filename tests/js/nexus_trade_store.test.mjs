@@ -20,6 +20,11 @@ const baseSnapshot = (revision = 4) => ({
   trades: [],
   reports: [],
   proposals: [],
+  learning: {
+    jobs: [{ id: "daily-1", status: "COMPLETED" }],
+    attempts: [{ id: 1, status: "SUCCEEDED" }],
+    candidates: [{ id: "candidate-a", status: "SHADOW" }],
+  },
   lane_states: {
     champion_baseline: { position_status: "IDLE" },
     challenger_trial: { position_status: "IDLE" },
@@ -48,6 +53,9 @@ test("hydrate normalizes the durable snapshot without exposing caller mutation",
   assert.equal(store.get().campaign.progress.completed, 12);
   assert.equal(store.get().campaign.progress.target, 300);
   assert.equal(store.get().snapshotVersion, 4);
+  assert.equal(store.get().learning.jobs[0].id, "daily-1");
+  source.learning.jobs[0].status = "FAILED";
+  assert.equal(store.get().learning.jobs[0].status, "COMPLETED");
 });
 
 test("duplicate and older Nexus events are ignored while one revision may contain distinct events", () => {
@@ -169,4 +177,18 @@ test("Nexus market history, ticks and strict positions stay live and deduplicate
   assert.equal(store.apply(updated), false);
   assert.equal(store.get().market.points.at(-1).time, 120);
   assert.equal(store.get().lastTick.price, 103);
+});
+
+test("learning event refreshes the visible automatic laboratory state", () => {
+  const store = createNexusTradeStore(baseSnapshot());
+  assert.equal(store.apply(event("nexus.learning", "learning-1", 5, {
+    id: "daily:campaign-a:2026-08-12T13:00:00Z",
+    learning: {
+      jobs: [{ id: "daily-1", status: "COMPLETED" }],
+      attempts: [{ id: 8, status: "SUCCEEDED" }],
+      candidates: [{ id: "shadow-1", status: "SHADOW" }],
+    },
+  })), true);
+  assert.equal(store.get().learning.jobs[0].status, "COMPLETED");
+  assert.equal(store.get().learning.candidates[0].id, "shadow-1");
 });

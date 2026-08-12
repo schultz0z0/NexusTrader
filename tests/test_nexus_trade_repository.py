@@ -10,7 +10,7 @@ import aiosqlite
 
 from database.repository import DatabaseRepository
 from database.models import DatabaseModels
-from nexus_trade.constants import NEXUS_TRADE_BOT_ID
+from nexus_trade.constants import NEXUS_PROVENANCE_HASH, NEXUS_TRADE_BOT_ID
 from nexus_trade.artifacts import canonical_json
 from nexus_trade.domain import CampaignStatus, Lane, VersionStatus
 from nexus_trade.repository import NexusTradeRepository, NexusTradeSingletonError
@@ -70,6 +70,65 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
         return champion_id
 
+    async def test_init_migrates_exact_legacy_decision_provenance_for_reports(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        version_id = snapshot["runtime"]["trial_version_id"]
+        campaign_id = snapshot["active_campaigns"][0]["id"]
+        decision_id = "legacy-provenance-decision"
+        legacy = json.dumps({
+            "decision": {
+                "id": decision_id,
+                "decision_id": decision_id,
+                "lane": Lane.TRIAL.value,
+                "signal_epoch": 60_000,
+            },
+            "state": {"position_status": "IDLE"},
+            "owner": None,
+        }, sort_keys=True, separators=(",", ":"))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO nexus_decisions "
+                "(id,lane,nexus_version_id,campaign_id,symbol,signal_epoch,payload) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    decision_id, Lane.TRIAL.value, version_id, campaign_id,
+                    "R_100", 60_000, legacy,
+                ),
+            )
+            await db.execute(
+                "INSERT INTO trades "
+                "(bot_id,strategy_name,symbol,contract_type,contract_id,stake,"
+                "payout,profit,result,status,purchase_time,expiry_time,lane,"
+                "nexus_version_id,campaign_id,decision_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    NEXUS_TRADE_BOT_ID, "nexus_trade", "R_100", "CALL", 99111,
+                    0.35, 0.66, 0.31, "won", "closed", 60_060, 60_118,
+                    Lane.TRIAL.value, version_id, campaign_id, decision_id,
+                ),
+            )
+            await db.execute(
+                "DELETE FROM nexus_repository_meta "
+                "WHERE key='nexus_decision_provenance_v1'"
+            )
+            await db.commit()
+
+        await DatabaseRepository(self.db_path).init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT payload FROM nexus_decisions WHERE id=?", (decision_id,),
+            ) as cursor:
+                payload = json.loads((await cursor.fetchone())[0])
+        self.assertEqual(payload["lane"], Lane.TRIAL.value)
+        self.assertEqual(payload["nexus_version_id"], version_id)
+        self.assertEqual(payload["campaign_id"], campaign_id)
+        self.assertEqual(payload["provenance_hash"], NEXUS_PROVENANCE_HASH)
+        self.assertEqual(
+            payload["decision"]["provenance_hash"], NEXUS_PROVENANCE_HASH,
+        )
+
     async def test_init_provisions_exactly_one_nexus_trade(self):
         await self.repo.init_db()
         await self.repo.init_db()
@@ -100,9 +159,15 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(champion["version"]["name"], "Champion V1")
         self.assertEqual(champion["version"]["snapshot"]["bollinger"], {"period": 20, "std_dev": 2, "ma": "SMA"})
         self.assertEqual(champion["version"]["snapshot"]["adx"], {"period": 14, "max_entry": 22})
-        self.assertEqual(len(snapshot["active_campaigns"]), 1)
-        self.assertEqual(snapshot["active_campaigns"][0]["lane"], Lane.TRIAL.value)
-        self.assertEqual(snapshot["active_campaigns"][0]["status"], CampaignStatus.ACTIVE.value)
+        self.assertEqual(len(snapshot["active_campaigns"]), 2)
+        self.assertEqual(
+            {item["lane"] for item in snapshot["active_campaigns"]},
+            {Lane.CHAMPION.value, Lane.TRIAL.value},
+        )
+        self.assertTrue(all(
+            item["status"] == CampaignStatus.ACTIVE.value
+            for item in snapshot["active_campaigns"]
+        ))
         self.assertEqual(
             snapshot["active_campaigns"][0]["nexus_version_id"],
             snapshot["runtime"]["trial_version_id"],
@@ -290,6 +355,11 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute("DROP TRIGGER trg_nexus_candidates_immutable_status")
+            await db.execute(
+                "UPDATE nexus_candidates SET status='SHADOW' "
+                "WHERE id='candidate-nexus-trial-v1'"
+            )
             await db.execute(
                 "DELETE FROM nexus_campaigns WHERE lane = ? AND status = 'ACTIVE'",
                 (Lane.TRIAL.value,),
@@ -467,6 +537,14 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         version_id = f"nexus-trial-{version_hash[:16]}"
         campaign_id = f"trial-{version_hash[:16]}-concurrent"
 
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DROP TRIGGER trg_nexus_candidates_immutable_status")
+            await db.execute(
+                "UPDATE nexus_candidates SET status='SHADOW' "
+                "WHERE id='candidate-nexus-trial-v1'"
+            )
+            await db.commit()
+
         class PausingSnapshotRepository(NexusTradeRepository):
             after_champion = asyncio.Event()
             resume_reader = asyncio.Event()
@@ -642,7 +720,7 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(snapshot["bot"]["id"] == "nexus-trade" for snapshot in snapshots))
         snapshot = await self.nexus.get_runtime_snapshot()
         self.assertEqual(len(snapshot["lanes"]), 2)
-        self.assertEqual(len(snapshot["active_campaigns"]), 1)
+        self.assertEqual(len(snapshot["active_campaigns"]), 2)
 
     async def test_existing_corrupted_singleton_fails_fast_instead_of_being_accepted(self):
         await self.repo.init_db()
