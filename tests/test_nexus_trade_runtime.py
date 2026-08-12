@@ -1270,6 +1270,68 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
+    async def test_restart_hydrates_persisted_management_before_active_off_lane_defers(self):
+        decision_id = "active-off-managed-restart"
+        managed = self.managed_snapshot(
+            initial_stake=0.5,
+            money_management="martingale",
+            money_config={"multiplier": 2.0, "max_levels": 3},
+            enabled=False,
+        )
+        self.repository.runtime_snapshot = managed
+        self.repository.restored_states = {
+            Lane.CHAMPION.value: SetupState(
+                position_status="ACTIVE",
+                owner_decision_id=decision_id,
+                contract_id=921,
+            ).to_dict(),
+        }
+        self.repository.restored_owners = {Lane.CHAMPION.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
+        self.repository.recovery_intents = [{
+            "id": f"nexus-{decision_id}",
+            "lane": Lane.CHAMPION.value,
+            "decision_id": decision_id,
+            "nexus_version_id": "champion-v1",
+            "campaign_id": None,
+            "metadata": {},
+        }]
+        source = WaitUntilStoppedCycleSource()
+        runtime = NexusTradeRuntime(
+            self.repository,
+            {
+                "id": "nexus-trade",
+                "strategy_id": "nexus_trade",
+                "desired_state": "STOPPED",
+                "initial_stake": 0.35,
+                "money_management": "fixed",
+                "money_config": {},
+                "risk_config": {},
+            },
+            runtime_snapshot=None,
+            auth_factory=FakeAuth,
+            connection_factory=FakeRuntimeConnection,
+            market_data_factory=FakeMarketData,
+            shared_dispatcher_factory=(
+                lambda connection, repository, **kwargs: self.shared
+            ),
+            monitor_factory=lambda connection: FakeMonitor(),
+            cycle_source=source,
+            publisher=LiveStorePublisher(self.repository),
+        )
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        self.assertEqual(runtime._champion_management, managed["champion_management"])
+        self.assertEqual(runtime._versions[Lane.CHAMPION], "champion-v1")
+        self.assertEqual(runtime._versions[Lane.TRIAL], "trial-v1")
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
     async def test_restart_active_trial_installs_its_exact_gate_after_safe_settlement(self):
         artifact = ArtifactAndRegistryTests.artifact("restart-active-trial")
         snapshot = self.executable_snapshot(trial_artifact=artifact)

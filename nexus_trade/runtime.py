@@ -440,6 +440,17 @@ class NexusTradeRuntime:
                 raise ValueError("NexusTrade runtime snapshot is unavailable")
             self._runtime_snapshot = await snapshot_getter()
 
+        # A runtime created by the orchestrator receives its durable snapshot
+        # only here. Hydrate management before restoring risk and ownership so
+        # an already-open OFF/DEMO contract cannot make the persisted config
+        # look like a live route change and defer every lane identity.
+        self._champion_management = self._management_from_snapshot(
+            self._runtime_snapshot,
+        )
+        self._champion_money_manager = self._money_manager_for(
+            self._champion_management,
+        )
+
         risk_loader = getattr(self.repository, "get_risk_state", None)
         if callable(risk_loader):
             restored_risk = await risk_loader(
