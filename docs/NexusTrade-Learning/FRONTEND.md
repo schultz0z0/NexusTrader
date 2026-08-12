@@ -282,3 +282,16 @@ configuração persistida. O backend salva por CAS e somente depois habilita o C
 Em OFF, Champion e Trial ignoram esse gerenciamento e continuam em DEMO a USD 0,35.
 Em ON, todos os limites são reavaliados antes do transporte da ordem; um bloqueio é
 gravado como `execution_blocked_reason` e nunca impede a coleta do Trial.
+
+### 12.1 Sessão operacional do Champion
+
+- Com o Champion OFF, o card operacional mostra explicitamente a baseline em DEMO
+  `USD 0,35` e trata o gerenciamento persistido apenas como `sugestão para a próxima
+  sessão`.
+- Com o Champion ON, o mesmo card promove essa configuração para
+  `gerenciamento da sessão`, deixando claro que ela vale apenas para a janela
+  operacional ativa.
+- Desligar o Champion não apaga campanhas, trades, relatórios, evolução, Trial ou
+  comparativos do learning lab; apenas encerra a sessão operacional do gerenciamento.
+- O card do Champion também exibe a `assertividade da última hora` somente da lane
+  `champion_baseline`, com caráter informativo e sem efeito sobre o gate da estratégia.

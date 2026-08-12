@@ -90,6 +90,11 @@ const DEFAULT_MANAGEMENT = Object.freeze({
   money_config: {},
   risk_config: {},
 });
+const PERCENT_FORMATTER = new Intl.NumberFormat("pt-BR", {
+  style: "percent",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
 function finiteField(values, key, fallback = 0) {
   const number = Number(values?.[key]);
@@ -123,6 +128,33 @@ export function championManagementPayload(values = {}, expectedRevision = 1) {
   };
 }
 
+function championSession(state = {}, enabled = false, management = DEFAULT_MANAGEMENT) {
+  const session = state.championSession;
+  if (session && typeof session === "object") return session;
+  return {
+    management_active: enabled,
+    mode: enabled ? "on" : "off",
+    baseline_account_type: "demo",
+    baseline_initial_stake: 0.35,
+    suggestion: management,
+    active_management: enabled ? management : null,
+  };
+}
+
+function managementSummary(management = DEFAULT_MANAGEMENT) {
+  return `US$ ${Number(management.initial_stake || 0).toFixed(2)} · ${String(management.money_management || "fixed").toUpperCase()}`;
+}
+
+function championLastHourSummary(summary) {
+  const decisive = Number(summary?.decisiveTrades ?? summary?.decisive_trades ?? 0);
+  const wins = Number(summary?.wins ?? 0);
+  const accuracy = summary?.accuracy;
+  if (!Number.isFinite(decisive) || decisive < 1 || accuracy === null || accuracy === undefined) {
+    return "SEM AMOSTRA";
+  }
+  return `${wins}/${decisive} (${PERCENT_FORMATTER.format(Number(accuracy))})`;
+}
+
 export function buildNexusOperationalModel(state = {}, account = null) {
   const champion = lane(state, "champion_baseline");
   const trial = lane(state, "challenger_trial");
@@ -132,6 +164,10 @@ export function buildNexusOperationalModel(state = {}, account = null) {
   const positionStatus = championPosition(state, champion);
   const emergency = Boolean(state.emergencyStop ?? runtime.emergency_stop);
   const management = state.championManagement || DEFAULT_MANAGEMENT;
+  const session = championSession(state, enabled, management);
+  const sessionManagement = session.management_active
+    ? (session.active_management || management)
+    : (session.suggestion || management);
   let status = enabled ? `ON — ${accountType === "real" ? "REAL" : "DEMO"}` : "OFF — APRENDENDO EM DEMO";
   if (positionStatus !== "IDLE") status = "AGUARDANDO LIQUIDAÇÃO";
   if (emergency) status = "PARADA TOTAL";
@@ -146,13 +182,21 @@ export function buildNexusOperationalModel(state = {}, account = null) {
       enabled,
       positionStatus,
       stake: enabled
-        ? `US$ ${Number(management.initial_stake || 0).toFixed(2)} · ${String(management.money_management || "fixed").toUpperCase()}`
+        ? managementSummary(sessionManagement)
         : "US$ 0,35",
       account: enabled ? (runtime.champion_account_id || account?.account_id || "Conta não selecionada") : "DEMO permanente",
       toggleLabel: enabled ? "PARAR CHAMPION" : "INICIAR CHAMPION",
       toggleDisabled: emergency || positionStatus === "RESERVED" || positionStatus === "QUARANTINED",
       management: structuredClone(management),
       managementEditable: !enabled && positionStatus === "IDLE" && !emergency,
+      baseline: `DEMO · US$ ${Number(session.baseline_initial_stake ?? 0.35).toFixed(2)}`,
+      sessionLabel: session.management_active ? "GERENCIAMENTO DA SESSAO" : "SUGESTAO PARA A PROXIMA SESSAO",
+      sessionSummary: managementSummary(sessionManagement),
+      sessionHint: session.management_active
+        ? "A sessao ON usa esta configuracao ate voce desligar o Champion."
+        : "OFF segue em DEMO US$ 0,35 sem gerenciamento ativo.",
+      lastHourLabel: "ULTIMA HORA DO CHAMPION",
+      lastHourSummary: championLastHourSummary(state.championLastHour),
     },
     trial: {
       version: versionLabel(trial, "Trial V1"),
@@ -182,6 +226,12 @@ function renderOperational(root, model) {
   setText(root, "#nexus-champion-version", model.champion.version);
   setText(root, "#nexus-champion-account", model.champion.account);
   setText(root, "#nexus-champion-stake", model.champion.stake);
+  setText(root, "#nexus-champion-baseline", model.champion.baseline);
+  setText(root, "#nexus-champion-session-label", model.champion.sessionLabel);
+  setText(root, "#nexus-champion-session", model.champion.sessionSummary);
+  setText(root, "#nexus-champion-session-hint", model.champion.sessionHint);
+  setText(root, "#nexus-champion-last-hour-label", model.champion.lastHourLabel);
+  setText(root, "#nexus-champion-last-hour", model.champion.lastHourSummary);
   setText(root, "#nexus-trial-version", model.trial.version);
   setText(root, "#nexus-trial-status", model.trial.status);
   setText(root, "#nexus-campaign-progress", model.campaign.label);

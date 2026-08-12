@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import time
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -920,6 +921,11 @@ class NexusTradeRepository:
             json_fields=("metadata",),
         )
         runtime = durable["runtime"]
+        champion_session = self._champion_session_summary(
+            runtime=runtime,
+            management=durable["champion_management"],
+        )
+        champion_last_hour = await self._champion_last_hour_summary()
         learning = {
             "jobs": await self._list_json_rows(
                 "SELECT * FROM nexus_learning_jobs "
@@ -946,6 +952,8 @@ class NexusTradeRepository:
             "lanes": durable["lanes"],
             "active_campaigns": durable["active_campaigns"],
             "champion_management": durable["champion_management"],
+            "champion_session": champion_session,
+            "champion_last_hour": champion_last_hour,
             "lane_states": durable["lane_states"],
             "positions": durable["positions"],
             "decisions": decisions,
@@ -953,6 +961,53 @@ class NexusTradeRepository:
             "reports": await self.list_reports(),
             "proposals": await self.list_proposals(),
             "learning": learning,
+        }
+
+    @staticmethod
+    def _champion_session_summary(*, runtime: dict, management: dict) -> dict:
+        enabled = bool(runtime.get("champion_enabled", 0))
+        return {
+            "management_active": enabled,
+            "mode": "on" if enabled else "off",
+            "baseline_account_type": "demo",
+            "baseline_initial_stake": float(NEXUS_DEMO_STAKE),
+            "suggestion": dict(management),
+            "active_management": dict(management) if enabled else None,
+        }
+
+    async def _champion_last_hour_summary(self) -> dict:
+        threshold_epoch = int(time.time()) - 3600
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    COUNT(*) AS closed_trades,
+                    SUM(CASE WHEN result = 'won' THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN result = 'lost' THEN 1 ELSE 0 END) AS losses,
+                    SUM(CASE WHEN result = 'tie' THEN 1 ELSE 0 END) AS ties
+                FROM trades
+                WHERE bot_id = ?
+                  AND lane = ?
+                  AND status = 'closed'
+                  AND COALESCE(expiry_time, purchase_time) >= ?
+                """,
+                (NEXUS_TRADE_BOT_ID, Lane.CHAMPION.value, threshold_epoch),
+            ) as cursor:
+                row = await cursor.fetchone()
+        closed_trades = int(row["closed_trades"] or 0)
+        wins = int(row["wins"] or 0)
+        losses = int(row["losses"] or 0)
+        ties = int(row["ties"] or 0)
+        decisive_trades = wins + losses
+        return {
+            "window_seconds": 3600,
+            "closed_trades": closed_trades,
+            "wins": wins,
+            "losses": losses,
+            "ties": ties,
+            "decisive_trades": decisive_trades,
+            "accuracy": (wins / decisive_trades) if decisive_trades else None,
         }
 
     async def list_versions(self) -> list:

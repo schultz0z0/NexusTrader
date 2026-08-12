@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1210,6 +1211,139 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(public["campaign_id"], campaign["id"])
         self.assertNotIn("payload", public)
         self.assertNotIn("account_id", json.dumps(snapshot["positions"]))
+
+    async def test_control_snapshot_exposes_champion_session_semantics(self):
+        await self.repo.init_db()
+        payload = self._champion_management_payload(
+            initial_stake=1.25,
+            money_management="soros",
+            money_config={"levels": 2, "percent": 0.6},
+        )
+        suggestion = await self.nexus.set_champion_management(
+            expected_revision=1,
+            payload=payload,
+        )
+
+        off_snapshot = await self.nexus.get_control_snapshot()
+        self.assertEqual(
+            off_snapshot["champion_session"],
+            {
+                "management_active": False,
+                "mode": "off",
+                "baseline_account_type": "demo",
+                "baseline_initial_stake": 0.35,
+                "suggestion": suggestion,
+                "active_management": None,
+            },
+        )
+
+        await self.nexus.set_champion_mode(
+            enabled=True,
+            account_id="DOT-DEMO",
+            account_type="demo",
+        )
+        on_snapshot = await self.nexus.get_control_snapshot()
+        self.assertEqual(on_snapshot["champion_session"]["management_active"], True)
+        self.assertEqual(on_snapshot["champion_session"]["mode"], "on")
+        self.assertEqual(
+            on_snapshot["champion_session"]["suggestion"],
+            suggestion,
+        )
+        self.assertEqual(
+            on_snapshot["champion_session"]["active_management"],
+            suggestion,
+        )
+
+    async def test_control_snapshot_reports_last_hour_accuracy_for_champion_only(self):
+        await self.repo.init_db()
+        snapshot = await self.nexus.get_runtime_snapshot()
+        champion_version = snapshot["runtime"]["champion_version_id"]
+        champion_campaign = next(
+            item["id"]
+            for item in snapshot["active_campaigns"]
+            if item["lane"] == Lane.CHAMPION.value
+        )
+        trial_version = snapshot["runtime"]["trial_version_id"]
+        trial_campaign = next(
+            item["id"]
+            for item in snapshot["active_campaigns"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        now_epoch = int(time.time())
+        async with aiosqlite.connect(self.db_path) as db:
+            for contract_id, lane, version_id, campaign_id, signal_epoch in (
+                (9101, Lane.CHAMPION.value, champion_version, champion_campaign, now_epoch - 600),
+                (9102, Lane.CHAMPION.value, champion_version, champion_campaign, now_epoch - 300),
+                (9103, Lane.CHAMPION.value, champion_version, champion_campaign, now_epoch - 120),
+                (9104, Lane.CHAMPION.value, champion_version, champion_campaign, now_epoch - 4000),
+                (9201, Lane.TRIAL.value, trial_version, trial_campaign, now_epoch - 180),
+            ):
+                await db.execute(
+                    """
+                    INSERT INTO nexus_decisions (
+                        id, lane, nexus_version_id, campaign_id, symbol, signal_epoch, payload
+                    ) VALUES (?, ?, ?, ?, 'R_100', ?, ?)
+                    """,
+                    (
+                        f"decision-{contract_id}",
+                        lane,
+                        version_id,
+                        campaign_id,
+                        signal_epoch,
+                        json.dumps({
+                            "decision": {
+                                "id": f"decision-{contract_id}",
+                                "decision_id": f"decision-{contract_id}",
+                                "lane": lane,
+                                "signal_epoch": signal_epoch,
+                            },
+                            "state": {"position_status": "IDLE"},
+                            "owner": None,
+                        }),
+                    ),
+                )
+            await db.commit()
+
+        trades = (
+            (9101, Lane.CHAMPION.value, champion_version, champion_campaign, "won", now_epoch - 600, now_epoch - 542),
+            (9102, Lane.CHAMPION.value, champion_version, champion_campaign, "lost", now_epoch - 300, now_epoch - 242),
+            (9103, Lane.CHAMPION.value, champion_version, champion_campaign, "tie", now_epoch - 120, now_epoch - 62),
+            (9104, Lane.CHAMPION.value, champion_version, champion_campaign, "won", now_epoch - 4000, now_epoch - 3942),
+            (9201, Lane.TRIAL.value, trial_version, trial_campaign, "won", now_epoch - 180, now_epoch - 122),
+        )
+        for contract_id, lane, version_id, campaign_id, result, purchase_time, expiry_time in trades:
+            await self.repo.upsert_trade({
+                "bot_id": NEXUS_TRADE_BOT_ID,
+                "strategy_name": "nexus_trade",
+                "symbol": "R_100",
+                "contract_type": "CALL",
+                "contract_id": contract_id,
+                "stake": 0.35,
+                "payout": 0.66 if result != "lost" else 0.0,
+                "profit": 0.31 if result == "won" else -0.35 if result == "lost" else 0.0,
+                "result": result,
+                "status": "closed",
+                "purchase_time": purchase_time,
+                "expiry_time": expiry_time,
+                "lane": lane,
+                "nexus_version_id": version_id,
+                "campaign_id": campaign_id,
+                "decision_id": f"decision-{contract_id}",
+            })
+
+        control = await self.nexus.get_control_snapshot()
+        self.assertEqual(
+            control["champion_last_hour"],
+            {
+                "window_seconds": 3600,
+                "closed_trades": 3,
+                "wins": 1,
+                "losses": 1,
+                "ties": 1,
+                "decisive_trades": 2,
+                "accuracy": 0.5,
+            },
+        )
 
 
 if __name__ == "__main__":

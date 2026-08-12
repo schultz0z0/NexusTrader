@@ -120,6 +120,29 @@ function operationalState(overrides = {}) {
   return {
     runtime: { enabled: 0, account_type: "demo", ...overrides.runtime },
     emergencyStop: Boolean(overrides.emergencyStop),
+    championSession: overrides.championSession || {
+      management_active: false,
+      mode: "off",
+      baseline_account_type: "demo",
+      baseline_initial_stake: 0.35,
+      suggestion: {
+        revision: 7,
+        initial_stake: 1.5,
+        money_management: "soros",
+        money_config: { levels: 2, percent: 0.6 },
+        risk_config: { take_profit_daily: 25, stop_loss_daily: 12 },
+      },
+      active_management: null,
+    },
+    championLastHour: overrides.championLastHour || {
+      window_seconds: 3600,
+      closed_trades: 3,
+      wins: 1,
+      losses: 1,
+      ties: 1,
+      decisive_trades: 2,
+      accuracy: 0.5,
+    },
     lanes: [
       {
         lane: "champion_baseline",
@@ -188,6 +211,46 @@ test("Champion management is editable only while OFF and IDLE", () => {
   assert.equal(model.champion.managementEditable, true);
   assert.equal(buildNexusOperationalModel({ ...state, runtime: { enabled: 1 } }).champion.managementEditable, false);
   assert.equal(buildNexusOperationalModel(operationalState({ positionStatus: "ACTIVE" })).champion.managementEditable, false);
+});
+
+test("Champion OFF shows the next-session suggestion and last-hour summary", () => {
+  const model = buildNexusOperationalModel(operationalState());
+
+  assert.equal(model.champion.sessionLabel, "SUGESTAO PARA A PROXIMA SESSAO");
+  assert.equal(model.champion.sessionSummary, "US$ 1.50 · SOROS");
+  assert.equal(model.champion.sessionHint, "OFF segue em DEMO US$ 0,35 sem gerenciamento ativo.");
+  assert.equal(model.champion.lastHourLabel, "ULTIMA HORA DO CHAMPION");
+  assert.equal(model.champion.lastHourSummary, "1/2 (50,00%)");
+});
+
+test("Champion ON promotes the same config to the active session summary", () => {
+  const model = buildNexusOperationalModel(operationalState({
+    runtime: { enabled: 1, account_type: "demo" },
+    championSession: {
+      management_active: true,
+      mode: "on",
+      baseline_account_type: "demo",
+      baseline_initial_stake: 0.35,
+      suggestion: {
+        revision: 7,
+        initial_stake: 1.5,
+        money_management: "soros",
+        money_config: { levels: 2, percent: 0.6 },
+        risk_config: { take_profit_daily: 25, stop_loss_daily: 12 },
+      },
+      active_management: {
+        revision: 7,
+        initial_stake: 1.5,
+        money_management: "soros",
+        money_config: { levels: 2, percent: 0.6 },
+        risk_config: { take_profit_daily: 25, stop_loss_daily: 12 },
+      },
+    },
+  }));
+
+  assert.equal(model.champion.sessionLabel, "GERENCIAMENTO DA SESSAO");
+  assert.equal(model.champion.sessionSummary, "US$ 1.50 · SOROS");
+  assert.equal(model.champion.sessionHint, "A sessao ON usa esta configuracao ate voce desligar o Champion.");
 });
 
 test("management form payload preserves only the approved backend contract", () => {

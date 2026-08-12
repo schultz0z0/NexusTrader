@@ -68,6 +68,10 @@ class NexusTradeApiTests(unittest.TestCase):
         self.assertEqual(snapshot["learning"]["candidates"][0]["status"], "TRIAL")
         self.assertEqual(snapshot["decisions"], [])
         self.assertEqual(snapshot["trades"], [])
+        self.assertEqual(snapshot["champion_session"]["management_active"], False)
+        self.assertEqual(snapshot["champion_session"]["mode"], "off")
+        self.assertEqual(snapshot["champion_last_hour"]["closed_trades"], 0)
+        self.assertIsNone(snapshot["champion_last_hour"]["accuracy"])
 
     def test_mode_persists_off_demo_and_on_demo_for_runtime_refresh(self):
         off = self.client.post(
@@ -138,6 +142,32 @@ class NexusTradeApiTests(unittest.TestCase):
         self.assertEqual(stale.status_code, 409)
         persisted = self.client.get("/api/v1/nexus-trade").json()["data"]
         self.assertEqual(persisted["champion_management"], snapshot["champion_management"])
+
+    def test_snapshot_exposes_champion_session_and_last_hour(self):
+        configured = self.client.post(
+            "/api/v1/nexus-trade/champion-management",
+            json={
+                "expected_revision": 1,
+                "initial_stake": 1.1,
+                "money_management": "fixed",
+                "money_config": {},
+                "risk_config": {"max_daily_trades": 12},
+            },
+        )
+        self.assertEqual(configured.status_code, 200)
+
+        response = self.client.get("/api/v1/nexus-trade")
+
+        self.assertEqual(response.status_code, 200)
+        snapshot = response.json()["data"]
+        self.assertEqual(snapshot["champion_session"]["mode"], "off")
+        self.assertEqual(snapshot["champion_session"]["baseline_initial_stake"], 0.35)
+        self.assertEqual(
+            snapshot["champion_session"]["suggestion"]["initial_stake"],
+            1.1,
+        )
+        self.assertIn("champion_last_hour", snapshot)
+        self.assertEqual(snapshot["champion_last_hour"]["window_seconds"], 3600)
 
     def test_champion_management_route_rejects_invalid_or_unsafe_payload(self):
         base = {

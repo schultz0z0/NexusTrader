@@ -22,6 +22,8 @@ function emptyState() {
     runtime: {},
     emergencyStop: false,
     championManagement: null,
+    championSession: null,
+    championLastHour: null,
     lanes: [],
     laneStates: {},
     positions: [],
@@ -92,6 +94,25 @@ function validSnapshot(snapshot) {
     && !hasSensitiveValue(snapshot);
 }
 
+function normalizeChampionSession(session) {
+  return session && typeof session === "object" ? clone(session) : null;
+}
+
+function normalizeChampionLastHour(summary) {
+  if (!summary || typeof summary !== "object") return null;
+  return {
+    windowSeconds: Number(summary.window_seconds ?? 3600),
+    closedTrades: Number(summary.closed_trades ?? 0),
+    wins: Number(summary.wins ?? 0),
+    losses: Number(summary.losses ?? 0),
+    ties: Number(summary.ties ?? 0),
+    decisiveTrades: Number(summary.decisive_trades ?? 0),
+    accuracy: summary.accuracy === null || summary.accuracy === undefined
+      ? null
+      : Number(summary.accuracy),
+  };
+}
+
 function validEvent(event) {
   return Boolean(event)
     && typeof event === "object"
@@ -154,6 +175,8 @@ export function createNexusTradeStore(initial = {}) {
       runtime: clone(snapshot.runtime || {}),
       emergencyStop: Boolean(snapshot.emergency_stop ?? snapshot.runtime?.emergency_stop),
       championManagement: clone(snapshot.champion_management || state.championManagement),
+      championSession: normalizeChampionSession(snapshot.champion_session || state.championSession),
+      championLastHour: normalizeChampionLastHour(snapshot.champion_last_hour || state.championLastHour),
       lanes: clone(snapshot.lanes || []),
       laneStates: clone(snapshot.lane_states || {}),
       positions: clone(snapshot.positions || []),
@@ -213,6 +236,12 @@ export function createNexusTradeStore(initial = {}) {
       next.runtime = { ...state.runtime, ...runtime };
       next.emergencyStop = Boolean(payload.emergency_stop ?? next.runtime.emergency_stop ?? state.emergencyStop);
       next.championManagement = clone(payload.champion_management || state.championManagement);
+      next.championSession = normalizeChampionSession(
+        payload.champion_session || state.championSession,
+      );
+      next.championLastHour = normalizeChampionLastHour(
+        payload.champion_last_hour || state.championLastHour,
+      );
     } else if (event.type === "nexus.learning") {
       next.learning = clone(payload.learning || state.learning);
     } else if (event.type === "nexus.decision") {

@@ -72,6 +72,8 @@ async def _publish_runtime_snapshot(request: Request) -> dict:
             "runtime": snapshot["runtime"],
             "emergency_stop": snapshot["emergency_stop"],
             "champion_management": snapshot["champion_management"],
+            "champion_session": snapshot["champion_session"],
+            "champion_last_hour": snapshot["champion_last_hour"],
         },
     )
     event = request.app.state.live_store.sanitize_event(event)

@@ -12,6 +12,29 @@ const baseSnapshot = (revision = 4) => ({
     { lane: "champion_baseline", version: { id: "champion-v1", status: "CHAMPION" } },
     { lane: "challenger_trial", version: { id: "trial-v1", status: "TRIAL" } },
   ],
+  champion_session: {
+    management_active: false,
+    mode: "off",
+    baseline_account_type: "demo",
+    baseline_initial_stake: 0.35,
+    suggestion: {
+      revision: 2,
+      initial_stake: 1.25,
+      money_management: "fixed",
+      money_config: {},
+      risk_config: {},
+    },
+    active_management: null,
+  },
+  champion_last_hour: {
+    window_seconds: 3600,
+    closed_trades: 2,
+    wins: 1,
+    losses: 1,
+    ties: 0,
+    decisive_trades: 2,
+    accuracy: 0.5,
+  },
   active_campaigns: [{
     id: "campaign-a", lane: "challenger_trial", status: "ACTIVE",
     progress: { completed: 12, target: 300 },
@@ -56,6 +79,15 @@ test("hydrate normalizes the durable snapshot without exposing caller mutation",
   assert.equal(store.get().learning.jobs[0].id, "daily-1");
   source.learning.jobs[0].status = "FAILED";
   assert.equal(store.get().learning.jobs[0].status, "COMPLETED");
+});
+
+test("hydrate preserves champion session and last-hour snapshot fields", () => {
+  const store = createNexusTradeStore(baseSnapshot());
+
+  assert.equal(store.get().championSession.mode, "off");
+  assert.equal(store.get().championSession.suggestion.initial_stake, 1.25);
+  assert.equal(store.get().championLastHour.closedTrades, 2);
+  assert.equal(store.get().championLastHour.accuracy, 0.5);
 });
 
 test("duplicate and older Nexus events are ignored while one revision may contain distinct events", () => {

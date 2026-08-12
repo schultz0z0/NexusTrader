@@ -238,8 +238,8 @@ class LiveStore:
         )
         for key in (
             "runtime", "lanes", "active_campaigns", "decisions", "trades",
-            "reports", "proposals", "champion_management", "lane_states", "positions",
-            "learning",
+            "reports", "proposals", "champion_management", "champion_session",
+            "champion_last_hour", "lane_states", "positions", "learning",
         ):
             if key in durable:
                 state[key] = deepcopy(durable[key])
@@ -432,6 +432,12 @@ class LiveStore:
             if isinstance(payload.get("champion_management"), dict):
                 state["champion_management"] = deepcopy(
                     payload["champion_management"],
+                )
+            if isinstance(payload.get("champion_session"), dict):
+                state["champion_session"] = deepcopy(payload["champion_session"])
+            if isinstance(payload.get("champion_last_hour"), dict):
+                state["champion_last_hour"] = deepcopy(
+                    payload["champion_last_hour"],
                 )
             emergency = payload.get(
                 "emergency_stop",
