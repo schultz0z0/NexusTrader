@@ -12,6 +12,7 @@ CRITICAL_EVENT_TYPES = {
     "nexus.runtime",
     "nexus.decision",
     "nexus.trade",
+    "nexus.position",
     "nexus.campaign",
     "nexus.report",
     "nexus.trial_changed",

@@ -15,6 +15,7 @@ from nexus_trade.artifacts import CandidateArtifact, canonical_json
 from nexus_trade.clock import CausalCycleResult, EntryClock
 from nexus_trade.constants import (
     NEXUS_DEMO_STAKE,
+    NEXUS_DURATION_SECONDS,
     NEXUS_SYMBOL,
     NEXUS_TIMEFRAME_SECONDS,
     NEXUS_TRADE_BOT_ID,
@@ -231,6 +232,55 @@ class NexusTradeRuntime:
             payload=payload,
         )
         return bool(await self.publisher.publish(event))
+
+    @staticmethod
+    def _optional_position_number(value):
+        if value is None or isinstance(value, bool) or type(value) not in {int, float}:
+            return None
+        normalized = float(value)
+        return normalized if math.isfinite(normalized) else None
+
+    async def _publish_position(
+        self,
+        *,
+        lane: Lane,
+        owner_decision_id: str,
+        contract_id: int,
+        status: str,
+        update_epoch: int,
+        **values,
+    ) -> bool:
+        payload = {
+            "lane": lane.value,
+            "owner_decision_id": owner_decision_id,
+            "contract_id": contract_id,
+            "status": status,
+            "update_epoch": int(update_epoch),
+        }
+        for field in ("stake", "buy_price", "current_spot", "profit"):
+            if field in values:
+                payload[field] = self._optional_position_number(values[field])
+        if values.get("date_expiry") is not None:
+            try:
+                payload["date_expiry"] = int(values["date_expiry"])
+            except (TypeError, ValueError):
+                payload["date_expiry"] = None
+        for field in ("result", "contract_type", "entry_delay_ms"):
+            if values.get(field) is not None:
+                payload[field] = values[field]
+        try:
+            return await self._publish_nexus_event(
+                "nexus.position",
+                (
+                    f"nexus.position:{lane.value}:{contract_id}:"
+                    f"{int(update_epoch)}:{status}"
+                ),
+                payload,
+            )
+        except Exception:
+            # Position telemetry is post-buy observability. A publisher outage
+            # must never repeat, cancel, or quarantine an already accepted order.
+            return False
 
     async def _publish_snapshot_transitions(
         self,
@@ -1000,6 +1050,25 @@ class NexusTradeRuntime:
         await self._save_lane_state(lane)
         if strategy.state.position_status != "ACTIVE":
             return None
+        stake = (
+            self._champion_stake_for(dispatcher.account_type)
+            if lane is Lane.CHAMPION and self._champion_enabled
+            else NEXUS_DEMO_STAKE
+        )
+        await self._publish_position(
+            lane=lane,
+            owner_decision_id=intent.decision_id,
+            contract_id=receipt.contract_id,
+            status="OPEN",
+            update_epoch=int(receipt.accepted_epoch),
+            stake=stake,
+            buy_price=stake,
+            contract_type=intent.contract_type,
+            entry_delay_ms=int(round(
+                (receipt.accepted_epoch - intent.target_epoch) * 1000.0,
+            )),
+            date_expiry=intent.target_epoch + NEXUS_DURATION_SECONDS,
+        )
         return (
             intent.decision_id,
             receipt.contract_id,
@@ -1062,7 +1131,39 @@ class NexusTradeRuntime:
                 payload.setdefault("entry_delay_ms", entry_delay_ms)
             await self.settle_contract(lane, owner_decision_id, payload)
 
-        await monitor.monitor_contract(contract_id, on_settled)
+        async def on_update(contract):
+            if not isinstance(contract, dict):
+                return
+            strategy = self.strategies[lane]
+            if (
+                strategy.state.position_status != "ACTIVE"
+                or strategy.state.owner_decision_id != owner_decision_id
+                or strategy.state.contract_id != contract_id
+            ):
+                return
+            update_epoch = int(
+                contract.get("current_spot_time")
+                or contract.get("date_start")
+                or time.time()
+            )
+            await self._publish_position(
+                lane=lane,
+                owner_decision_id=owner_decision_id,
+                contract_id=contract_id,
+                status="UPDATED",
+                update_epoch=update_epoch,
+                stake=contract.get("buy_price"),
+                buy_price=contract.get("buy_price"),
+                current_spot=contract.get("current_spot"),
+                profit=contract.get("profit"),
+                date_expiry=contract.get("date_expiry"),
+            )
+
+        await monitor.monitor_contract(
+            contract_id,
+            on_settled,
+            on_update_callback=on_update,
+        )
 
     async def settle_contract(
         self,
@@ -1202,6 +1303,25 @@ class NexusTradeRuntime:
         self._lane_owners[lane] = None
         if not callable(atomic_settler):
             await self._save_lane_state(lane)
+        closed_epoch = int(
+            contract.get("sell_time")
+            or contract.get("date_expiry")
+            or time.time()
+        )
+        await self._publish_position(
+            lane=lane,
+            owner_decision_id=owner_decision_id,
+            contract_id=contract_id,
+            status="CLOSED",
+            update_epoch=closed_epoch,
+            stake=stake,
+            buy_price=contract.get("buy_price"),
+            current_spot=contract.get("exit_spot") or contract.get("current_spot"),
+            profit=contract.get("profit"),
+            date_expiry=contract.get("date_expiry"),
+            result=contract.get("status"),
+            contract_type=contract.get("contract_type"),
+        )
         if self._pending_runtime_snapshot is not None:
             pending = self._pending_runtime_snapshot
             if self._managed_champion_factory:

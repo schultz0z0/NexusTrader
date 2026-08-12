@@ -1,5 +1,6 @@
 from collections import deque
 from copy import deepcopy
+import math
 import re
 
 
@@ -10,6 +11,7 @@ class LiveStore:
         "nexus.runtime",
         "nexus.decision",
         "nexus.trade",
+        "nexus.position",
         "nexus.campaign",
         "nexus.report",
         "nexus.trial_changed",
@@ -27,6 +29,8 @@ class LiveStore:
         self.nexus_event_limit = min(int(event_limit), 1000)
         self._nexus_key_order = deque(maxlen=event_limit)
         self._nexus_keys = set()
+        self._position_epochs = {}
+        self._closed_positions = set()
 
     def _state(self, bot_id):
         return self._bots.setdefault(bot_id, {
@@ -42,6 +46,7 @@ class LiveStore:
             "nexus_events": [],
             "decisions": [],
             "trades": [],
+            "positions": [],
             "reports": [],
             "proposals": [],
         })
@@ -130,7 +135,39 @@ class LiveStore:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return False
+        if event.get("type") == "nexus.position" and not cls._valid_position_payload(payload):
+            return False
         return cls._nexus_identity(event) is not None
+
+    @staticmethod
+    def _valid_position_payload(payload) -> bool:
+        if payload.get("lane") not in {"champion_baseline", "challenger_trial"}:
+            return False
+        contract_id = payload.get("contract_id")
+        if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:
+            return False
+        owner = payload.get("owner_decision_id")
+        if type(owner) is not str or not owner.strip():
+            return False
+        if payload.get("status") not in {"OPEN", "UPDATED", "CLOSED"}:
+            return False
+        update_epoch = payload.get("update_epoch")
+        if isinstance(update_epoch, bool) or type(update_epoch) is not int or update_epoch < 0:
+            return False
+        for field in ("stake", "buy_price", "current_spot", "profit"):
+            value = payload.get(field)
+            if value is not None and (
+                isinstance(value, bool)
+                or type(value) not in {int, float}
+                or not math.isfinite(float(value))
+            ):
+                return False
+        expiry = payload.get("date_expiry")
+        if expiry is not None and (
+            isinstance(expiry, bool) or type(expiry) is not int or expiry < 0
+        ):
+            return False
+        return True
 
     @staticmethod
     def _nexus_identity(event):
@@ -144,6 +181,11 @@ class LiveStore:
             return payload.get("id") or payload.get("decision_id")
         if event_type == "nexus.trade":
             return payload.get("id") or payload.get("contract_id")
+        if event_type == "nexus.position":
+            return (
+                f"{payload.get('lane')}:{payload.get('contract_id')}:"
+                f"{payload.get('update_epoch')}:{payload.get('status')}"
+            )
         if event_type in {"nexus.campaign", "nexus.report", "nexus.proposal"}:
             return payload.get("id")
         if event_type == "nexus.version_changed":
@@ -180,10 +222,21 @@ class LiveStore:
         )
         for key in (
             "runtime", "lanes", "active_campaigns", "decisions", "trades",
-            "reports", "proposals", "champion_management",
+            "reports", "proposals", "champion_management", "lane_states", "positions",
         ):
             if key in durable:
                 state[key] = deepcopy(durable[key])
+        for position in state.get("positions", []):
+            contract_id = position.get("contract_id")
+            lane = position.get("lane")
+            update_epoch = position.get("update_epoch")
+            if (
+                lane in {"champion_baseline", "challenger_trial"}
+                and type(contract_id) is int
+                and contract_id > 0
+                and type(update_epoch) is int
+            ):
+                self._position_epochs[("nexus-trade", lane, contract_id)] = update_epoch
         state["emergency_stop"] = bool(
             durable.get(
                 "emergency_stop",
@@ -205,6 +258,8 @@ class LiveStore:
                 return False
             nexus_key = self.nexus_event_key(event)
             if nexus_key in self._nexus_keys:
+                return False
+            if event_type == "nexus.position" and not self._position_event_allowed(event):
                 return False
         event_id = event.get("event_id")
         if event_id and event_id in self._event_ids:
@@ -313,6 +368,28 @@ class LiveStore:
                 del state["recent_trades"][self.trade_limit:]
         return True
 
+    def _position_event_allowed(self, event) -> bool:
+        payload = event["payload"]
+        key = (
+            event["bot_id"],
+            payload["lane"],
+            payload["contract_id"],
+        )
+        if key in self._closed_positions:
+            return False
+        previous_epoch = self._position_epochs.get(key)
+        if previous_epoch is not None and payload["update_epoch"] <= previous_epoch:
+            return False
+        if payload["status"] in {"OPEN", "UPDATED"}:
+            positions = self._state(event["bot_id"]).get("positions", [])
+            if any(
+                item.get("lane") == payload["lane"]
+                and item.get("contract_id") != payload["contract_id"]
+                for item in positions
+            ):
+                return False
+        return True
+
     def _apply_nexus_event(self, state, event):
         event_revision = int(
             event.get("snapshot_version", state.get("snapshot_version", 0) + 1),
@@ -349,6 +426,25 @@ class LiveStore:
             self._upsert(state.setdefault("decisions", []), payload, ("id", "decision_id"))
         elif event_type == "nexus.trade":
             self._upsert(state.setdefault("trades", []), payload, ("id", "contract_id"))
+        elif event_type == "nexus.position":
+            key = (
+                event["bot_id"],
+                payload["lane"],
+                payload["contract_id"],
+            )
+            self._position_epochs[key] = payload["update_epoch"]
+            positions = state.setdefault("positions", [])
+            if payload["status"] == "CLOSED":
+                self._closed_positions.add(key)
+                positions[:] = [
+                    item for item in positions
+                    if not (
+                        item.get("lane") == payload["lane"]
+                        and item.get("contract_id") == payload["contract_id"]
+                    )
+                ]
+            else:
+                self._upsert(positions, payload, ("lane",))
         elif event_type == "nexus.campaign":
             self._upsert(state.setdefault("campaigns", []), payload, ("id",))
             active = state.setdefault("active_campaigns", [])

@@ -117,6 +117,13 @@ class LiveStorePublisher:
         return self.store.apply(event)
 
 
+class PositionFailingPublisher(LiveStorePublisher):
+    async def publish(self, event):
+        if event.get("type") == "nexus.position":
+            raise RuntimeError("position transport unavailable")
+        return await super().publish(event)
+
+
 class PausingSettlementRepository(FakeRepository):
     """Expose the post-commit/pre-runtime-close settlement interleaving."""
 
@@ -255,10 +262,12 @@ class FakeMonitor:
     def __init__(self):
         self.contracts = []
         self.callbacks = {}
+        self.update_callbacks = {}
 
     async def monitor_contract(self, contract_id, callback, on_update_callback=None):
         self.contracts.append(contract_id)
         self.callbacks[contract_id] = callback
+        self.update_callbacks[contract_id] = on_update_callback
 
     async def close(self):
         pass
@@ -952,19 +961,93 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event["type"] for event in publisher.events],
-            ["nexus.decision", "nexus.trade"],
+            [
+                "nexus.decision",
+                "nexus.position",
+                "nexus.position",
+                "nexus.trade",
+            ],
         )
         for event in publisher.events:
             self.assertIsInstance(event["event_id"], str)
             self.assertEqual(event["schema_version"], 1)
             self.assertGreaterEqual(event["snapshot_version"], 1)
-        self.assertEqual(publisher.persistence_observations, [
-            {"type": "nexus.decision", "decisions": 1, "trades": 0},
+        self.assertEqual(publisher.persistence_observations[-2:], [
+            {"type": "nexus.position", "decisions": 1, "trades": 1},
             {"type": "nexus.trade", "decisions": 1, "trades": 1},
         ])
         live = publisher.store.snapshot("nexus-trade")
         self.assertEqual(live["decisions"][0]["decision_id"], decision.decision_id)
         self.assertEqual(live["trades"][0]["contract_id"], 701)
+
+    async def test_live_position_open_update_and_close_follow_persisted_ownership(self):
+        monitor = FakeMonitor()
+        publisher = LiveStorePublisher(self.repository)
+        runtime = self.runtime(
+            publisher=publisher,
+            monitors={Lane.CHAMPION: monitor, Lane.TRIAL: monitor},
+        )
+        runtime.apply_champion_mode(self.snapshot)
+        decision, intent = decision_and_intent(Lane.CHAMPION)
+
+        await runtime.process_cycle(CausalCycleResult(
+            60, object(), object(), (decision,), (intent,),
+        ))
+
+        self.assertEqual(
+            [event["type"] for event in publisher.events],
+            ["nexus.decision", "nexus.position"],
+        )
+        opened = publisher.events[-1]["payload"]
+        self.assertEqual(opened["status"], "OPEN")
+        self.assertEqual(opened["contract_id"], 701)
+        self.assertEqual(opened["stake"], 0.35)
+        self.assertEqual(self.repository.lane_states[Lane.CHAMPION.value]["position_status"], "ACTIVE")
+
+        await monitor.update_callbacks[701]({
+            "contract_id": 701,
+            "current_spot": 634.2,
+            "current_spot_time": 61,
+            "buy_price": 0.35,
+            "profit": 0.08,
+            "date_expiry": 118,
+        })
+        self.assertEqual(publisher.events[-1]["payload"]["status"], "UPDATED")
+        self.assertEqual(publisher.events[-1]["payload"]["current_spot"], 634.2)
+
+        await monitor.callbacks[701]({
+            "contract_id": 701,
+            "contract_type": "CALL",
+            "status": "won",
+            "buy_price": 0.35,
+            "payout": 0.66,
+            "profit": 0.31,
+            "sell_time": 118,
+        })
+        self.assertEqual(
+            [event["type"] for event in publisher.events[-2:]],
+            ["nexus.position", "nexus.trade"],
+        )
+        self.assertEqual(publisher.events[-2]["payload"]["status"], "CLOSED")
+        self.assertEqual(publisher.store.snapshot("nexus-trade")["positions"], [])
+
+    async def test_position_publisher_failure_never_retries_or_loses_accepted_contract(self):
+        monitor = FakeMonitor()
+        publisher = PositionFailingPublisher(self.repository)
+        runtime = self.runtime(
+            publisher=publisher,
+            monitors={Lane.CHAMPION: monitor, Lane.TRIAL: monitor},
+        )
+        runtime.apply_champion_mode(self.snapshot)
+        decision, intent = decision_and_intent(Lane.CHAMPION)
+
+        await runtime.process_cycle(CausalCycleResult(
+            60, object(), object(), (decision,), (intent,),
+        ))
+
+        self.assertEqual(len(self.shared.intents), 1)
+        self.assertEqual(runtime.strategies[Lane.CHAMPION].state.contract_id, 701)
+        self.assertEqual(monitor.contracts, [701])
 
     async def test_runtime_refresh_publishes_existing_snapshot_transitions_only(self):
         publisher = LiveStorePublisher(self.repository)

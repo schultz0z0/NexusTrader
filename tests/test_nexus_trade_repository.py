@@ -960,6 +960,63 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["champion_management"], before["champion_management"])
         self.assertEqual(after["snapshot_version"], before["snapshot_version"])
 
+    async def test_control_snapshot_reconstructs_only_durable_active_positions(self):
+        await self.repo.init_db()
+        runtime = await self.nexus.get_runtime_snapshot()
+        champion_version = next(
+            item["version"]["id"] for item in runtime["lanes"]
+            if item["lane"] == Lane.CHAMPION.value
+        )
+        active_state = {
+            "position_status": "ACTIVE",
+            "owner_decision_id": "position-owner",
+            "contract_id": 8123,
+        }
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO nexus_decisions (
+                    id, lane, nexus_version_id, campaign_id, symbol,
+                    signal_epoch, payload
+                ) VALUES (?, ?, ?, NULL, 'R_100', 120, ?)
+                """,
+                (
+                    "position-owner",
+                    Lane.CHAMPION.value,
+                    champion_version,
+                    json.dumps({
+                        "state": active_state,
+                        "owner": {
+                            "account_id": "redacted-by-snapshot",
+                            "account_type": "demo",
+                            "management_active": False,
+                        },
+                    }),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO nexus_lane_heads (lane, snapshot_id) VALUES (?, ?)",
+                (Lane.CHAMPION.value, "position-owner"),
+            )
+            await db.commit()
+
+        snapshot = await self.nexus.get_control_snapshot()
+        self.assertEqual(snapshot["lane_states"][Lane.CHAMPION.value], active_state)
+        self.assertEqual(snapshot["lane_states"][Lane.TRIAL.value]["position_status"], "IDLE")
+        self.assertEqual(snapshot["positions"], [{
+            "lane": Lane.CHAMPION.value,
+            "contract_id": 8123,
+            "owner_decision_id": "position-owner",
+            "status": "RECONCILING",
+            "update_epoch": 120,
+            "stake": None,
+            "buy_price": None,
+            "current_spot": None,
+            "profit": None,
+            "date_expiry": None,
+        }])
+        self.assertNotIn("account_id", json.dumps(snapshot["positions"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -362,13 +362,77 @@ class NexusTradeRepository:
                 "active Trial campaign does not match the runtime pointer"
             )
         management = await cls._management_from_connection(db)
+        lane_states, positions = await cls._lane_runtime_view(db)
         return {
             "bot": dict(bot),
             "runtime": dict(runtime),
             "lanes": lanes,
             "active_campaigns": active_campaigns,
             "champion_management": management,
+            "lane_states": lane_states,
+            "positions": positions,
         }
+
+    @staticmethod
+    async def _lane_runtime_view(db: aiosqlite.Connection) -> tuple[dict, list]:
+        lane_states = {
+            lane.value: {
+                "position_status": "IDLE",
+                "owner_decision_id": None,
+                "contract_id": None,
+            }
+            for lane in Lane
+        }
+        positions = []
+        async with db.execute(
+            """
+            SELECT decision.lane, decision.signal_epoch, decision.payload
+            FROM nexus_lane_heads AS head
+            JOIN nexus_decisions AS decision ON decision.id = head.snapshot_id
+            ORDER BY decision.lane
+            """,
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            lane = row["lane"]
+            if lane not in lane_states:
+                raise NexusTradeSingletonError("NexusTrade lane head is corrupt")
+            try:
+                payload = json.loads(row["payload"])
+                state = payload["state"]
+                if type(state) is not dict:
+                    raise TypeError("lane state is not an object")
+                status = state["position_status"]
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise NexusTradeSingletonError("NexusTrade lane head is corrupt") from exc
+            if status not in {"IDLE", "RESERVED", "ACTIVE", "QUARANTINED"}:
+                raise NexusTradeSingletonError("NexusTrade lane status is corrupt")
+            lane_states[lane] = dict(state)
+            if status != "ACTIVE":
+                continue
+            contract_id = state.get("contract_id")
+            owner_decision_id = state.get("owner_decision_id")
+            if (
+                isinstance(contract_id, bool)
+                or type(contract_id) is not int
+                or contract_id <= 0
+                or type(owner_decision_id) is not str
+                or not owner_decision_id
+            ):
+                raise NexusTradeSingletonError("active NexusTrade position is corrupt")
+            positions.append({
+                "lane": lane,
+                "contract_id": contract_id,
+                "owner_decision_id": owner_decision_id,
+                "status": "RECONCILING",
+                "update_epoch": int(row["signal_epoch"]),
+                "stake": None,
+                "buy_price": None,
+                "current_spot": None,
+                "profit": None,
+                "date_expiry": None,
+            })
+        return lane_states, positions
 
     @staticmethod
     def _finite_number(value, field: str, *, minimum=None, strictly_positive=False) -> float:
@@ -779,6 +843,8 @@ class NexusTradeRepository:
             "lanes": durable["lanes"],
             "active_campaigns": durable["active_campaigns"],
             "champion_management": durable["champion_management"],
+            "lane_states": durable["lane_states"],
+            "positions": durable["positions"],
             "decisions": decisions,
             "trades": trades,
             "reports": await self.list_reports(),

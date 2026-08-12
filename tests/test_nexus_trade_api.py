@@ -458,6 +458,7 @@ class NexusLiveStoreTests(unittest.TestCase):
             "nexus.runtime",
             "nexus.decision",
             "nexus.trade",
+            "nexus.position",
             "nexus.campaign",
             "nexus.report",
             "nexus.trial_changed",
@@ -466,6 +467,59 @@ class NexusLiveStoreTests(unittest.TestCase):
         ):
             with self.subTest(event_type=event_type):
                 self.assertTrue(is_critical_event({"type": event_type}))
+
+    def test_position_events_are_strict_monotonic_and_closed_is_terminal(self):
+        store = LiveStore()
+
+        def position(event_id, status, update_epoch, **payload):
+            return {
+                "event_id": event_id,
+                "schema_version": 1,
+                "snapshot_version": 3,
+                "type": "nexus.position",
+                "bot_id": "nexus-trade",
+                "epoch": update_epoch,
+                "payload": {
+                    "lane": Lane.CHAMPION.value,
+                    "contract_id": 7001,
+                    "owner_decision_id": "decision-position",
+                    "status": status,
+                    "update_epoch": update_epoch,
+                    **payload,
+                },
+            }
+
+        self.assertTrue(store.apply(position(
+            "position-open", "OPEN", 100,
+            stake=0.35, buy_price=0.35, current_spot=123.45, profit=0.0,
+        )))
+        self.assertFalse(store.apply(position(
+            "position-stale", "UPDATED", 99, current_spot=123.40, profit=-0.1,
+        )))
+        self.assertTrue(store.apply(position(
+            "position-update", "UPDATED", 101, current_spot=123.55, profit=0.12,
+        )))
+        self.assertTrue(store.apply(position(
+            "position-closed", "CLOSED", 102, result="won", profit=0.31,
+        )))
+        self.assertFalse(store.apply(position(
+            "position-after-close", "UPDATED", 103, current_spot=123.60,
+        )))
+        self.assertEqual(store.snapshot("nexus-trade")["positions"], [])
+
+        malformed = position("position-malformed", "OPEN", 110)
+        for field, value in (
+            ("lane", "unknown"),
+            ("contract_id", True),
+            ("contract_id", 0),
+            ("status", "RECONCILING"),
+            ("update_epoch", -1),
+        ):
+            with self.subTest(field=field, value=value):
+                candidate = json.loads(json.dumps(malformed))
+                candidate["payload"][field] = value
+                candidate["event_id"] = f"bad-{field}-{value}"
+                self.assertFalse(store.apply(candidate))
 
 
 if __name__ == "__main__":
