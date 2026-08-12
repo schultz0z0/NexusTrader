@@ -17,6 +17,11 @@ const baseSnapshot = (revision = 4) => ({
   trades: [],
   reports: [],
   proposals: [],
+  lane_states: {
+    champion_baseline: { position_status: "IDLE" },
+    challenger_trial: { position_status: "IDLE" },
+  },
+  positions: [],
 });
 
 const event = (type, eventId, revision, payload) => ({
@@ -87,4 +92,41 @@ test("invalid envelopes and client-visible secrets fail closed", () => {
     api_token: "must-not-enter-client-state",
   })), false);
   assert.equal(store.get().auditEvents.length, 0);
+});
+
+test("Nexus market history, ticks and strict positions stay live and deduplicated", () => {
+  const store = createNexusTradeStore(baseSnapshot());
+  const history = {
+    type: "market.history", event_id: "market-1", schema_version: 1, bot_id: "nexus-trade",
+    symbol: "R_100", timeframe_seconds: 60, mode: "candles",
+    points: [{ time: 60, open: 100, high: 102, low: 99, close: 101 }],
+  };
+  const tick = {
+    type: "market.tick", event_id: "market-2", schema_version: 1, bot_id: "nexus-trade",
+    symbol: "R_100", timeframe_seconds: 60, epoch: 121, price: 103,
+    candle: { time: 120, open: 101, high: 103, low: 101, close: 103 },
+    bollinger: { upper: 104, middle: 101, lower: 98 },
+  };
+  const opened = event("nexus.position", "position-1", 5, {
+    lane: "champion_baseline", contract_id: 73, owner_decision_id: "decision-1",
+    status: "OPEN", update_epoch: 121, stake: 1.5, current_spot: 103,
+  });
+  const updated = event("nexus.position", "position-2", 5, {
+    ...opened.payload, status: "UPDATED", update_epoch: 122, profit: 0.4,
+  });
+  const closed = event("nexus.position", "position-3", 5, {
+    ...opened.payload, status: "CLOSED", update_epoch: 180, profit: 1.2,
+  });
+
+  assert.equal(store.apply(history), true);
+  assert.equal(store.apply(history), false);
+  assert.equal(store.apply(tick), true);
+  assert.equal(store.apply(opened), true);
+  assert.equal(store.apply(updated), true);
+  assert.equal(store.get().positions[0].profit, 0.4);
+  assert.equal(store.apply(closed), true);
+  assert.equal(store.get().positions.length, 0);
+  assert.equal(store.apply(updated), false);
+  assert.equal(store.get().market.points.at(-1).time, 120);
+  assert.equal(store.get().lastTick.price, 103);
 });

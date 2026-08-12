@@ -62,10 +62,11 @@ export class TradingChart {
     const points = (market?.points || []).filter((point) => Number.isFinite(point.time));
     this.primary.setData(points);
     const isEma = indicatorMode === "ema";
-    this.upper.setData(isEma ? [] : market?.donchian?.upper || []);
-    this.middle.setData(isEma ? [] : market?.donchian?.middle || []);
-    this.lower.setData(isEma ? [] : market?.donchian?.lower || []);
-    this.zigzag.setData(isEma ? [] : uniqueOrderedPoints(market?.zigzag));
+    const channel = market?.bollinger || market?.donchian || {};
+    this.upper.setData(isEma ? [] : channel.upper || []);
+    this.middle.setData(isEma ? [] : channel.middle || []);
+    this.lower.setData(isEma ? [] : channel.lower || []);
+    this.zigzag.setData(isEma || indicatorMode === "bollinger" ? [] : uniqueOrderedPoints(market?.zigzag));
     this.ema.setData(isEma ? uniqueOrderedPoints(market?.ema) : []);
     this.chart.timeScale().fitContent();
   }

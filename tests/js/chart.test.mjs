@@ -121,3 +121,23 @@ test("Nexus Speed history and ticks render only the EMA overlay", () => {
   assert.deepEqual(chart.lower.data, []);
   assert.deepEqual(chart.zigzag.data, []);
 });
+
+test("NexusTrade history renders Bollinger without Donchian or EMA leakage", () => {
+  const chart = newChart();
+  chart.setHistory({
+    bot_id: "nexus-trade", symbol: "R_100", timeframe_seconds: 60,
+    mode: "candles", indicator_mode: "bollinger",
+    points: [{ time: 60, open: 100, high: 102, low: 99, close: 101 }],
+    bollinger: {
+      upper: [{ time: 60, value: 103 }],
+      middle: [{ time: 60, value: 101 }],
+      lower: [{ time: 60, value: 99 }],
+    },
+  });
+
+  assert.deepEqual(chart.upper.data, [{ time: 60, value: 103 }]);
+  assert.deepEqual(chart.middle.data, [{ time: 60, value: 101 }]);
+  assert.deepEqual(chart.lower.data, [{ time: 60, value: 99 }]);
+  assert.deepEqual(chart.ema.data, []);
+  assert.deepEqual(chart.zigzag.data, []);
+});
