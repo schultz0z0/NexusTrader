@@ -154,7 +154,9 @@ class LiveStore:
         update_epoch = payload.get("update_epoch")
         if isinstance(update_epoch, bool) or type(update_epoch) is not int or update_epoch < 0:
             return False
-        for field in ("stake", "buy_price", "current_spot", "profit"):
+        for field in (
+            "stake", "buy_price", "entry_spot", "current_spot", "exit_spot", "profit",
+        ):
             value = payload.get(field)
             if value is not None and (
                 isinstance(value, bool)
@@ -166,6 +168,16 @@ class LiveStore:
         if expiry is not None and (
             isinstance(expiry, bool) or type(expiry) is not int or expiry < 0
         ):
+            return False
+        purchase_time = payload.get("purchase_time")
+        if purchase_time is not None and (
+            isinstance(purchase_time, bool)
+            or type(purchase_time) is not int
+            or purchase_time < 0
+        ):
+            return False
+        contract_type = payload.get("contract_type")
+        if contract_type is not None and contract_type not in {"CALL", "PUT"}:
             return False
         return True
 
@@ -444,7 +456,11 @@ class LiveStore:
                     )
                 ]
             else:
-                self._upsert(positions, payload, ("lane",))
+                previous = next(
+                    (item for item in positions if item.get("lane") == payload["lane"]),
+                    {},
+                )
+                self._upsert(positions, {**previous, **payload}, ("lane",))
         elif event_type == "nexus.campaign":
             self._upsert(state.setdefault("campaigns", []), payload, ("id",))
             active = state.setdefault("active_campaigns", [])

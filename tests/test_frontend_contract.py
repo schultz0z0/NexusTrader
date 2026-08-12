@@ -136,6 +136,29 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('data-nexus-action="export-xlsx"', html)
         self.assertIn('id="nexus-export-status"', html)
 
+    def test_nexus_operations_expose_live_chart_lanes_journals_and_protected_management(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:
+            html_source = stream.read()
+        parser = LandmarkParser()
+        parser.feed(html_source)
+
+        self.assertTrue({
+            "nexus-chart", "nexus-chart-state", "nexus-live-price",
+            "nexus-live-adx", "nexus-live-adx-gate", "nexus-position-list",
+            "nexus-decision-journal", "nexus-trade-journal",
+            "nexus-management-dialog", "nexus-management-form",
+            "nexus-management-error",
+        }.issubset(parser.ids))
+        self.assertIn('data-nexus-lane="champion_baseline"', html_source)
+        self.assertIn('data-nexus-lane="challenger_trial"', html_source)
+        self.assertIn('data-nexus-action="open-management"', html_source)
+        management = html_source[html_source.index('id="nexus-management-form"'):]
+        self.assertNotIn('name="symbol"', management)
+        self.assertNotIn('name="timeframe_seconds"', management)
+        self.assertNotIn('name="duration"', management)
+        self.assertNotIn('name="adx_threshold"', management)
+
     def test_nexus_live_regions_and_modal_accessibility_are_explicit(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as stream:

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildNexusOperationalModel,
+  championManagementPayload,
   mountNexusTradeView,
   resolveDashboardView,
 } from "../../static/js/nexus_trade_view.js";
@@ -81,4 +82,43 @@ test("ON DEMO, ON REAL, settlement, emergency and proposal states are explicit",
   }));
   assert.equal(proposal.proposalPending, true);
   assert.equal(proposal.evolutionLabel, "1 EVOLUÇÃO PENDENTE");
+});
+
+test("Champion management is editable only while OFF and IDLE", () => {
+  const state = operationalState();
+  state.championManagement = {
+    revision: 7,
+    initial_stake: 1.5,
+    money_management: "soros",
+    money_config: { levels: 2, percent: 0.6 },
+    risk_config: { take_profit_daily: 25, stop_loss_daily: 12, max_single_stake: 4 },
+  };
+  const model = buildNexusOperationalModel(state);
+
+  assert.equal(model.champion.management.revision, 7);
+  assert.equal(model.champion.management.initial_stake, 1.5);
+  assert.equal(model.champion.managementEditable, true);
+  assert.equal(buildNexusOperationalModel({ ...state, runtime: { enabled: 1 } }).champion.managementEditable, false);
+  assert.equal(buildNexusOperationalModel(operationalState({ positionStatus: "ACTIVE" })).champion.managementEditable, false);
+});
+
+test("management form payload preserves only the approved backend contract", () => {
+  assert.deepEqual(championManagementPayload({
+    initial_stake: "1.25", money_management: "martingale",
+    multiplier: "2", max_levels: "3", take_profit_daily: "20",
+    stop_loss_daily: "10", max_daily_trades: "50", max_single_stake: "5",
+    max_consecutive_losses: "3", cooldown_minutes: "15",
+  }, 4), {
+    expected_revision: 4,
+    initial_stake: 1.25,
+    money_management: "martingale",
+    money_config: { multiplier: 2, max_levels: 3 },
+    risk_config: {
+      take_profit_daily: 20, stop_loss_daily: 10, max_daily_trades: 50,
+      max_single_stake: 5, max_consecutive_losses: 3, cooldown_minutes: 15,
+    },
+  });
+  assert.deepEqual(championManagementPayload({
+    initial_stake: "2", money_management: "soros", levels: "2", percent: "60",
+  }, 5).money_config, { levels: 2, percent: 0.6 });
 });

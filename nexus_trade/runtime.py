@@ -183,6 +183,57 @@ class NexusTradeRuntime:
             raise ValueError("managed stake exceeds max_single_stake")
         return stake
 
+    async def _champion_risk_block_reason(self, *, now_epoch=None) -> str | None:
+        risk = self._champion_management["risk_config"]
+        loader = getattr(self.repository, "get_nexus_champion_daily_risk", None)
+        daily = (
+            await loader()
+            if callable(loader)
+            else {"profit": 0.0, "trades": 0, "last_settled_epoch": None}
+        )
+        if type(daily) is not dict:
+            return "RISK_DATA_INVALID"
+        try:
+            profit = float(daily["profit"])
+            trades = int(daily["trades"])
+            last_settled = daily.get("last_settled_epoch")
+            last_settled = int(last_settled) if last_settled is not None else None
+        except (KeyError, TypeError, ValueError):
+            return "RISK_DATA_INVALID"
+        if not math.isfinite(profit) or trades < 0 or (last_settled is not None and last_settled < 0):
+            return "RISK_DATA_INVALID"
+        take_profit = risk.get("take_profit_daily")
+        if take_profit is not None and float(take_profit) > 0 and profit >= float(take_profit):
+            return "TAKE_PROFIT_DAILY"
+        stop_loss = risk.get("stop_loss_daily")
+        if stop_loss is not None and float(stop_loss) > 0 and profit <= -float(stop_loss):
+            return "STOP_LOSS_DAILY"
+        maximum_trades = risk.get("max_daily_trades")
+        if maximum_trades is not None and trades >= int(maximum_trades):
+            return "MAX_DAILY_TRADES"
+        maximum_losses = risk.get("max_consecutive_losses")
+        if (
+            maximum_losses is not None
+            and self._champion_money_manager.consecutive_losses >= int(maximum_losses)
+        ):
+            return "MAX_CONSECUTIVE_LOSSES"
+        cooldown_minutes = risk.get("cooldown_minutes")
+        now_epoch = int(time.time() if now_epoch is None else now_epoch)
+        if (
+            cooldown_minutes is not None
+            and int(cooldown_minutes) > 0
+            and last_settled is not None
+            and now_epoch - last_settled < int(cooldown_minutes) * 60
+        ):
+            return "COOLDOWN"
+        maximum_stake = risk.get("max_single_stake")
+        if (
+            maximum_stake is not None
+            and float(self._champion_money_manager.get_stake()) > float(maximum_stake)
+        ):
+            return "MAX_SINGLE_STAKE"
+        return None
+
     @property
     def stop_event(self):
         return self._stop_event
@@ -257,7 +308,9 @@ class NexusTradeRuntime:
             "status": status,
             "update_epoch": int(update_epoch),
         }
-        for field in ("stake", "buy_price", "current_spot", "profit"):
+        for field in (
+            "stake", "buy_price", "entry_spot", "current_spot", "exit_spot", "profit",
+        ):
             if field in values:
                 payload[field] = self._optional_position_number(values[field])
         if values.get("date_expiry") is not None:
@@ -265,6 +318,11 @@ class NexusTradeRuntime:
                 payload["date_expiry"] = int(values["date_expiry"])
             except (TypeError, ValueError):
                 payload["date_expiry"] = None
+        if values.get("purchase_time") is not None:
+            try:
+                payload["purchase_time"] = int(values["purchase_time"])
+            except (TypeError, ValueError):
+                payload["purchase_time"] = None
         for field in ("result", "contract_type", "entry_delay_ms"):
             if values.get(field) is not None:
                 payload[field] = values[field]
@@ -1015,6 +1073,23 @@ class NexusTradeRuntime:
                 position_status="RESERVED",
                 owner_decision_id=intent.decision_id,
             )
+        execution_blocked_reason = None
+        if (
+            intent.status == "PENDING"
+            and lane is Lane.CHAMPION
+            and self._champion_enabled
+        ):
+            execution_blocked_reason = await self._champion_risk_block_reason()
+            if execution_blocked_reason is not None:
+                strategy.release_reservation(intent.decision_id)
+                self._lane_owners[lane] = None
+                await self._record_decision(
+                    decision,
+                    strategy,
+                    execution_blocked_reason=execution_blocked_reason,
+                )
+                await self._save_lane_state(lane)
+                return None
         if intent.status == "PENDING":
             dispatcher = self.dispatchers.get(lane)
             if dispatcher is None:
@@ -1077,12 +1152,20 @@ class NexusTradeRuntime:
             )),
         )
 
-    async def _record_decision(self, decision, strategy) -> None:
+    async def _record_decision(
+        self,
+        decision,
+        strategy,
+        *,
+        execution_blocked_reason: str | None = None,
+    ) -> None:
         recorder = getattr(self.repository, "record_nexus_decision", None)
         if not callable(recorder):
             return
         payload = decision.to_dict()
         payload["id"] = payload["decision_id"]
+        if execution_blocked_reason is not None:
+            payload["execution_blocked_reason"] = execution_blocked_reason
         lane = Lane(decision.lane)
         state = strategy.snapshot()
         await recorder(
@@ -1154,9 +1237,12 @@ class NexusTradeRuntime:
                 update_epoch=update_epoch,
                 stake=contract.get("buy_price"),
                 buy_price=contract.get("buy_price"),
+                entry_spot=contract.get("entry_spot"),
                 current_spot=contract.get("current_spot"),
                 profit=contract.get("profit"),
                 date_expiry=contract.get("date_expiry"),
+                purchase_time=contract.get("date_start") or contract.get("purchase_time"),
+                contract_type=contract.get("contract_type"),
             )
 
         await monitor.monitor_contract(

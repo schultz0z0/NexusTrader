@@ -20,6 +20,7 @@ function emptyState() {
     snapshotVersion: 0,
     runtime: {},
     emergencyStop: false,
+    championManagement: null,
     lanes: [],
     laneStates: {},
     positions: [],
@@ -148,6 +149,7 @@ export function createNexusTradeStore(initial = {}) {
       snapshotVersion: snapshot.snapshot_version,
       runtime: clone(snapshot.runtime || {}),
       emergencyStop: Boolean(snapshot.emergency_stop ?? snapshot.runtime?.emergency_stop),
+      championManagement: clone(snapshot.champion_management || state.championManagement),
       lanes: clone(snapshot.lanes || []),
       laneStates: clone(snapshot.lane_states || {}),
       positions: clone(snapshot.positions || []),
@@ -205,6 +207,7 @@ export function createNexusTradeStore(initial = {}) {
       const runtime = payload.runtime && typeof payload.runtime === "object" ? payload.runtime : payload;
       next.runtime = { ...state.runtime, ...runtime };
       next.emergencyStop = Boolean(payload.emergency_stop ?? next.runtime.emergency_stop ?? state.emergencyStop);
+      next.championManagement = clone(payload.champion_management || state.championManagement);
     } else if (event.type === "nexus.decision") {
       next.decisions = upsert(state.decisions, payload, ["id", "decision_id"]);
     } else if (event.type === "nexus.trade") {
@@ -221,7 +224,8 @@ export function createNexusTradeStore(initial = {}) {
         closedPositions.add(key);
         next.positions = state.positions.filter((item) => item.lane !== payload.lane);
       } else {
-        next.positions = upsert(state.positions, payload, ["lane"]);
+        const previous = state.positions.find((item) => item.lane === payload.lane) || {};
+        next.positions = upsert(state.positions, { ...previous, ...payload }, ["lane"]);
       }
     } else if (event.type === "nexus.campaign") {
       const active = payload.status === "ACTIVE"

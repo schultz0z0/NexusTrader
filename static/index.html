@@ -118,6 +118,7 @@
         </header>
         <div class="nexus-command-actions">
           <button id="nexus-open-evolution" class="secondary-button" type="button" data-nexus-action="open-evolution">VER EVOLUÇÃO</button>
+          <button id="nexus-open-management" class="secondary-button" type="button" data-nexus-action="open-management">GERENCIAMENTO</button>
           <button id="nexus-emergency-stop" class="nexus-danger-button" type="button" data-nexus-action="emergency-stop" aria-pressed="false">PARADA TOTAL</button>
           <button id="nexus-champion-toggle" class="primary-button" type="button" data-nexus-action="champion-toggle">INICIAR CHAMPION</button>
         </div>
@@ -173,6 +174,44 @@
             <li><strong>Decisão humana</strong><span>para o Champion</span></li>
           </ul>
         </article>
+      </section>
+
+      <section class="nexus-live-workspace" aria-labelledby="nexus-live-title">
+        <article class="panel nexus-live-chart-panel">
+          <header class="panel-head nexus-live-head">
+            <div><div class="eyebrow">R_100 · M1 · TEMPO REAL</div><h2 id="nexus-live-title">Gráfico operacional</h2></div>
+            <div class="nexus-lane-filter" role="group" aria-label="Filtrar lane operacional">
+              <button type="button" class="active" data-nexus-lane="all" aria-pressed="true">TODAS</button>
+              <button type="button" data-nexus-lane="champion_baseline" aria-pressed="false">CHAMPION</button>
+              <button type="button" data-nexus-lane="challenger_trial" aria-pressed="false">TRIAL</button>
+            </div>
+          </header>
+          <div class="nexus-market-strip">
+            <span><small>PREÇO</small><strong id="nexus-live-price">—</strong></span>
+            <span><small>ADX (14)</small><strong id="nexus-live-adx">—</strong></span>
+            <span><small>GATE ADX</small><strong id="nexus-live-adx-gate">AGUARDANDO</strong></span>
+            <span><small>ÚLTIMA DECISÃO</small><strong id="nexus-live-decision">—</strong></span>
+            <span><small>CONEXÃO</small><strong id="nexus-live-connection">CONECTANDO</strong></span>
+          </div>
+          <div class="nexus-chart-wrap">
+            <div id="nexus-chart"></div>
+            <div id="nexus-chart-state" class="chart-state"><span class="loader"></span><strong>Aguardando histórico R_100</strong><small>O gráfico M1 e as Bandas de Bollinger aparecerão assim que o feed sincronizar.</small></div>
+            <div class="chart-legend"><span class="legend-price">Preço</span><span class="legend-upper">Bollinger superior</span><span class="legend-mid">SMA 20</span><span class="legend-lower">Bollinger inferior</span></div>
+          </div>
+        </article>
+
+        <aside class="panel nexus-live-positions">
+          <header class="panel-head"><div><div class="eyebrow">CONTRATOS AO VIVO</div><h2>Posições por lane</h2></div><strong id="nexus-position-count">0 abertas</strong></header>
+          <div id="nexus-position-list" class="nexus-position-list"><div class="nexus-empty-state"><strong>Sem posição</strong><p>Champion e Trial continuam analisando R_100.</p></div></div>
+        </aside>
+      </section>
+
+      <section class="panel nexus-journal-panel">
+        <header class="panel-head"><div><div class="eyebrow">AUDITORIA OPERACIONAL</div><h2>Decisões e contratos liquidados</h2></div><small id="nexus-journal-filter">TODAS AS LANES</small></header>
+        <div class="nexus-journal-grid">
+          <div class="table-wrap"><table aria-label="Decisões NexusTrade ao vivo"><thead><tr><th>HORA</th><th>LANE</th><th>DECISÃO</th><th>ADX</th><th>MOTIVO</th></tr></thead><tbody id="nexus-decision-journal"><tr class="empty-row"><td colspan="5">Aguardando decisões M1.</td></tr></tbody></table></div>
+          <div class="table-wrap"><table aria-label="Contratos NexusTrade liquidados"><thead><tr><th>HORA</th><th>LANE</th><th>TIPO</th><th>STAKE</th><th>RESULTADO</th><th>P&amp;L</th></tr></thead><tbody id="nexus-trade-journal"><tr class="empty-row"><td colspan="6">Aguardando contratos liquidados.</td></tr></tbody></table></div>
+        </div>
       </section>
       </section>
 
@@ -334,6 +373,23 @@
         <button id="nexus-cancel-governance" type="button" class="secondary-button">CANCELAR</button>
         <button id="nexus-submit-governance" type="submit" class="real-button">CONFIRMAR AÇÃO</button>
       </div>
+    </form>
+  </div>
+
+  <div id="nexus-management-dialog" class="confirmation-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="nexus-management-title">
+    <form id="nexus-management-form" class="confirmation-card nexus-management-card">
+      <div class="eyebrow">CHAMPION · CONFIGURAÇÃO PROTEGIDA</div>
+      <h2 id="nexus-management-title">Gerenciamento de banca</h2>
+      <p>Só pode ser alterado com o Champion OFF e a lane IDLE. O Trial permanece DEMO em US$ 0,35 e não usa esta configuração.</p>
+      <input id="nexus-management-revision" name="expected_revision" type="hidden" value="1">
+      <div class="form-row"><label>Stake inicial (USD)<input name="initial_stake" type="number" min="0.35" step="0.01" required></label><label>Modelo<select name="money_management"><option value="fixed">Mão fixa</option><option value="martingale">Martingale</option><option value="soros">Soros</option></select></label></div>
+      <div id="nexus-martingale-fields" class="form-row" hidden><label>Multiplicador<input name="multiplier" type="number" min="1.01" step="0.01" value="2"></label><label>Níveis máximos<input name="max_levels" type="number" min="1" step="1" value="3"></label></div>
+      <div id="nexus-soros-fields" class="form-row" hidden><label>Níveis<input name="levels" type="number" min="1" step="1" value="2"></label><label>Lucro reinvestido (%)<input name="percent" type="number" min="1" max="100" step="1" value="60"></label></div>
+      <div class="form-row"><label>Take profit diário<input name="take_profit_daily" type="number" min="0" step="0.01"></label><label>Stop loss diário<input name="stop_loss_daily" type="number" min="0" step="0.01"></label></div>
+      <div class="form-row"><label>Máx. operações/dia<input name="max_daily_trades" type="number" min="1" step="1"></label><label>Stake máxima<input name="max_single_stake" type="number" min="0.35" step="0.01"></label></div>
+      <div class="form-row"><label>Losses consecutivos<input name="max_consecutive_losses" type="number" min="1" step="1"></label><label>Cooldown (min)<input name="cooldown_minutes" type="number" min="0" step="1"></label></div>
+      <div id="nexus-management-error" class="form-error" hidden role="alert"></div>
+      <div class="confirmation-actions"><button id="nexus-cancel-management" type="button" class="secondary-button">CANCELAR</button><button id="nexus-save-management" type="submit" class="primary-button">SALVAR GERENCIAMENTO</button></div>
     </form>
   </div>
 

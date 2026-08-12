@@ -70,14 +70,57 @@ function versionLabel(value, fallback) {
 }
 
 function championPosition(state, champion) {
-  const explicit = champion?.state?.position_status || champion?.position_status;
+  const explicit = state?.laneStates?.champion_baseline?.position_status
+    || champion?.state?.position_status
+    || champion?.position_status;
   if (explicit) return String(explicit).toUpperCase();
+  if ((state?.positions || []).some((position) => position?.lane === "champion_baseline")) return "ACTIVE";
   const openTrade = (state?.trades || []).some((trade) => {
     const metadata = trade?.metadata || {};
     const tradeLane = trade?.lane || metadata.lane;
     return tradeLane === "champion_baseline" && !["won", "lost", "tie", "closed"].includes(String(trade?.result || trade?.status).toLowerCase());
   });
   return openTrade ? "ACTIVE" : "IDLE";
+}
+
+const DEFAULT_MANAGEMENT = Object.freeze({
+  revision: 1,
+  initial_stake: 0.35,
+  money_management: "fixed",
+  money_config: {},
+  risk_config: {},
+});
+
+function finiteField(values, key, fallback = 0) {
+  const number = Number(values?.[key]);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function integerField(values, key, fallback = 0) {
+  return Math.trunc(finiteField(values, key, fallback));
+}
+
+export function championManagementPayload(values = {}, expectedRevision = 1) {
+  const mode = String(values.money_management || "fixed");
+  const moneyConfig = mode === "martingale"
+    ? { multiplier: finiteField(values, "multiplier", 2), max_levels: integerField(values, "max_levels", 1) }
+    : mode === "soros"
+      ? { levels: integerField(values, "levels", 1), percent: finiteField(values, "percent", 100) / 100 }
+      : {};
+  const riskConfig = {};
+  for (const key of ["take_profit_daily", "stop_loss_daily", "max_single_stake"]) {
+    if (values[key] !== undefined && values[key] !== "") riskConfig[key] = finiteField(values, key);
+  }
+  for (const key of ["max_daily_trades", "max_consecutive_losses", "cooldown_minutes"]) {
+    if (values[key] !== undefined && values[key] !== "") riskConfig[key] = integerField(values, key);
+  }
+  return {
+    expected_revision: Number(expectedRevision),
+    initial_stake: finiteField(values, "initial_stake", 0.35),
+    money_management: mode,
+    money_config: moneyConfig,
+    risk_config: riskConfig,
+  };
 }
 
 export function buildNexusOperationalModel(state = {}, account = null) {
@@ -88,6 +131,7 @@ export function buildNexusOperationalModel(state = {}, account = null) {
   const accountType = String(runtime.champion_account_type || runtime.account_type || account?.account_type || "demo").toLowerCase();
   const positionStatus = championPosition(state, champion);
   const emergency = Boolean(state.emergencyStop ?? runtime.emergency_stop);
+  const management = state.championManagement || DEFAULT_MANAGEMENT;
   let status = enabled ? `ON — ${accountType === "real" ? "REAL" : "DEMO"}` : "OFF — APRENDENDO EM DEMO";
   if (positionStatus !== "IDLE") status = "AGUARDANDO LIQUIDAÇÃO";
   if (emergency) status = "PARADA TOTAL";
@@ -101,10 +145,14 @@ export function buildNexusOperationalModel(state = {}, account = null) {
       statusTone: emergency ? "danger" : positionStatus !== "IDLE" ? "waiting" : enabled ? "live" : "neutral",
       enabled,
       positionStatus,
-      stake: enabled ? "GERENCIAMENTO CONFIGURADO" : "US$ 0,35",
+      stake: enabled
+        ? `US$ ${Number(management.initial_stake || 0).toFixed(2)} · ${String(management.money_management || "fixed").toUpperCase()}`
+        : "US$ 0,35",
       account: enabled ? (runtime.champion_account_id || account?.account_id || "Conta não selecionada") : "DEMO permanente",
       toggleLabel: enabled ? "PARAR CHAMPION" : "INICIAR CHAMPION",
       toggleDisabled: emergency || positionStatus === "RESERVED" || positionStatus === "QUARANTINED",
+      management: structuredClone(management),
+      managementEditable: !enabled && positionStatus === "IDLE" && !emergency,
     },
     trial: {
       version: versionLabel(trial, "Trial V1"),
@@ -155,6 +203,13 @@ function renderOperational(root, model) {
   }
   const evolution = root.querySelector?.("#nexus-open-evolution");
   if (evolution) evolution.classList.toggle("has-pending", model.proposalPending);
+  const management = root.querySelector?.("#nexus-open-management");
+  if (management) {
+    management.disabled = !model.champion.managementEditable;
+    management.title = model.champion.managementEditable
+      ? "Configurar stake e limites do Champion"
+      : "Pare o Champion e aguarde a lane ficar IDLE";
+  }
 }
 
 const REPORT_METRICS = [
@@ -318,6 +373,8 @@ export function mountNexusTradeView({
   let actionMode = null;
   let catalogRefreshQueued = false;
   let governanceReturnFocus = null;
+  let managementReturnFocus = null;
+  let startAfterManagement = false;
 
   const renderTabs = () => {
     for (const button of root?.querySelectorAll?.("[data-nexus-tab]") || []) {
@@ -416,11 +473,106 @@ export function mountNexusTradeView({
     if (activeTab !== "operations") loadReports();
   };
 
+  const startChampion = async () => {
+    const account = getAccount();
+    if (!account) throw new Error("Selecione uma conta global antes de iniciar o Champion.");
+    let realTicket = "";
+    if (account.account_type === "real") {
+      realTicket = await confirmReal(account);
+      if (!realTicket) return false;
+    }
+    const snapshot = await api.setMode({
+      enabled: true,
+      account_id: account.account_id,
+      account_type: account.account_type,
+      real_ticket: realTicket,
+    });
+    store.hydrate(snapshot);
+    onToast(`Champion ON — ${account.account_type === "real" ? "REAL" : "DEMO"}.`);
+    return true;
+  };
+
+  const syncManagementFields = () => {
+    const form = globalThis.document?.querySelector?.("#nexus-management-form");
+    const mode = form?.elements?.money_management?.value || "fixed";
+    const martingale = globalThis.document?.querySelector?.("#nexus-martingale-fields");
+    const soros = globalThis.document?.querySelector?.("#nexus-soros-fields");
+    if (martingale) martingale.hidden = mode !== "martingale";
+    if (soros) soros.hidden = mode !== "soros";
+  };
+
+  const closeManagement = () => {
+    const dialog = globalThis.document?.querySelector?.("#nexus-management-dialog");
+    const error = globalThis.document?.querySelector?.("#nexus-management-error");
+    if (dialog) dialog.hidden = true;
+    if (error) error.hidden = true;
+    startAfterManagement = false;
+    const returnFocus = managementReturnFocus;
+    managementReturnFocus = null;
+    returnFocus?.focus?.();
+  };
+
+  const openManagement = (thenStart = false) => {
+    const model = buildNexusOperationalModel(store?.get?.() || {}, getAccount());
+    if (!model.champion.managementEditable) {
+      onToast("Pare o Champion e aguarde a lane ficar IDLE para alterar o gerenciamento.", "error");
+      return;
+    }
+    const form = globalThis.document?.querySelector?.("#nexus-management-form");
+    const dialog = globalThis.document?.querySelector?.("#nexus-management-dialog");
+    const submit = globalThis.document?.querySelector?.("#nexus-save-management");
+    if (!form || !dialog) return;
+    const management = model.champion.management;
+    const values = {
+      expected_revision: management.revision,
+      initial_stake: management.initial_stake,
+      money_management: management.money_management,
+      multiplier: management.money_config?.multiplier ?? 2,
+      max_levels: management.money_config?.max_levels ?? 3,
+      levels: management.money_config?.levels ?? 2,
+      percent: Number(management.money_config?.percent ?? 0.6) * 100,
+      ...management.risk_config,
+    };
+    for (const [name, value] of Object.entries(values)) {
+      if (form.elements?.[name]) form.elements[name].value = value ?? "";
+    }
+    startAfterManagement = Boolean(thenStart);
+    if (submit) submit.textContent = thenStart ? "SALVAR E INICIAR" : "SALVAR GERENCIAMENTO";
+    managementReturnFocus = globalThis.document?.activeElement || null;
+    syncManagementFields();
+    dialog.hidden = false;
+    form.elements?.initial_stake?.focus?.();
+  };
+
+  const submitManagement = async (event) => {
+    event.preventDefault?.();
+    const form = event.currentTarget;
+    const error = globalThis.document?.querySelector?.("#nexus-management-error");
+    const submit = globalThis.document?.querySelector?.("#nexus-save-management");
+    try {
+      if (submit) submit.disabled = true;
+      const values = Object.fromEntries(new FormData(form).entries());
+      const payload = championManagementPayload(values, Number(values.expected_revision));
+      const snapshot = await api.setChampionManagement(payload);
+      store.hydrate(snapshot);
+      const shouldStart = startAfterManagement;
+      closeManagement();
+      onToast("Gerenciamento do Champion salvo.");
+      if (shouldStart) await startChampion();
+    } catch (failure) {
+      if (error) {
+        error.textContent = failure.message || "Falha ao salvar gerenciamento.";
+        error.hidden = false;
+      }
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  };
+
   const handleToggle = async () => {
     if (!api || !store) return;
     const state = store.get();
     const model = buildNexusOperationalModel(state, getAccount());
-    const account = getAccount();
     try {
       if (model.champion.enabled) {
         const snapshot = await api.setMode({
@@ -433,20 +585,7 @@ export function mountNexusTradeView({
         onToast("Champion parado. O laboratório DEMO continua ativo.");
         return;
       }
-      if (!account) throw new Error("Selecione uma conta global antes de iniciar o Champion.");
-      let realTicket = "";
-      if (account.account_type === "real") {
-        realTicket = await confirmReal(account);
-        if (!realTicket) return;
-      }
-      const snapshot = await api.setMode({
-        enabled: true,
-        account_id: account.account_id,
-        account_type: account.account_type,
-        real_ticket: realTicket,
-      });
-      store.hydrate(snapshot);
-      onToast(`Champion ON — ${account.account_type === "real" ? "REAL" : "DEMO"}.`);
+      openManagement(true);
     } catch (error) {
       onToast(error.message || "Falha ao alterar o Champion.", "error");
     }
@@ -601,12 +740,19 @@ export function mountNexusTradeView({
   globalThis.document?.querySelector?.("#nexus-governance-dialog")?.addEventListener?.("keydown", (event) => {
     handleGovernanceDialogKeydown(event, event.currentTarget, closeGovernance);
   });
+  globalThis.document?.querySelector?.("#nexus-management-form")?.addEventListener?.("submit", submitManagement);
+  globalThis.document?.querySelector?.("#nexus-cancel-management")?.addEventListener?.("click", closeManagement);
+  globalThis.document?.querySelector?.('#nexus-management-form [name="money_management"]')?.addEventListener?.("change", syncManagementFields);
+  globalThis.document?.querySelector?.("#nexus-management-dialog")?.addEventListener?.("keydown", (event) => {
+    handleGovernanceDialogKeydown(event, event.currentTarget, closeManagement);
+  });
 
   root?.addEventListener?.("click", (event) => {
     const tab = event.target?.closest?.("[data-nexus-tab]")?.dataset?.nexusTab;
     if (tab) openTab(tab);
     const action = event.target?.closest?.("[data-nexus-action]")?.dataset?.nexusAction;
     if (action === "champion-toggle") handleToggle();
+    if (action === "open-management") openManagement(false);
     if (action === "emergency-stop") handleEmergency();
     if (action === "open-evolution") { openTab("evolution"); onOpenEvolution(); }
     if (["approve", "reanalyze", "rollback"].includes(action)) openGovernance(action);

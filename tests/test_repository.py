@@ -98,6 +98,41 @@ class RepositoryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(pnl, 0.8)
         self.assertEqual(count, 1)
 
+    async def test_nexus_champion_daily_risk_excludes_trial_and_unmanaged_rows(self):
+        base = {
+            "bot_id": "nexus-trade", "session_id": None,
+            "strategy_name": "nexus_trade", "symbol": "R_100",
+            "contract_type": "CALL", "stake": 0.5, "payout": 0.0,
+            "result": "lost", "status": "closed", "expiry_time": 1234,
+            "nexus_version_id": None,
+            "campaign_id": None,
+        }
+        await self.repo.upsert_trade({
+            **base, "contract_id": 201, "profit": -0.5,
+            "lane": "champion_baseline",
+        })
+        await self.repo.upsert_trade({
+            **base, "contract_id": 202, "profit": 99.0,
+            "lane": "challenger_trial",
+        })
+        await self.repo.upsert_trade({
+            **base, "contract_id": 203, "profit": 88.0,
+            "lane": "champion_baseline",
+        })
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE trades SET risk_applied = 1 WHERE contract_id IN (201, 202)",
+            )
+            await db.commit()
+
+        result = await self.repo.get_nexus_champion_daily_risk()
+
+        self.assertEqual(result, {
+            "profit": -0.5,
+            "trades": 1,
+            "last_settled_epoch": 1234,
+        })
+
     async def test_session_can_be_marked_closed(self):
         await self.repo.create_session("session-a")
 

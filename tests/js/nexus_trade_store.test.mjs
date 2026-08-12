@@ -109,7 +109,7 @@ test("Nexus market history, ticks and strict positions stay live and deduplicate
   };
   const opened = event("nexus.position", "position-1", 5, {
     lane: "champion_baseline", contract_id: 73, owner_decision_id: "decision-1",
-    status: "OPEN", update_epoch: 121, stake: 1.5, current_spot: 103,
+    status: "OPEN", update_epoch: 121, stake: 1.5, current_spot: 103, contract_type: "CALL",
   });
   const updated = event("nexus.position", "position-2", 5, {
     ...opened.payload, status: "UPDATED", update_epoch: 122, profit: 0.4,
@@ -124,6 +124,7 @@ test("Nexus market history, ticks and strict positions stay live and deduplicate
   assert.equal(store.apply(opened), true);
   assert.equal(store.apply(updated), true);
   assert.equal(store.get().positions[0].profit, 0.4);
+  assert.equal(store.get().positions[0].contract_type, "CALL");
   assert.equal(store.apply(closed), true);
   assert.equal(store.get().positions.length, 0);
   assert.equal(store.apply(updated), false);

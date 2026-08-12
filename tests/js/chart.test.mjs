@@ -36,6 +36,12 @@ function newChart() {
   return new TradingChart({ clientWidth: 1000, clientHeight: 600 });
 }
 
+test("telemetry may clear annotations before the first market history", () => {
+  const chart = newChart();
+  assert.doesNotThrow(() => chart.clearMarkers());
+  assert.doesNotThrow(() => chart.showTrade(null));
+});
+
 test("same-mode market switch removes old indicators and trade annotations", () => {
   const chart = newChart();
   chart.setHistory({ symbol: "1HZ75V", timeframe_seconds: 1, mode: "line", points: [{ time: 1, value: 7700 }] });

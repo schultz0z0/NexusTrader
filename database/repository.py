@@ -789,6 +789,39 @@ class DatabaseRepository:
                 row = await cursor.fetchone()
         return float(row[0]), int(row[1])
 
+    async def get_nexus_champion_daily_risk(self) -> dict:
+        """Return today's managed Champion exposure in the business timezone."""
+        business_zone = ZoneInfo(settings.BUSINESS_TIMEZONE)
+        local_today = datetime.now(business_zone).date()
+        start_local = datetime.combine(local_today, time.min, tzinfo=business_zone)
+        end_local = start_local + timedelta(days=1)
+        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None).strftime(
+            "%Y-%m-%d %H:%M:%S",
+        )
+        end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None).strftime(
+            "%Y-%m-%d %H:%M:%S",
+        )
+        async with self._connection() as db:
+            async with db.execute(
+                """
+                SELECT COALESCE(SUM(profit), 0.0), COUNT(*),
+                       MAX(COALESCE(expiry_time, purchase_time))
+                FROM trades
+                WHERE bot_id = ? AND lane = ? AND status = 'closed'
+                  AND risk_applied = 1
+                  AND created_at >= ? AND created_at < ?
+                """,
+                (
+                    "nexus-trade", "champion_baseline", start_utc, end_utc,
+                ),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return {
+            "profit": float(row[0]),
+            "trades": int(row[1]),
+            "last_settled_epoch": int(row[2]) if row[2] is not None else None,
+        }
+
     async def get_daily_stats(self) -> dict:
         """Calcula PnL e quantidade de trades do dia atual."""
         async with self._connection() as db:

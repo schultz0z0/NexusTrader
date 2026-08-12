@@ -6,18 +6,21 @@ import { configuredBotPayload, strategyProfile } from "./bot_config.js";
 import { nexusTradeApi } from "./nexus_trade_api.js";
 import { createNexusTradeStore, NEXUS_BOT_ID, reconcileNexusTradeStore } from "./nexus_trade_store.js";
 import { buildNexusOperationalModel, mountNexusTradeView, resolveDashboardView } from "./nexus_trade_view.js";
+import { buildNexusLiveModel } from "./nexus_trade_operations.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_STORAGE_KEY = "nexus.global.account";
 const store = new Store({ bots: [], accounts: [], selectedId: null, snapshot: null, trades: [], connected: false });
 const nexusStore = createNexusTradeStore();
 const chart = new TradingChart($("#chart"));
+const nexusChart = new TradingChart($("#nexus-chart"));
 let socket = null;
 let socketToken = 0;
 let reconnectTimer = null;
 let countdownTimer = null;
 let realConfirmationResolver = null;
 let activeAccountId = localStorage.getItem(ACCOUNT_STORAGE_KEY) || "";
+let nexusLaneFilter = "all";
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD" });
 const price = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(Number(value) >= 100 ? 2 : 4) : "—";
 
@@ -31,7 +34,11 @@ const nexusView = mountNexusTradeView({
   onOpenEvolution: () => {},
   onToast: toast,
 });
-nexusStore.subscribe(() => { if (store.get().selectedId === NEXUS_BOT_ID) renderBots(); });
+nexusStore.subscribe((state, change) => {
+  if (store.get().selectedId !== NEXUS_BOT_ID) return;
+  renderBots();
+  renderNexusLive(state, change);
+});
 
 function toast(message, type = "info") {
   const node = document.createElement("div"); node.className = `toast ${type}`; node.textContent = message;
@@ -126,6 +133,56 @@ function updateMarket(event) {
   $("#chart-state").hidden = true;
 }
 
+function nexusLaneLabel(lane) {
+  return lane === "champion_baseline" ? "CHAMPION" : lane === "challenger_trial" ? "TRIAL" : "TODAS";
+}
+
+function nexusDecisionLabel(decision) {
+  return String(decision?.contract_type || decision?.action || decision?.signal || "NÃO OPERAR").toUpperCase();
+}
+
+function renderNexusLive(state = nexusStore.get(), change = { kind: "state" }) {
+  const model = buildNexusLiveModel(state, nexusLaneFilter);
+  const market = model.market;
+  const chartState = $("#nexus-chart-state");
+  if (market && (change.kind === "snapshot" || change.type === "market.history" || change.kind === "filter")) {
+    nexusChart.setHistory(market);
+    chartState.hidden = Boolean(market.points?.length);
+  }
+  if (model.lastTick && change.type === "market.tick") nexusChart.updateTick({ ...model.lastTick, indicator_mode: "bollinger" });
+  if (!market?.points?.length) chartState.hidden = false;
+
+  $("#nexus-live-price").textContent = price(model.lastTick?.price ?? market?.points?.at(-1)?.close);
+  $("#nexus-live-adx").textContent = model.latestAdx === null ? "—" : model.latestAdx.toFixed(2);
+  $("#nexus-live-adx-gate").textContent = model.latestAdx === null ? "AGUARDANDO" : model.latestAdx <= 22 ? "PERMITIDO" : "BLOQUEADO";
+  $("#nexus-live-adx-gate").className = model.latestAdx !== null && model.latestAdx <= 22 ? "positive" : model.latestAdx === null ? "" : "negative";
+  $("#nexus-live-decision").textContent = model.latestDecision ? nexusDecisionLabel(model.latestDecision) : "—";
+  $("#nexus-live-connection").textContent = String(model.connectionStatus).toUpperCase();
+  $("#nexus-journal-filter").textContent = `${nexusLaneLabel(nexusLaneFilter)} · R_100/M1`;
+
+  $("#nexus-position-count").textContent = `${model.positions.length} ${model.positions.length === 1 ? "aberta" : "abertas"}`;
+  $("#nexus-position-list").innerHTML = model.positions.length
+    ? model.positions.map((position) => `<article class="nexus-position-card ${escapeHtml(position.lane)}"><header><strong>${nexusLaneLabel(position.lane)} · ${escapeHtml(position.contract_type || "CONTRATO")}</strong><small>#${escapeHtml(position.contract_id)}</small></header><dl><div><dt>STATUS</dt><dd>${escapeHtml(position.status)}</dd></div><div><dt>STAKE</dt><dd>${money.format(Number(position.stake || position.buy_price || 0))}</dd></div><div><dt>SPOT ATUAL</dt><dd>${price(position.current_spot)}</dd></div><div><dt>P&amp;L</dt><dd class="${Number(position.profit || 0) >= 0 ? "positive" : "negative"}">${money.format(Number(position.profit || 0))}</dd></div></dl></article>`).join("")
+    : `<div class="nexus-empty-state"><strong>Sem posição</strong><p>As lanes selecionadas continuam analisando R_100.</p></div>`;
+
+  if (["snapshot", "market.history", "nexus.position", "nexus.trade"].includes(change.type) || change.kind === "filter") {
+    nexusChart.clearMarkers();
+    for (const trade of model.trades.slice(0, 30).reverse()) nexusChart.closeTrade(trade);
+    for (const position of model.positions) nexusChart.showTrade({
+      ...position,
+      entry_spot: position.entry_spot ?? position.current_spot,
+      purchase_time: position.purchase_time ?? position.update_epoch,
+    });
+  }
+
+  $("#nexus-decision-journal").innerHTML = model.decisions.length
+    ? model.decisions.slice(0, 80).map((decision) => `<tr><td>${formatTime(decision.signal_epoch || decision.created_at)}</td><td>${nexusLaneLabel(decision.lane)}</td><td>${escapeHtml(nexusDecisionLabel(decision))}</td><td>${decision.adx == null ? "—" : Number(decision.adx).toFixed(2)}</td><td>${escapeHtml(decision.execution_blocked_reason || decision.blocked_reason || decision.reason || "setup aprovado")}</td></tr>`).join("")
+    : `<tr class="empty-row"><td colspan="5">Aguardando decisões M1.</td></tr>`;
+  $("#nexus-trade-journal").innerHTML = model.trades.length
+    ? model.trades.slice(0, 80).map((trade) => `<tr><td>${formatTime(trade.expiry_time || trade.settled_epoch || trade.created_at)}</td><td>${nexusLaneLabel(trade.lane || trade.metadata?.lane)}</td><td>${escapeHtml(trade.contract_type || "—")}</td><td>${money.format(Number(trade.stake || 0))}</td><td>${escapeHtml(String(trade.result || trade.status || "—").toUpperCase())}</td><td class="${Number(trade.profit || 0) >= 0 ? "positive" : "negative"}">${money.format(Number(trade.profit || 0))}</td></tr>`).join("")
+    : `<tr class="empty-row"><td colspan="6">Aguardando contratos liquidados.</td></tr>`;
+}
+
 function renderActiveTrade(trade) {
   clearInterval(countdownTimer); countdownTimer = null;
   const box = $("#active-trade"); const chip = $("#operation-state");
@@ -194,6 +251,7 @@ async function selectBot(id) {
   const token = ++socketToken; if (socket) socket.close(); clearTimeout(reconnectTimer);
   store.set({ selectedId: id, connected: false, snapshot: null, trades: [] }); renderBots(); renderHeader(); renderSnapshot(); setConnection(false, "Conectando");
   if (resolveDashboardView(id) === "nexus") {
+    closeDrawer();
     nexusView.show();
     nexusStore.setConnection("connecting");
     connectLive(id, token);
@@ -387,6 +445,17 @@ $("#bot-list").addEventListener("click", (event) => { const button = event.targe
 $("#open-config").addEventListener("click", () => { if (selectedBot()?.id !== NEXUS_BOT_ID) openDrawer(false); }); $("#new-bot").addEventListener("click", () => openDrawer(true)); $("#close-config").addEventListener("click", closeDrawer); $("#cancel-config").addEventListener("click", closeDrawer); $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $("#account-select").addEventListener("change", changeGlobalAccount);
 $("#cancel-real-start").addEventListener("click", () => closeRealConfirmation(null));
+$("#nexus-trade-view").addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-nexus-lane]");
+  if (!button) return;
+  nexusLaneFilter = button.dataset.nexusLane;
+  for (const item of document.querySelectorAll("[data-nexus-lane]")) {
+    const active = item.dataset.nexusLane === nexusLaneFilter;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", String(active));
+  }
+  renderNexusLive(nexusStore.get(), { kind: "filter", type: "filter" });
+});
 
 $("#strategy-select").addEventListener("change", (e) => {
   $("#donchian-fixed-profile").hidden = e.target.value !== "donchian";

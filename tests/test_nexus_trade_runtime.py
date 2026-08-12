@@ -30,6 +30,11 @@ class FakeRepository:
         self.runtime_snapshot = None
         self.risk_state = None
         self.fail_atomic_settlement = False
+        self.champion_daily_risk = {
+            "profit": 0.0,
+            "trades": 0,
+            "last_settled_epoch": None,
+        }
 
     async def record_nexus_decision(
         self, decision, *, nexus_version_id, campaign_id, state, owner=None,
@@ -73,6 +78,9 @@ class FakeRepository:
             "circuit_consecutive_losses": 0,
             "circuit_tripped_at": 0.0,
         }
+
+    async def get_nexus_champion_daily_risk(self):
+        return dict(self.champion_daily_risk)
 
     async def settle_nexus_trade_and_lane(self, trade, *, lane_state, **configuration):
         if self.fail_atomic_settlement:
@@ -665,6 +673,85 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             settings.REAL_MAX_STAKE_USD = previous_cap
             settings.ALLOW_REAL_TRADING = False
 
+    async def test_champion_daily_risk_limits_block_dispatch_but_trial_remains_independent(self):
+        management = self.managed_snapshot(
+            initial_stake=0.5,
+            money_management="fixed",
+            money_config={},
+            risk_config={
+                "take_profit_daily": 20,
+                "stop_loss_daily": 10,
+                "max_daily_trades": 50,
+                "max_single_stake": 4,
+                "max_consecutive_losses": 3,
+                "cooldown_minutes": 15,
+            },
+        )
+        runtime = self.runtime()
+        self.assertTrue(runtime.apply_champion_mode(management))
+        champion, champion_intent = decision_and_intent(Lane.CHAMPION)
+        trial, trial_intent = decision_and_intent(Lane.TRIAL)
+        self.repository.champion_daily_risk = {
+            "profit": 20.0,
+            "trades": 12,
+            "last_settled_epoch": 0,
+        }
+
+        await runtime.process_cycle(CausalCycleResult(
+            60, object(), object(),
+            (champion, trial),
+            (champion_intent, trial_intent),
+        ))
+
+        self.assertEqual(len(self.shared.intents), 1)
+        self.assertEqual(self.shared.intents[0].lane, Lane.TRIAL.value)
+        champion_record = next(
+            item for item in self.repository.decisions
+            if item["decision"]["lane"] == Lane.CHAMPION.value
+        )
+        self.assertEqual(
+            champion_record["decision"]["execution_blocked_reason"],
+            "TAKE_PROFIT_DAILY",
+        )
+        self.assertEqual(
+            runtime.strategies[Lane.CHAMPION].state.position_status,
+            "IDLE",
+        )
+
+    async def test_every_configured_champion_risk_gate_is_fail_closed(self):
+        runtime = self.runtime()
+        self.assertTrue(runtime.apply_champion_mode(self.managed_snapshot(
+            initial_stake=0.5,
+            money_management="fixed",
+            money_config={},
+            risk_config={
+                "take_profit_daily": 20,
+                "stop_loss_daily": 10,
+                "max_daily_trades": 5,
+                "max_single_stake": 1,
+                "max_consecutive_losses": 3,
+                "cooldown_minutes": 15,
+            },
+        )))
+        now = 1_800_000_000
+        scenarios = (
+            ({"profit": 20, "trades": 0, "last_settled_epoch": None}, 0, 0.5, "TAKE_PROFIT_DAILY"),
+            ({"profit": -10, "trades": 0, "last_settled_epoch": None}, 0, 0.5, "STOP_LOSS_DAILY"),
+            ({"profit": 0, "trades": 5, "last_settled_epoch": None}, 0, 0.5, "MAX_DAILY_TRADES"),
+            ({"profit": 0, "trades": 0, "last_settled_epoch": None}, 3, 0.5, "MAX_CONSECUTIVE_LOSSES"),
+            ({"profit": 0, "trades": 0, "last_settled_epoch": now - 60}, 0, 0.5, "COOLDOWN"),
+            ({"profit": 0, "trades": 0, "last_settled_epoch": None}, 0, 1.5, "MAX_SINGLE_STAKE"),
+        )
+        for daily, losses, stake, expected in scenarios:
+            with self.subTest(expected=expected):
+                self.repository.champion_daily_risk = daily
+                runtime._champion_money_manager.consecutive_losses = losses
+                runtime._champion_money_manager.current_stake = stake
+                self.assertEqual(
+                    await runtime._champion_risk_block_reason(now_epoch=now),
+                    expected,
+                )
+
     def test_champion_switch_waits_for_idle_boundary(self):
         runtime = self.runtime(restored_lane_states={
             Lane.CHAMPION.value: SetupState(
@@ -1006,6 +1093,9 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await monitor.update_callbacks[701]({
             "contract_id": 701,
+            "contract_type": "CALL",
+            "entry_spot": 633.8,
+            "date_start": 60,
             "current_spot": 634.2,
             "current_spot_time": 61,
             "buy_price": 0.35,
@@ -1014,6 +1104,11 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(publisher.events[-1]["payload"]["status"], "UPDATED")
         self.assertEqual(publisher.events[-1]["payload"]["current_spot"], 634.2)
+        self.assertEqual(publisher.events[-1]["payload"]["entry_spot"], 633.8)
+        self.assertEqual(
+            publisher.store.snapshot("nexus-trade")["positions"][0]["contract_type"],
+            "CALL",
+        )
 
         await monitor.callbacks[701]({
             "contract_id": 701,

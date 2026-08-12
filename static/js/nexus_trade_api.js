@@ -62,6 +62,9 @@ export function createNexusTradeApi(fetchImpl = (...args) => globalThis.fetch(..
   return {
     snapshot: () => request(BASE),
     setMode: (payload) => request(`${BASE}/mode`, { method: "POST", body: payload }),
+    setChampionManagement: (payload) => request(`${BASE}/champion-management`, {
+      method: "POST", body: payload,
+    }),
     confirmReal: (accountId, phrase) => request(`${BASE}/real-confirmation`, {
       method: "POST",
       body: { account_id: accountId, phrase },

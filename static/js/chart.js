@@ -88,7 +88,7 @@ export class TradingChart {
 
   showTrade(trade) {
     if (this.priceLine) { this.primary.removePriceLine(this.priceLine); this.priceLine = null; }
-    if (!trade) return;
+    if (!trade || !this.primary) return;
     const price = Number(trade.entry_spot);
     if (Number.isFinite(price)) this.priceLine = this.primary.createPriceLine({ price, color: "#f4bd50", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: `ENTRY ${trade.contract_type || ""}` });
     if (trade.purchase_time) {
@@ -119,6 +119,7 @@ export class TradingChart {
   }
 
   applyMarkers() {
+    if (!this.primary) return;
     const ordered = [...this.markers].sort((a, b) => a.time - b.time);
     if (LightweightCharts.createSeriesMarkers) {
       if (!this.markerPrimitive) this.markerPrimitive = LightweightCharts.createSeriesMarkers(this.primary, ordered);

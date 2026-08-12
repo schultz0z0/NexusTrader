@@ -33,6 +33,28 @@ test("snapshot uses the dashboard key only as a header", async () => {
   assert.equal(calls[0].url.includes("dashboard-test-key"), false);
 });
 
+test("Champion management is saved through the protected singleton endpoint", async () => {
+  const calls = [];
+  const api = createNexusTradeApi(async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({ status: "success", data: { snapshot_version: 8 } });
+  });
+  const payload = {
+    expected_revision: 3,
+    initial_stake: 1.25,
+    money_management: "martingale",
+    money_config: { multiplier: 2, max_levels: 3 },
+    risk_config: { take_profit_daily: 20, stop_loss_daily: 10, max_single_stake: 5 },
+  };
+
+  await api.setChampionManagement(payload);
+
+  assert.equal(calls[0].url, "/api/v1/nexus-trade/champion-management");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), payload);
+  assert.equal(calls[0].options.headers["X-API-Key"], "dashboard-test-key");
+});
+
 test("governance credential is transient and sent only in its dedicated header", async () => {
   const calls = [];
   const api = createNexusTradeApi(async (url, options) => {
