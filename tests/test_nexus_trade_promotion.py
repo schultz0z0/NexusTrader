@@ -16,6 +16,7 @@ from database.repository import DatabaseRepository
 from nexus_trade.artifacts import CandidateArtifact, canonical_json
 from nexus_trade.candidates import CandidateRegistry
 from nexus_trade.promotion import PromotionConflict, PromotionRejected, PromotionService
+from nexus_trade.repository import NexusTradeSingletonError
 from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
 
@@ -32,6 +33,14 @@ class PromotionServiceTests(unittest.TestCase):
 
     def snapshot(self):
         return asyncio.run(self.repository.get_nexus_control_snapshot())
+
+    def raw_control_identity(self):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            return db.execute(
+                "SELECT b.config_revision, r.champion_version_id, r.trial_version_id "
+                "FROM bot_instances b JOIN nexus_runtime r ON r.bot_id=b.id "
+                "WHERE b.id='nexus-trade'",
+            ).fetchone()
 
     def seed_valid_proposal(self, *, recommendation="EVOLVE"):
         registry = CandidateRegistry(self.db_path)
@@ -468,6 +477,7 @@ class PromotionServiceTests(unittest.TestCase):
 
     def test_approve_fails_closed_when_lane_position_status_is_missing(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
+        before_identity = self.raw_control_identity()
         self._install_champion_lane_head(before, {"owner": None, "state": {}})
         with self.assertRaisesRegex(PromotionRejected, "LANE_CORRUPT"):
             asyncio.run(
@@ -476,10 +486,13 @@ class PromotionServiceTests(unittest.TestCase):
                     request_id="lane-status-missing", reason="safety check",
                 )
             )
-        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+        self.assertEqual(self.raw_control_identity(), before_identity)
+        with self.assertRaises(NexusTradeSingletonError):
+            self.snapshot()
 
     def test_approve_fails_closed_when_lane_state_is_malformed(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
+        before_identity = self.raw_control_identity()
         self._install_champion_lane_head(before, {"owner": None, "state": "IDLE"})
         with self.assertRaisesRegex(PromotionRejected, "LANE_CORRUPT"):
             asyncio.run(
@@ -488,7 +501,9 @@ class PromotionServiceTests(unittest.TestCase):
                     request_id="lane-state-malformed", reason="safety check",
                 )
             )
-        self.assertEqual(self.snapshot()["snapshot_version"], before["snapshot_version"])
+        self.assertEqual(self.raw_control_identity(), before_identity)
+        with self.assertRaises(NexusTradeSingletonError):
+            self.snapshot()
 
     def _install_champion_lane_head(self, before, payload):
         version_id = before["runtime"]["champion_version_id"]

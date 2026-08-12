@@ -8,6 +8,10 @@
 
 **Tech Stack:** FastAPI, aiosqlite/SQLite WAL, runtime asyncio, eventos HTTP/WebSocket, HTML/CSS, JavaScript ES modules, Lightweight Charts, Python unittest e Node test runner.
 
+**Execution status:** Tasks 1–4 completed in local commits. Task 5 final verification
+and documentation completed on 2026-08-11 BRT. The implementation remained inline,
+without subagents or push, as requested.
+
 ## Global Constraints
 
 - `STRATEGY.md`, `PRD.md`, `FRONTEND.md` e `ML-GOVERNANCE.md` são fontes de verdade.

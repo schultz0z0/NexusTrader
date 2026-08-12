@@ -20,6 +20,7 @@ IndexedDB, URL, logs, WebSocket state or exports.
 | --- | --- |
 | Hydrate NexusTrade | `GET /api/v1/nexus-trade` |
 | Champion mode | `POST /api/v1/nexus-trade/mode` |
+| Champion management | `POST /api/v1/nexus-trade/champion-management` |
 | REAL confirmation ticket | `POST /api/v1/nexus-trade/real-confirmation` |
 | Emergency stop | `POST /api/v1/nexus-trade/emergency-stop` |
 | Versions/campaigns/reports/proposals/exports | `GET /api/v1/nexus-trade/{collection}` |
@@ -31,7 +32,7 @@ IndexedDB, URL, logs, WebSocket state or exports.
 | Rollback | `POST /api/v1/nexus-trade/rollback` |
 
 The WebSocket uses the existing bot-scoped ticket and bot id `nexus-trade`. Accepted
-event types are exactly `nexus.runtime`, `nexus.decision`, `nexus.trade`,
+event types are exactly `nexus.runtime`, `nexus.decision`, `nexus.trade`, `nexus.position`,
 `nexus.campaign`, `nexus.report`, `nexus.trial_changed`, `nexus.proposal` and
 `nexus.version_changed`. Reconnect always hydrates a fresh snapshot before actions are
 enabled again.
@@ -85,6 +86,24 @@ All commands finish with exit code zero. The Git diff for
 9. Stop only the owned processes using the launcher cleanup option and confirm port 8990
    is closed.
 
+### 5.1 Operational workspace acceptance
+
+1. With the Champion OFF, open `GERENCIAMENTO` and save Fixed, Martingale and Soros
+   once each. Reload the page and confirm the exact revision and fields are restored.
+2. Set explicit daily limits. Confirm the journal shows `TAKE_PROFIT_DAILY`,
+   `STOP_LOSS_DAILY`, `MAX_DAILY_TRADES`, `MAX_CONSECUTIVE_LOSSES`, `COOLDOWN` or
+   `MAX_SINGLE_STAKE` when the corresponding gate blocks a Champion intent.
+3. Click `INICIAR CHAMPION`. Confirm that the management form opens first and that the
+   final action reads `SALVAR E INICIAR`. Cancel unless this is an approved DEMO test.
+4. In `OPERAÇÃO`, confirm R_100/M1, Bollinger, ADX, gate, price and connection LIVE.
+   Switch `TODAS/CHAMPION/TRIAL`; only the selected lane may remain in positions and
+   journals.
+5. Observe at most one live contract per lane. After settlement, the live card must
+   disappear and one immutable row must appear in the trade journal.
+6. Restart `nexus-api` while the page stays open, then restart `nexus-bot`. The UI must
+   recover to LIVE without F5; management revision and version pointers must remain
+   equal, while decision/trade counts may only increase.
+
 ## 6. VPS deploy
 
 Run from the existing `nexus-trader` directory. Do not use `docker compose down -v`.
@@ -127,6 +146,11 @@ Before `up`, the VPS `.env` contains distinct non-empty values for
 `INTERNAL_API_TOKEN`, `DASHBOARD_API_KEY`, `NEXUS_HUMAN_ACTION_KEY` and
 `NEXUS_HUMAN_ACTOR`. Keep `ALLOW_REAL_TRADING=false` and `REAL_MAX_STAKE_USD=0` during
 the validation window.
+
+For a public VPS, publish only through the existing TLS reverse proxy. Keep the
+container port bound to loopback, proxy WebSocket upgrade headers, and do not expose
+the SQLite volume. After deploy, test both the HTTPS page and the WSS reconnect before
+considering the service accepted.
 
 The optional REAL acceptance is deliberately outside automated deploy. Follow the
 bounded USD 0.35 procedure in `PHASE-2-VALIDATION.md`, then restore the two REAL safety

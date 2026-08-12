@@ -13,7 +13,7 @@ Quando não houver mudança, o painel também deve informar explicitamente que o
 mantido e por quê. A ausência de toast não pode ser a única indicação de ausência de
 alteração.
 
-Status: **rascunho funcional**  
+Status: **implementado e validado**  
 Fuso exibido: **America/Sao_Paulo**
 
 ## 1. Objetivo
@@ -258,3 +258,27 @@ Após reconexão, o cliente busca snapshot persistido para reparar eventos perdi
 - Aprovar, reanalisar e fazer rollback pede a credencial humana em um campo `password`
   transitório. O cliente envia apenas `X-Nexus-Human-Key`, nunca persiste o valor e
   limpa campo e referência em memória ao concluir ou cancelar a ação.
+
+## 12. Workspace operacional implementado
+
+A aba `OPERAÇÃO` é a tela inicial do singleton NexusTrade e expõe, sem misturar
+controles do Trial:
+
+- gráfico R_100/M1 em tempo real com preço e Bollinger (20, 2, SMA);
+- ADX (14), gate `ADX <= 22`, última decisão e estado da conexão;
+- filtros `TODAS`, `CHAMPION` e `TRIAL`;
+- uma posição ao vivo por lane, com direção, stake, entrada, spot, P&L e expiração;
+- journal de decisões e contratos liquidados;
+- cards separados do Champion versionado e do Trial invisível ao controle humano.
+
+O botão `GERENCIAMENTO` é exclusivo do Champion. Ele só fica habilitado com o
+Champion OFF, lane IDLE, snapshot atual e parada total desativada. O formulário oferece
+Fixed, Martingale e Soros, além de meta, stop, máximo diário de operações, stake
+máxima, losses consecutivos e cooldown. A estratégia, ativo, timeframe, duração,
+Bollinger e ADX não são editáveis.
+
+Ao clicar `INICIAR CHAMPION`, o mesmo formulário é aberto obrigatoriamente com a
+configuração persistida. O backend salva por CAS e somente depois habilita o Champion.
+Em OFF, Champion e Trial ignoram esse gerenciamento e continuam em DEMO a USD 0,35.
+Em ON, todos os limites são reavaliados antes do transporte da ordem; um bloqueio é
+gravado como `execution_blocked_reason` e nunca impede a coleta do Trial.

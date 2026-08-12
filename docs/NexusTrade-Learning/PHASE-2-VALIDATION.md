@@ -12,8 +12,8 @@ Base validada da Fase 1: `9b3232290c22a0d878e06ad6df3c8db465e57662`
 
 | Gate | Result |
 | --- | --- |
-| Python full suite | 502/502 PASS em 49,711 s |
-| JavaScript full suite | 42/42 PASS |
+| Python full suite | 522/522 PASS em 83,581 s |
+| JavaScript full suite | 50/50 PASS |
 | `node --check static/js/app.js` | PASS |
 | Python `compileall` | PASS |
 | `pip check` | PASS, sem dependências quebradas |
@@ -118,3 +118,39 @@ do build, valide primeiro com REAL bloqueado, execute health/log/restart/downloa
 domínio HTTPS e só então considere o teste REAL controlado acima. Nunca execute
 `docker compose down -v` durante deploy ou rollback.
 
+## Operational complement — final validation
+
+Validado em 2026-08-11 BRT no projeto Docker isolado
+`nexustrader-phase2-ops`, porta `127.0.0.1:8993`, com API e bot, volume persistente,
+`DERIV_ACCOUNT_TYPE=demo`, `ALLOW_REAL_TRADING=false` e `REAL_MAX_STAKE_USD=0`.
+
+Evidências funcionais reais:
+
+- gráfico R_100/M1 recebeu histórico e ticks, com Bollinger, preço, ADX e gate ao vivo;
+- filtros TODAS/CHAMPION/TRIAL, journal de decisões, contratos liquidados e uma posição
+  por lane foram renderizados sem F5;
+- formulário do Champion restaurou a revisão 2 com Martingale, stake USD 0,50,
+  multiplicador 2, três níveis, meta 20, stop 10, máximo 50 operações, stake máxima 4,
+  três losses e cooldown 15 minutos;
+- o Trial não apresentou controle de start, stop ou gerenciamento;
+- `INICIAR CHAMPION` abriu obrigatoriamente o formulário com `SALVAR E INICIAR`; o teste
+  foi cancelado antes de habilitar o Champion;
+- viewport desktop e 390x844 não apresentaram overflow horizontal; ações primárias se
+  reorganizaram em coluna no mobile;
+- reinícios separados de API e bot preservaram snapshot version 2, versões Champion e
+  Trial e revisão do gerenciamento; a interface voltou a LIVE sem F5;
+- após o último rebuild/restart, o scan integral dos logs retornou zero ocorrências de
+  `Traceback`, `ERROR`, `IntegrityError`, compra REAL, contrato duplicado ou ownership
+  ambíguo.
+
+Defeito adicional encontrado pelo teste real de restart: quando o runtime era criado
+sem snapshot injetado e existia contrato Champion OFF/DEMO ativo, o gerenciamento
+persistido era carregado tarde demais. A mudança aparente adiava a aplicação dos IDs de
+versão e a primeira decisão podia violar `nexus_decisions.nexus_version_id NOT NULL`.
+O caso ganhou RED, o bootstrap passou a hidratar gerenciamento antes de risco/ownership,
+quatro regressões de restart passaram e o cenário Docker foi repetido sem erro.
+
+Os limites de gerenciamento são exclusivamente humanos. O aprendizado não altera
+stake, modelo de gerenciamento, meta, stop, máximo de operações, stake máxima, losses
+consecutivos ou cooldown. Todos são revistos pelo usuário no formulário aberto antes
+de iniciar o Champion; em OFF, Champion e Trial continuam em DEMO a USD 0,35.
