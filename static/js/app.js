@@ -24,6 +24,10 @@ let activeAccountId = localStorage.getItem(ACCOUNT_STORAGE_KEY) || "";
 let nexusLaneFilter = "all";
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD" });
 const price = (value) => Number.isFinite(Number(value)) ? Number(value).toFixed(Number(value) >= 100 ? 2 : 4) : "—";
+const moneyOrDash = (value) => Number.isFinite(Number(value)) ? money.format(Number(value)) : "—";
+const brtDateTime = (value) => Number.isFinite(Number(value))
+  ? new Date(Number(value) * 1000).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  : "—";
 
 const nexusView = mountNexusTradeView({
   root: $("#nexus-trade-view"),
@@ -148,7 +152,9 @@ function renderNexusPositions(positions = []) {
     ? positions.map((position) => {
       const view = nexusPositionPresentation(position);
       const status = view.settlementPending ? "LIQUIDANDO" : String(position.status || "OPEN");
-      return `<article class="nexus-position-card ${escapeHtml(position.lane)}"><header><strong>${nexusLaneLabel(position.lane)} · ${escapeHtml(position.contract_type || "CONTRATO")}</strong><small>#${escapeHtml(position.contract_id)}</small></header><dl><div><dt>STATUS</dt><dd>${escapeHtml(status)}</dd></div><div><dt>EXPIRA EM</dt><dd class="${view.settlementPending ? "waiting" : "positive"}">${escapeHtml(view.countdown)}</dd></div><div><dt>STAKE</dt><dd>${money.format(view.stake)}</dd></div><div><dt>ENTRADA</dt><dd>${price(view.entrySpot)}</dd></div><div><dt>SPOT ATUAL</dt><dd>${price(view.currentSpot)}</dd></div><div><dt>P&amp;L</dt><dd class="${view.profit >= 0 ? "positive" : "negative"}">${money.format(view.profit)}</dd></div></dl></article>`;
+      const pnlTone = view.profit === null ? "" : view.profit >= 0 ? "positive" : "negative";
+      const outcomeTone = view.outcomeLabel === "GANHANDO" ? "positive" : view.outcomeLabel === "PERDENDO" ? "negative" : "";
+      return `<article class="nexus-position-card ${escapeHtml(position.lane)}"><header><strong>${nexusLaneLabel(position.lane)} · ${escapeHtml(position.contract_type || "CONTRATO")}</strong><small>#${escapeHtml(position.contract_id)}</small></header><dl><div><dt>STATUS</dt><dd>${escapeHtml(status)}</dd></div><div><dt>RESULTADO AO VIVO</dt><dd class="${outcomeTone}">${escapeHtml(view.outcomeLabel)}</dd></div><div><dt>STAKE</dt><dd>${moneyOrDash(view.stake)}</dd></div><div><dt>P&amp;L</dt><dd class="${pnlTone}">${moneyOrDash(view.profit)}</dd></div><div><dt>ENTRADA</dt><dd>${price(view.entrySpot)}</dd></div><div><dt>SPOT ATUAL</dt><dd>${price(view.currentSpot)}</dd></div><div><dt>COMPRA</dt><dd>${brtDateTime(view.purchaseTime)}</dd></div><div><dt>EXPIRAÇÃO</dt><dd>${brtDateTime(view.expiryTime)}</dd></div><div><dt>EXPIRA EM</dt><dd class="${view.settlementPending ? "waiting" : "positive"}">${escapeHtml(view.countdown)}</dd></div></dl></article>`;
     }).join("")
     : `<div class="nexus-empty-state"><strong>Sem posição</strong><p>As lanes selecionadas continuam analisando R_100.</p></div>`;
   clearInterval(nexusCountdownTimer);

@@ -28,6 +28,94 @@ test("the view controller toggles its owned root without touching standard conte
   assert.equal(standardRoot.hidden, false);
 });
 
+test("management dialog rehydrates a stale active snapshot before blocking Champion start", async () => {
+  const listeners = new Map();
+  const root = {
+    hidden: true,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener: (type, handler) => listeners.set(type, handler),
+  };
+  const standardRoot = { hidden: false };
+  const dialog = { hidden: true };
+  const submit = { textContent: "" };
+  const managementField = { value: "", focus() {} };
+  const moneyManagementField = { value: "fixed" };
+  const form = {
+    elements: {
+      initial_stake: managementField,
+      money_management: moneyManagementField,
+      expected_revision: { value: "" },
+      multiplier: { value: "" },
+      max_levels: { value: "" },
+      levels: { value: "" },
+      percent: { value: "" },
+    },
+  };
+  const documentStub = {
+    activeElement: null,
+    querySelector(selector) {
+      if (selector === "#nexus-management-form") return form;
+      if (selector === "#nexus-management-dialog") return dialog;
+      if (selector === "#nexus-save-management") return submit;
+      return null;
+    },
+  };
+  const staleState = operationalState({ positionStatus: "ACTIVE" });
+  const freshState = operationalState({ positionStatus: "IDLE" });
+  let state = structuredClone(staleState);
+  const store = {
+    get: () => structuredClone(state),
+    hydrate(snapshot) {
+      state = structuredClone({
+        ...state,
+        runtime: snapshot.runtime,
+        emergencyStop: snapshot.emergency_stop ?? state.emergencyStop,
+        championManagement: snapshot.champion_management,
+        lanes: snapshot.lanes,
+        laneStates: snapshot.lane_states || state.laneStates,
+      });
+      return true;
+    },
+    subscribe: () => () => {},
+  };
+  const api = {
+    snapshot: async () => ({
+      schema_version: 1,
+      snapshot_version: 2,
+      runtime: freshState.runtime,
+      emergency_stop: false,
+      champion_management: {
+        revision: 2,
+        initial_stake: 0.35,
+        money_management: "fixed",
+        money_config: {},
+        risk_config: {},
+      },
+      lanes: freshState.lanes,
+      lane_states: {
+        champion_baseline: { position_status: "IDLE" },
+        challenger_trial: { position_status: "IDLE" },
+      },
+    }),
+  };
+
+  const previousDocument = globalThis.document;
+  globalThis.document = documentStub;
+  try {
+    mountNexusTradeView({ root, standardRoot, store, api });
+    listeners.get("click")({
+      target: { closest: (selector) => (selector === "[data-nexus-action]" ? { dataset: { nexusAction: "open-management" } } : null) },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(dialog.hidden, false);
+    assert.equal(submit.textContent, "SALVAR GERENCIAMENTO");
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 function operationalState(overrides = {}) {
   return {
     runtime: { enabled: 0, account_type: "demo", ...overrides.runtime },

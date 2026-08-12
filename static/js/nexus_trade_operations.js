@@ -10,10 +10,11 @@ function closeOf(point) {
 }
 
 export function nexusPositionPresentation(position = {}, nowEpoch = Date.now() / 1000) {
-  const stake = finite(position.stake ?? position.buy_price) ?? 0;
+  const stake = finite(position.stake ?? position.buy_price);
   const entrySpot = finite(position.entry_spot);
   const currentSpot = finite(position.current_spot ?? position.exit_spot);
-  const profit = finite(position.profit) ?? 0;
+  const profit = finite(position.profit);
+  const purchaseTime = finite(position.purchase_time);
   const expiry = finite(position.date_expiry ?? position.expiry_time);
   const now = finite(nowEpoch) ?? 0;
   const secondsRemaining = expiry === null ? null : Math.max(0, Math.ceil(expiry - now));
@@ -25,11 +26,21 @@ export function nexusPositionPresentation(position = {}, nowEpoch = Date.now() /
     const seconds = secondsRemaining % 60;
     countdown = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
+  const outcomeLabel = profit === null
+    ? "SINCRONIZANDO"
+    : profit > 0
+      ? "GANHANDO"
+      : profit < 0
+        ? "PERDENDO"
+        : "EMPATANDO";
   return {
     stake,
     entrySpot,
     currentSpot,
     profit,
+    outcomeLabel,
+    purchaseTime,
+    expiryTime: expiry,
     secondsRemaining,
     countdown,
     settlementPending,

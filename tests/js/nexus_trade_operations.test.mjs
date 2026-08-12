@@ -31,6 +31,7 @@ test("position presentation keeps live financial details and an honest expiry co
     entry_spot: 101.25,
     current_spot: 102.5,
     profit: 0.12,
+    purchase_time: 1_000,
     date_expiry: 1_058,
   }, 1_000);
   assert.deepEqual(open, {
@@ -38,6 +39,9 @@ test("position presentation keeps live financial details and an honest expiry co
     entrySpot: 101.25,
     currentSpot: 102.5,
     profit: 0.12,
+    outcomeLabel: "GANHANDO",
+    purchaseTime: 1_000,
+    expiryTime: 1_058,
     secondsRemaining: 58,
     countdown: "00:58",
     settlementPending: false,
@@ -53,6 +57,20 @@ test("position presentation keeps live financial details and an honest expiry co
   assert.equal(pending.countdown, "Aguardando liquidação");
   assert.equal(pending.settlementPending, true);
   assert.equal(pending.stake, 0.35);
+
+  const flat = nexusPositionPresentation({
+    buy_price: 0.35,
+    current_spot: 101.1,
+    profit: 0,
+  }, 1_000);
+  assert.equal(flat.outcomeLabel, "EMPATANDO");
+
+  const losing = nexusPositionPresentation({
+    buy_price: 0.35,
+    current_spot: 100.7,
+    profit: -0.11,
+  }, 1_000);
+  assert.equal(losing.outcomeLabel, "PERDENDO");
 });
 
 test("live model filters lanes and exposes ADX, decisions, trades and active positions", () => {

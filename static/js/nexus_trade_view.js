@@ -450,6 +450,13 @@ export function mountNexusTradeView({
     }
   };
 
+  const refreshSnapshot = async () => {
+    if (!api?.snapshot || !store?.hydrate) return null;
+    const snapshot = await api.snapshot();
+    store.hydrate(snapshot);
+    return snapshot;
+  };
+
   const scheduleCatalogRefresh = () => {
     if (catalogRefreshQueued || !api) return;
     catalogRefreshQueued = true;
@@ -481,15 +488,24 @@ export function mountNexusTradeView({
       realTicket = await confirmReal(account);
       if (!realTicket) return false;
     }
-    const snapshot = await api.setMode({
-      enabled: true,
-      account_id: account.account_id,
-      account_type: account.account_type,
-      real_ticket: realTicket,
-    });
-    store.hydrate(snapshot);
-    onToast(`Champion ON — ${account.account_type === "real" ? "REAL" : "DEMO"}.`);
-    return true;
+    try {
+      const snapshot = await api.setMode({
+        enabled: true,
+        account_id: account.account_id,
+        account_type: account.account_type,
+        real_ticket: realTicket,
+      });
+      store.hydrate(snapshot);
+      onToast(`Champion ON — ${account.account_type === "real" ? "REAL" : "DEMO"}.`);
+      return true;
+    } catch (error) {
+      try {
+        await refreshSnapshot();
+      } catch {
+        // Keep the original API error visible when snapshot refresh also fails.
+      }
+      throw error;
+    }
   };
 
   const syncManagementFields = () => {
@@ -512,11 +528,19 @@ export function mountNexusTradeView({
     returnFocus?.focus?.();
   };
 
-  const openManagement = (thenStart = false) => {
-    const model = buildNexusOperationalModel(store?.get?.() || {}, getAccount());
+  const openManagement = async (thenStart = false) => {
+    let model = buildNexusOperationalModel(store?.get?.() || {}, getAccount());
     if (!model.champion.managementEditable) {
-      onToast("Pare o Champion e aguarde a lane ficar IDLE para alterar o gerenciamento.", "error");
-      return;
+      try {
+        await refreshSnapshot();
+        model = buildNexusOperationalModel(store?.get?.() || {}, getAccount());
+      } catch {
+        // Fall back to the last known local state.
+      }
+      if (!model.champion.managementEditable) {
+        onToast("Pare o Champion e aguarde a lane ficar IDLE para alterar o gerenciamento.", "error");
+        return;
+      }
     }
     const form = globalThis.document?.querySelector?.("#nexus-management-form");
     const dialog = globalThis.document?.querySelector?.("#nexus-management-dialog");
@@ -585,8 +609,13 @@ export function mountNexusTradeView({
         onToast("Champion parado. O laboratório DEMO continua ativo.");
         return;
       }
-      openManagement(true);
+      await openManagement(true);
     } catch (error) {
+      try {
+        await refreshSnapshot();
+      } catch {
+        // Preserve the original action error when snapshot refresh also fails.
+      }
       onToast(error.message || "Falha ao alterar o Champion.", "error");
     }
   };
@@ -752,7 +781,7 @@ export function mountNexusTradeView({
     if (tab) openTab(tab);
     const action = event.target?.closest?.("[data-nexus-action]")?.dataset?.nexusAction;
     if (action === "champion-toggle") handleToggle();
-    if (action === "open-management") openManagement(false);
+    if (action === "open-management") void openManagement(false);
     if (action === "emergency-stop") handleEmergency();
     if (action === "open-evolution") { openTab("evolution"); onOpenEvolution(); }
     if (["approve", "reanalyze", "rollback"].includes(action)) openGovernance(action);
