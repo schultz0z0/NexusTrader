@@ -86,6 +86,20 @@ All commands finish with exit code zero. The Git diff for
 9. Stop only the owned processes using the launcher cleanup option and confirm port 8990
    is closed.
 
+Para repetir o ambiente Docker isolado da validação operacional na porta 8993, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/rebuild_local_docker.ps1 -EnvFile .env
+```
+
+O script recusa REAL, força `DERIV_ACCOUNT_TYPE=demo`, `ALLOW_REAL_TRADING=false` e
+`REAL_MAX_STAKE_USD=0`, preserva o volume e não executa `down -v`. Ele exige acesso ao
+pipe local do Docker; uma sessão que não consiga executar `docker info` não pode declarar
+o rebuild validado.
+
+Use `-PreflightOnly` primeiro para validar o arquivo e os overrides sem iniciar ou
+alterar containers.
+
 ### 5.1 Operational workspace acceptance
 
 1. With the Champion OFF, open `GERENCIAMENTO` and save Fixed, Martingale and Soros
@@ -103,6 +117,15 @@ All commands finish with exit code zero. The Git diff for
 6. Restart `nexus-api` while the page stays open, then restart `nexus-bot`. The UI must
    recover to LIVE without F5; management revision and version pointers must remain
    equal, while decision/trade counts may only increase.
+7. Confirme exatamente duas campanhas ativas: uma para `champion_baseline` e uma para
+   `challenger_trial`. Cada campanha deve apontar para a mesma versão indicada pela sua
+   lane; qualquer ausência, duplicata ou divergência é NO-GO.
+8. No journal, cada `decision_id` operacional aparece uma única vez. Snapshots internos
+   de lane e envelopes de settlement não podem surgir como decisões nem perder
+   direção, ADX ou razão de bloqueio após hidratação REST.
+9. Às 10:00 BRT, confirme o fechamento diário. Na segunda-feira às 10:00 BRT, confirme
+   o fechamento semanal, seus gates e, quando elegível, a proposta humana. Rotação do
+   Trial pode ser automática; promoção do Champion nunca pode ser automática.
 
 ## 6. VPS deploy
 

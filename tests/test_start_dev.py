@@ -100,6 +100,19 @@ class StartDevSafetyTests(unittest.TestCase):
 
     def test_stop_owned_closes_recorded_worker_without_inherited_pipes(self):
         """Catches orphaning the real worker behind the Windows venv redirector."""
+        cim_probe = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                'Get-CimInstance Win32_Process -Filter "ProcessId=$PID" | Out-Null',
+            ],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        if cim_probe.returncode != 0:
+            self.skipTest("Win32_Process CIM is unavailable in this restricted environment")
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             env_file = temporary_path / "validation.env"

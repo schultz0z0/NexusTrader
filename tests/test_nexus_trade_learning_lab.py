@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -7,10 +8,13 @@ from pathlib import Path
 
 from database.repository import DatabaseRepository
 from nexus_trade.candidates import CandidateRegistry
+from nexus_trade.artifacts import canonical_json
 from nexus_trade.constants import NEXUS_PROVENANCE_HASH, NEXUS_TRADE_BOT_ID
 from nexus_trade.domain import Lane
 from nexus_trade.indicators import IndicatorFrame
 from nexus_trade.learning_lab import LearningLabService
+from nexus_trade.promotion import PromotionService
+from nexus_trade.reports import ReportService
 from nexus_trade.scheduler import BRASILIA
 from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
@@ -25,6 +29,91 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.temp_dir.cleanup()
+
+    def seed_comparable_week(self, window):
+        trial_campaign = next(
+            item for item in self.snapshot["active_campaigns"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        champion_campaign = next(
+            item for item in self.snapshot["active_campaigns"]
+            if item["lane"] == Lane.CHAMPION.value
+        )
+        versions = {
+            item["lane"]: item["version"]["id"] for item in self.snapshot["lanes"]
+        }
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
+            for campaign in (trial_campaign, champion_campaign):
+                db.execute(
+                    "UPDATE nexus_campaigns SET started_at=? WHERE id=?",
+                    (window.start_utc.isoformat(), campaign["id"]),
+                )
+            contract_id = 7_000_000
+            for day in range(7):
+                count = 43 if day < 6 else 42
+                epoch_base = int((window.start_utc + timedelta(days=day, hours=1)).timestamp())
+                for lane, campaign, wins in (
+                    (Lane.CHAMPION.value, champion_campaign, 26 if day < 6 else 24),
+                    (Lane.TRIAL.value, trial_campaign, 31 if day < 6 else 24),
+                ):
+                    version_id = versions[lane]
+                    for index in range(count):
+                        signal_epoch = epoch_base + index * 60
+                        decision_id = f"governed-{lane}-{day}-{index}"
+                        contract_id += 1
+                        won = index < wins
+                        payload = json.dumps({
+                            "lane": lane,
+                            "campaign_id": campaign["id"],
+                            "nexus_version_id": version_id,
+                            "provenance_hash": NEXUS_PROVENANCE_HASH,
+                        }, sort_keys=True, separators=(",", ":"))
+                        features = json.dumps({
+                            "schema_version": 1,
+                            "provenance_hash": NEXUS_PROVENANCE_HASH,
+                            "features": {"adx": 18.0, "bollinger_percent_b": 0.5},
+                        }, sort_keys=True, separators=(",", ":"))
+                        db.execute(
+                            "INSERT OR IGNORE INTO nexus_candles "
+                            "(symbol,open_epoch,close_epoch,open,high,low,close) "
+                            "VALUES ('R_100',?,?,?,?,?,?)",
+                            (signal_epoch, signal_epoch + 60, 100, 101, 99, 100.5),
+                        )
+                        db.execute(
+                            "INSERT INTO nexus_features "
+                            "(symbol,open_epoch,nexus_version_id,values_json) "
+                            "VALUES ('R_100',?,?,?)",
+                            (signal_epoch, version_id, features),
+                        )
+                        db.execute(
+                            "INSERT INTO nexus_decisions "
+                            "(id,lane,nexus_version_id,campaign_id,symbol,signal_epoch,entry_delay_ms,payload) "
+                            "VALUES (?,?,?,?,?,?,100,?)",
+                            (
+                                decision_id, lane, version_id, campaign["id"],
+                                "R_100", signal_epoch, payload,
+                            ),
+                        )
+                        db.execute(
+                            "INSERT INTO trades "
+                            "(bot_id,strategy_name,symbol,contract_type,contract_id,stake,"
+                            "payout,profit,result,status,purchase_time,expiry_time,lane,"
+                            "nexus_version_id,campaign_id,decision_id,entry_delay_ms) "
+                            "VALUES ('nexus-trade','nexus_trade','R_100','CALL',?,0.35,?,?,?,"
+                            "'closed',?,?,?,?,?,?,100)",
+                            (
+                                contract_id, 0.66 if won else 0.0,
+                                0.31 if won else -0.35, "won" if won else "lost",
+                                signal_epoch + 60, signal_epoch + 118, lane,
+                                version_id, campaign["id"], decision_id,
+                            ),
+                        )
+            db.commit()
+        finally:
+            db.close()
+        return LearningLabService(self.db_path)._active_trial_campaign()
 
     async def test_settled_trial_trade_rebuilds_one_exact_causal_learning_row(self):
         trial_version = self.snapshot["runtime"]["trial_version_id"]
@@ -144,6 +233,26 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {item["error_code"] for item in attempts},
             {"insufficient_complete_rows"},
+        )
+
+    async def test_due_daily_job_closes_one_real_report_and_exposes_its_identity(self):
+        boundary = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        service = LearningLabService(self.db_path)
+
+        first = await service.run_due(now=boundary)
+        repeated = await LearningLabService(self.db_path).run_due(now=boundary)
+
+        self.assertEqual(repeated, [])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["job_type"], "daily_learning")
+        self.assertRegex(first[0]["report_id"], r"^report-[0-9a-f]{24}$")
+        reports = ReportService(self.db_path).list_reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["id"], first[0]["report_id"])
+        self.assertEqual(reports[0]["snapshot"]["report_type"], "daily")
+        self.assertEqual(
+            reports[0]["snapshot"]["accumulated_progress"]["operations"],
+            0,
         )
 
     async def test_failed_daily_job_is_retried_after_restart_instead_of_stalling_forever(self):
@@ -329,6 +438,176 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         roles = {item["id"]: item["status"] for item in registry.list_candidates()}
         self.assertEqual(roles[candidate["id"]], "TRIAL")
+
+    async def test_weekly_rotation_closes_governed_report_before_changing_trial(self):
+        registry = CandidateRegistry(self.db_path)
+        candidate = registry.register(ArtifactAndRegistryTests.artifact("weekly-report"))
+        LearningLabService(self.db_path).ledger.record({
+            "schema_version": 1,
+            "status": "SUCCEEDED",
+            "candidate_id": candidate["id"],
+            "artifact_hash": candidate["artifact_hash"],
+            "dataset_hash": candidate["metadata"]["dataset_hash"],
+            "provenance_hash": candidate["metadata"]["provenance_hash"],
+            "seed": 73,
+            "metrics": {},
+            "ablations": [],
+            "qualification": {
+                "schema_version": 1,
+                "status": "PASS",
+                "gates": [{"name": "ARTIFACT_EXECUTABLE", "status": "PASS"}],
+            },
+        })
+        campaign = LearningLabService(self.db_path)._active_trial_campaign()
+        started = LearningLabService._parse_timestamp(campaign["started_at"]).astimezone(BRASILIA)
+        days_until_monday = (7 - started.weekday()) % 7
+        if days_until_monday == 0 and started.time() >= time(10, 0):
+            days_until_monday = 7
+        boundary = datetime.combine(
+            started.date() + timedelta(days=days_until_monday), time(10), BRASILIA,
+        ).astimezone(timezone.utc)
+        window = LearningLabService(self.db_path).schedule.weekly_window(boundary)
+
+        result = await LearningLabService(self.db_path)._process_weekly(campaign, window)
+
+        self.assertRegex(result["report_id"], r"^report-[0-9a-f]{24}$")
+        report = ReportService(self.db_path).get_report(result["report_id"])
+        self.assertIsNotNone(report)
+        self.assertEqual(report.snapshot["report_type"], "weekly")
+        self.assertEqual(report.snapshot["recommendation"], "INCONCLUSIVE")
+        self.assertIsNone(result["proposal_id"])
+        self.assertTrue(result["changed"])
+
+    async def test_eligible_weekly_report_creates_one_hash_bound_human_proposal(self):
+        registry = CandidateRegistry(self.db_path)
+        artifact = ArtifactAndRegistryTests.artifact("proposal-current-trial")
+        candidate = registry.register(artifact)
+        LearningLabService(self.db_path).ledger.record({
+            "schema_version": 1,
+            "status": "SUCCEEDED",
+            "candidate_id": candidate["id"],
+            "artifact_hash": candidate["artifact_hash"],
+            "dataset_hash": candidate["metadata"]["dataset_hash"],
+            "provenance_hash": candidate["metadata"]["provenance_hash"],
+            "seed": 73,
+            "metrics": {},
+            "ablations": [],
+            "qualification": {
+                "schema_version": 1,
+                "status": "PASS",
+                "gates": [{"name": "ARTIFACT_EXECUTABLE", "status": "PASS"}],
+            },
+        })
+        started = LearningLabService._parse_timestamp(
+            self.snapshot["active_campaigns"][0]["started_at"]
+        ).astimezone(BRASILIA)
+        days_until_monday = (7 - started.weekday()) % 7
+        if days_until_monday == 0 and started.time() >= time(10):
+            days_until_monday = 7
+        boundary = datetime.combine(
+            started.date() + timedelta(days=days_until_monday), time(10), BRASILIA,
+        ).astimezone(timezone.utc)
+        await PromotionService(self.db_path).replace_trial(
+            boundary,
+            actor="system:test",
+            request_id="proposal-trial-rotation",
+            reason="prepare executable Trial",
+            candidate_id=candidate["id"],
+        )
+        control = await self.repository.get_nexus_control_snapshot()
+        trial_lane = next(
+            item for item in control["lanes"] if item["lane"] == Lane.TRIAL.value
+        )
+        trial_campaign = next(
+            item for item in control["active_campaigns"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        version = trial_lane["version"]
+        report_snapshot = {
+            "schema_version": 1,
+            "report_type": "weekly",
+            "campaign_id": trial_campaign["id"],
+            "window": {
+                "start_utc": boundary.isoformat(),
+                "end_utc": (boundary + timedelta(days=7)).isoformat(),
+            },
+            "accumulated_progress": {
+                "operations": 300, "target": 300,
+                "complete_days": 7, "required_days": 7,
+            },
+            "recommendation": "EVOLVE",
+            "gates": [{"code": "MINIMUM_SAMPLE", "status": "PASS"}],
+            "trial": {
+                "version_id": version["id"],
+                "version_hash": version["version_hash"],
+                "candidate_id": candidate["id"],
+                "artifact_hash": artifact.artifact_hash,
+                "metadata_hash": artifact.metadata_hash,
+                "configuration_hash": artifact.metadata["configuration_hash"],
+                "dataset_hash": artifact.metadata["dataset_hash"],
+                "provenance_hash": artifact.metadata["provenance_hash"],
+            },
+        }
+        encoded = canonical_json(report_snapshot)
+        report_hash = hashlib.sha256(
+            b"nexus-report-json-v1\0" + encoded.encode("utf-8")
+        ).hexdigest()
+        report_id = f"report-{report_hash[:24]}"
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute(
+                "INSERT INTO nexus_reports "
+                "(id,campaign_id,report_hash,snapshot,report_type,window_start_utc,window_end_utc) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    report_id, trial_campaign["id"], report_hash, encoded, "weekly",
+                    boundary.isoformat(), (boundary + timedelta(days=7)).isoformat(),
+                ),
+            )
+            db.commit()
+        finally:
+            db.close()
+        report = ReportService(self.db_path).get_report(report_id)
+        service = LearningLabService(self.db_path)
+
+        first = service._ensure_proposal(report)
+        repeated = service._ensure_proposal(report)
+
+        self.assertEqual(first["id"], repeated["id"])
+        self.assertEqual(first["status"], "PENDING_USER_REVIEW")
+        self.assertTrue(first["created"])
+        self.assertFalse(repeated["created"])
+        proposals = await self.repository.list_nexus_proposals()
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0]["id"], first["id"])
+        self.assertEqual(proposals[0]["payload"]["report_hash"], report_hash)
+        self.assertEqual(
+            proposals[0]["payload"]["artifact_hash"], artifact.artifact_hash,
+        )
+
+    async def test_weekly_governance_evidence_is_real_idempotent_and_report_consumable(self):
+        boundary = datetime(2026, 8, 17, 13, 0, tzinfo=timezone.utc)
+        window = LearningLabService(self.db_path).schedule.weekly_window(boundary)
+        campaign = self.seed_comparable_week(window)
+        service = LearningLabService(self.db_path)
+
+        first = service._record_weekly_promotion_evidence(campaign, window)
+        second = service._record_weekly_promotion_evidence(campaign, window)
+        report = ReportService(self.db_path).close_weekly(window)
+
+        self.assertEqual(first["attempt_hash"], second["attempt_hash"])
+        attempts = [
+            item for item in service.list_attempts()
+            if item.get("attempt_type") == "promotion_evidence"
+        ]
+        self.assertEqual(len(attempts), 1)
+        evidence = attempts[0]["promotion_evidence"]
+        self.assertTrue(all(evidence["integrity"].values()))
+        self.assertGreaterEqual(evidence["dsr_probability"], 0.95)
+        self.assertLessEqual(evidence["pbo"], 0.10)
+        self.assertTrue(evidence["sensitivity_passed"])
+        self.assertEqual(report.snapshot["accumulated_progress"]["operations"], 300)
+        self.assertNotEqual(report.snapshot["recommendation"], "INCONCLUSIVE")
 
     async def test_forever_runner_processes_without_user_action_and_stops_cleanly(self):
         service = LearningLabService(self.db_path)

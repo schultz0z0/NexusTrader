@@ -79,6 +79,29 @@ function Import-LocalEnvironment {
 
 Import-LocalEnvironment -Path $EnvFile
 
+function Normalize-ProcessPathEnvironment {
+    $pathEntries = @(
+        [Environment]::GetEnvironmentVariables("Process").GetEnumerator() |
+            Where-Object { [string]$_.Key -ieq "Path" }
+    )
+    if ($pathEntries.Count -le 1) { return }
+    $pathValue = [string]($pathEntries | Where-Object {
+        [string]$_.Key -ceq "Path"
+    } | Select-Object -First 1).Value
+    if ([string]::IsNullOrWhiteSpace($pathValue)) {
+        $pathValue = [string]$pathEntries[0].Value
+    }
+    foreach ($entry in $pathEntries) {
+        [Environment]::SetEnvironmentVariable([string]$entry.Key, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
+}
+
+# Some Windows launchers inject both `Path` and `PATH`. Windows itself treats
+# them as the same variable, but Windows PowerShell's Start-Process attempts to
+# add both to a case-insensitive dictionary and aborts before the child starts.
+Normalize-ProcessPathEnvironment
+
 $databaseParent = Split-Path -Parent $DatabasePath
 if ([string]::IsNullOrWhiteSpace($databaseParent)) {
     $databaseParent = $projectRoot

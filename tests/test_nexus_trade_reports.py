@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from nexus_trade.metrics import MetricIntegrityError, calculate_lane_metrics
 from nexus_trade.reports import ImmutableReportError, ReportService
 from nexus_trade.scheduler import BrasiliaSchedule, DurableReportScheduler
+from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
 
 def settlement(result, stake, payout, profit, *, epoch):
@@ -212,6 +213,138 @@ def report_evidence(*, campaign_id="trial-a", trial_count=300, accumulated=None)
 
 
 class ImmutableReportTests(unittest.TestCase):
+    def test_executable_trial_version_evidence_exposes_exact_artifact_bindings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "version-evidence.db")
+            artifact = ArtifactAndRegistryTests.artifact("report-binding")
+            snapshot = {
+                "schema_version": 1,
+                "candidate_id": f"candidate-{artifact.artifact_hash[:24]}",
+                "artifact": json.loads(artifact.to_json()),
+                "trial_selection": {"boundary_utc": "2026-08-10T13:00:00+00:00"},
+            }
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute(
+                    "CREATE TABLE nexus_versions (id TEXT PRIMARY KEY, name TEXT, "
+                    "status TEXT, version_hash TEXT, snapshot TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO nexus_versions VALUES (?,?,?,?,?)",
+                    (
+                        "trial-v2", "Trial V2", "TRIAL", "f" * 64,
+                        json.dumps(snapshot, sort_keys=True),
+                    ),
+                )
+                db.commit()
+
+                evidence = ReportService._version_evidence(db, "trial-v2")
+            finally:
+                db.close()
+
+            self.assertEqual(evidence["artifact_hash"], artifact.artifact_hash)
+            self.assertEqual(evidence["metadata_hash"], artifact.metadata_hash)
+            self.assertEqual(
+                evidence["configuration_hash"],
+                artifact.metadata["configuration_hash"],
+            )
+            self.assertEqual(evidence["dataset_hash"], artifact.metadata["dataset_hash"])
+            self.assertEqual(evidence["provenance_hash"], artifact.metadata["provenance_hash"])
+            self.assertEqual(evidence["feature_schema"], artifact.metadata["feature_schema"])
+
+    def test_immutable_report_preserves_executable_trial_hash_bindings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "binding-report.db")
+            evidence = report_evidence()
+            artifact = ArtifactAndRegistryTests.artifact("immutable-binding")
+            evidence["trial"].update({
+                "candidate_id": f"candidate-{artifact.artifact_hash[:24]}",
+                "artifact_hash": artifact.artifact_hash,
+                "metadata_hash": artifact.metadata_hash,
+                "configuration_hash": artifact.metadata["configuration_hash"],
+                "dataset_hash": artifact.metadata["dataset_hash"],
+            })
+            window = BrasiliaSchedule().weekly_window(
+                datetime(2026, 8, 10, 13, tzinfo=timezone.utc)
+            )
+
+            report = ReportService(path).close_weekly(window, evidence)
+
+            trial = report.snapshot["trial"]
+            self.assertEqual(trial["candidate_id"], evidence["trial"]["candidate_id"])
+            self.assertEqual(trial["artifact_hash"], artifact.artifact_hash)
+            self.assertEqual(trial["metadata_hash"], artifact.metadata_hash)
+            self.assertEqual(
+                trial["configuration_hash"], artifact.metadata["configuration_hash"],
+            )
+            self.assertEqual(trial["dataset_hash"], artifact.metadata["dataset_hash"])
+
+    def test_promotion_evidence_lookup_ignores_successful_candidate_training_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "promotion-evidence.db")
+            os.environ.setdefault("DERIV_APP_ID", "dummy-app")
+            os.environ.setdefault("DERIV_API_TOKEN", "dummy-token")
+            os.environ.setdefault("DASHBOARD_API_KEY", "dummy-dashboard")
+            os.environ.setdefault("INTERNAL_API_TOKEN", "dummy-internal")
+            from database.repository import DatabaseRepository
+
+            asyncio.run(DatabaseRepository(path).init_db())
+            campaign_id = "campaign-exact"
+            version_id = "trial-exact"
+            provenance = "a" * 64
+            window_end = "2026-08-10T13:00:00+00:00"
+            common = {
+                "campaign_id": campaign_id,
+                "trial_version_id": version_id,
+                "provenance_hash": provenance,
+                "window_end_utc": window_end,
+            }
+            attempts = [
+                {**common, "status": "SUCCEEDED", "candidate_id": "candidate-a"},
+                {**common, "status": "SUCCEEDED", "candidate_id": "candidate-b"},
+                {
+                    **common,
+                    "status": "SUCCEEDED",
+                    "attempt_type": "promotion_evidence",
+                    "promotion_evidence": {
+                        "integrity": {"trial_frozen": True},
+                        "bollinger_present": True,
+                    },
+                },
+            ]
+            db = sqlite3.connect(path)
+            try:
+                for index, payload in enumerate(attempts):
+                    db.execute(
+                        "INSERT INTO nexus_training_attempts "
+                        "(attempt_hash,status,dataset_hash,provenance_hash,seed,payload) "
+                        "VALUES (?,'SUCCEEDED',?,?,?,?)",
+                        (
+                            f"{index + 1:064x}", "b" * 64, provenance, 73 + index,
+                            json.dumps(payload, sort_keys=True),
+                        ),
+                    )
+                db.commit()
+            finally:
+                db.close()
+
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            try:
+                context = ReportService._persisted_evaluation_context(
+                    db,
+                    campaign_id=campaign_id,
+                    trial_version_id=version_id,
+                    provenance_hash=provenance,
+                    window_end_utc=window_end,
+                )
+            finally:
+                db.close()
+
+            self.assertEqual(context["bollinger_present"], True)
+            self.assertEqual(context["integrity"], {"trial_frozen": True})
+
     def test_scheduler_persisted_weekly_close_recalculates_real_gates_to_evolve(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "governed.db")

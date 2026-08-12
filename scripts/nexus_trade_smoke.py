@@ -219,7 +219,7 @@ class NexusTradeSmoke:
         if not isinstance(campaigns, list) or not campaigns:
             raise SmokeSafetyError("active_campaign_missing")
         campaign_ids = []
-        campaign_lanes = []
+        campaign_by_lane = {}
         for row in campaigns:
             if not isinstance(row, dict):
                 raise SmokeSafetyError("active_campaign_schema_invalid")
@@ -235,15 +235,16 @@ class NexusTradeSmoke:
             if row.get("status") != "ACTIVE":
                 raise SmokeSafetyError("active_campaign_status_invalid")
             campaign_ids.append(campaign_id)
-            campaign_lanes.append(lane)
+            if lane in campaign_by_lane:
+                raise SmokeSafetyError("active_campaign_lane_duplicate")
+            campaign_by_lane[lane] = row
         if len(campaign_ids) != len(set(campaign_ids)):
             raise SmokeSafetyError("duplicate_active_campaign_detected")
-        if len(campaign_lanes) != len(set(campaign_lanes)):
-            raise SmokeSafetyError("active_campaign_lane_duplicate")
-        if campaign_lanes != ["challenger_trial"]:
+        if set(campaign_by_lane) != set(NEXUS_LANES):
             raise SmokeSafetyError("active_campaign_contract_invalid")
-        if campaigns[0]["nexus_version_id"] != lane_versions["challenger_trial"]:
-            raise SmokeSafetyError("active_campaign_version_mismatch")
+        for lane in NEXUS_LANES:
+            if campaign_by_lane[lane]["nexus_version_id"] != lane_versions[lane]:
+                raise SmokeSafetyError("active_campaign_version_mismatch")
         cls._validate_journals(snapshot)
 
     @staticmethod

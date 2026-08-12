@@ -154,3 +154,84 @@ Os limites de gerenciamento são exclusivamente humanos. O aprendizado não alte
 stake, modelo de gerenciamento, meta, stop, máximo de operações, stake máxima, losses
 consecutivos ou cooldown. Todos são revistos pelo usuário no formulário aberto antes
 de iniciar o Champion; em OFF, Champion e Trial continuam em DEMO a USD 0,35.
+
+## Addendum — automatic laboratory and live journal, 2026-08-12
+
+### Current code gate
+
+| Gate | Result |
+| --- | --- |
+| Python full suite | 562/562 PASS em 118,224 s; 1 teste de processo ignorado porque a sessão gerenciada negou CIM |
+| Strategy and entry clock | 41/41 PASS |
+| Repository/API/lab/reports/promotion/smoke | 150/150 PASS |
+| JavaScript full suite | 53/53 PASS |
+| `node --check static/js/app.js` | PASS |
+| Python `compileall` | PASS |
+| `pip check` | PASS, sem dependências quebradas |
+| `docker compose config --quiet` | PASS com perfil DEMO-only |
+| `git diff --check` | PASS |
+| Donchian, indicators e Nexus Speed | zero diff desde a base protegida |
+
+O teste ignorado exercita a limpeza de uma árvore de processos iniciada pelo launcher
+Windows. Ele continua ativo em Windows normal; somente é ignorado quando a própria
+consulta `Get-CimInstance Win32_Process` é recusada pelo sandbox. Não afeta Linux/VPS.
+
+### Strategy binding
+
+O contrato do Champion V1 foi novamente conferido contra `STRATEGY.md` e a suíte de
+41 testes: `R_100`, M1, 58 segundos, Bollinger `20/2/SMA`, rompimentos estritos por
+candle fechado, espera ilimitada pela primeira vela contrária nas bandas externas,
+cruzamento central sem confirmação adicional, `ADX <= 22`, abertura seguinte e limite
+absoluto de dois segundos. O gate ML somente bloqueia uma direção determinística; não
+cria nem inverte uma entrada.
+
+### Defects corrected in this complement
+
+1. O scheduler diário agora fecha e publica o relatório diário das 10:00 BRT.
+2. O fechamento semanal agora monta evidência de promoção vinculada a campanha,
+   versão, artefato, configuração, dataset e proveniência antes de avaliar os gates.
+3. A proposta humana é criada somente por relatório e Trial executável elegíveis; o
+   Champion nunca é alterado automaticamente.
+4. A rotação semanal do Trial para um SHADOW executável ocorre fora do caminho M1 e é
+   idempotente; ao trocar o Trial, a meta contínua de 300 começa novamente para o novo
+   candidato.
+5. O smoke test esperava incorretamente somente uma campanha ativa. O contrato real é
+   exatamente duas: uma `champion_baseline` e uma `challenger_trial`, ambas coerentes
+   com seus ponteiros de versão.
+6. O journal público misturava snapshots internos de lane e settlements com decisões
+   operacionais. A consulta agora aceita somente envelopes de decisão, achata o payload
+   causal e não expõe linhas internas duplicadas.
+7. O launcher Windows normaliza `Path`/`PATH`; a limpeza de processos permanece
+   fail-closed e testada quando CIM está disponível.
+
+### Runtime and browser evidence
+
+Uma API isolada, com banco novo, REAL desabilitado e sem acesso à Deriv, retornou
+`PASS_READ_ONLY`: duas lanes, duas versões, duas campanhas ativas, snapshot revision 1,
+zero reconnect e zero operação fabricada.
+
+Na aplicação Docker já ativa em `127.0.0.1:8993`, o navegador real confirmou:
+
+- console sem warning ou erro;
+- parada e início do Champion com formulário de gerenciamento obrigatório;
+- Fixed, Martingale, Soros, limites diários, stake máxima, losses e cooldown editáveis
+  apenas para o Champion ON;
+- Trial sem start, stop ou gerenciamento;
+- gráfico R_100/M1 sincronizado com candles, Bollinger superior, SMA 20, Bollinger
+  inferior e marcadores WIN/LOSS;
+- posições liquidadas sem card infinito e campanha Trial visível em `10/300`;
+- Evolution e Reports em estado vazio honesto antes do primeiro fechamento, sem botões
+  humanos habilitados indevidamente.
+
+Os valores antigos `8/7 dias` e `327/300 operações` pertenciam exclusivamente ao banco
+sintético usado para validar o frontend e não são seed de produção. Bancos novos começam
+com zero progresso; o acumulador real deriva apenas de settlements Trial da campanha.
+
+### Final deployment status
+
+**CODE GO / IMAGE REBUILD PENDING.** O pipe do daemon Docker ficou inacessível para a
+sessão gerenciada durante este último complemento. Por isso, a interface visual acima é
+da imagem operacional imediatamente anterior, enquanto as correções finais de
+scheduler, evidência, smoke e journal foram provadas por testes e API isolada. Antes do
+deploy, execute `scripts/rebuild_local_docker.ps1` em um PowerShell com acesso ao Docker
+e repita o scan de logs descrito no runbook. Nenhuma ordem REAL foi autorizada.

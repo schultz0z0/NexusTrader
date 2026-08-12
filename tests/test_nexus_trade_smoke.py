@@ -74,7 +74,13 @@ def canonical_snapshot(**overrides):
                 "lane": "challenger_trial",
                 "nexus_version_id": "trial-redacted",
                 "status": "ACTIVE",
-            }
+            },
+            {
+                "id": "champion-campaign-redacted",
+                "lane": "champion_baseline",
+                "nexus_version_id": "champion-redacted",
+                "status": "ACTIVE",
+            },
         ],
         "decisions": [],
         "trades": [],
@@ -124,7 +130,9 @@ def healthy_responses(snapshot=None):
         },
         "/api/v1/nexus-trade": {"status": "success", "data": snapshot or canonical_snapshot()},
         "/api/v1/nexus-trade/versions": {"status": "success", "data": [{"id": "v"}]},
-        "/api/v1/nexus-trade/campaigns": {"status": "success", "data": [{"id": "c"}]},
+        "/api/v1/nexus-trade/campaigns": {
+            "status": "success", "data": [{"id": "trial-c"}, {"id": "champion-c"}],
+        },
         "/api/v1/nexus-trade/reports": {"status": "success", "data": []},
         "/api/v1/nexus-trade/exports": {"status": "success", "data": []},
     }
@@ -224,7 +232,7 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
 
         self.assertEqual(summary["outcome"], "PASS_READ_ONLY")
         self.assertEqual(summary["lanes"], 2)
-        self.assertEqual(summary["campaigns"], 1)
+        self.assertEqual(summary["campaigns"], 2)
         self.assertEqual(summary["reports"], 0)
         self.assertEqual(summary["exports"], 0)
         self.assertTrue(all(call[1] == {"X-API-Key": API_KEY} for call in transport.calls))
@@ -244,6 +252,20 @@ class NexusTradeSmokeOfflineTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(SmokeSafetyError, "champion_must_be_off"):
+            smoke.run_read_only()
+
+    def test_read_only_requires_one_active_campaign_for_each_lane(self):
+        """Catches validating only the Trial while Champion comparison has no campaign."""
+        missing_champion = canonical_snapshot()
+        missing_champion["active_campaigns"] = [
+            row for row in missing_champion["active_campaigns"]
+            if row["lane"] != "champion_baseline"
+        ]
+        smoke = NexusTradeSmoke(
+            FakeHttpTransport(healthy_responses(missing_champion)), API_KEY,
+        )
+
+        with self.assertRaisesRegex(SmokeSafetyError, "active_campaign_contract_invalid"):
             smoke.run_read_only()
 
     def test_transient_transport_failure_reconnects_with_a_bounded_retry(self):

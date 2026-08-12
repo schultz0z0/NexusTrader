@@ -29,11 +29,11 @@
 - Consumes: owner durável, `_shared_demo_monitor`, lane ACTIVE.
 - Produces: monitor roteado antes de `_resume_active_monitors()`.
 
-- [ ] Escrever teste que restaura Champion OFF ACTIVE no dispatcher DEMO compartilhado e exige chamada `monitor_contract`.
-- [ ] Executar o teste e observar ausência do monitor.
-- [ ] Implementar fallback explícito para `_shared_demo_monitor` somente quando a identidade coincide.
-- [ ] Provar settlement, IDLE, idempotência e ausência de segunda compra.
-- [ ] Executar regressão runtime/repository e commit local.
+- [x] Escrever teste que restaura Champion OFF ACTIVE no dispatcher DEMO compartilhado e exige chamada `monitor_contract`.
+- [x] Executar o teste e observar ausência do monitor.
+- [x] Implementar fallback explícito para `_shared_demo_monitor` somente quando a identidade coincide.
+- [x] Provar settlement, IDLE, idempotência e ausência de segunda compra.
+- [x] Executar regressão runtime/repository e commit local.
 
 ### Task 2: Progresso durável e vivo da campanha Trial
 
@@ -46,10 +46,10 @@
 **Interfaces:**
 - Produces: `active_campaigns[].progress={completed,target}` para a campanha Trial.
 
-- [ ] Escrever RED com trades Champion e Trial de campanhas distintas e conferir contagem exata.
-- [ ] Escrever RED JS que seleciona apenas `challenger_trial` e incrementa por trade settled idempotente.
-- [ ] Implementar query transacional e atualização do store.
-- [ ] Rodar regressão API/store e commit local.
+- [x] Escrever RED com trades Champion e Trial de campanhas distintas e conferir contagem exata.
+- [x] Escrever RED JS que seleciona apenas `challenger_trial` e incrementa por trade settled idempotente.
+- [x] Implementar query transacional e atualização do store.
+- [x] Rodar regressão API/store e commit local.
 
 ### Task 3: Orquestrador automático do laboratório
 
@@ -65,13 +65,13 @@
 - Produces: `LearningLabService.run_due(now)`, jobs idempotentes, tentativas e candidatos SHADOW.
 - Consumes: `DatasetBuilder`, `Trainer`, `SQLiteTrialLedger`, `CandidateRegistry`, `DurableReportScheduler`, `PromotionService.replace_trial`.
 
-- [ ] Escrever RED para nenhuma amostra, dataset causal válido, treino repetido/idempotente, restart e falha fail-closed.
-- [ ] Persistir feature snapshot correlacionado à decisão e settlement antes de montar rows.
-- [ ] Construir dataset apenas de rows completas/settled da campanha, com proveniência exata.
-- [ ] Treinar candidatos determinísticos e registrar todas as tentativas.
-- [ ] Na fronteira semanal, avaliar/rotacionar somente SHADOW executável elegível; nunca Champion.
-- [ ] Publicar estado do laboratório e integrar lifecycle start/stop sem bloquear M1.
-- [ ] Rodar regressão learning/reports/promotion/runtime e commit local.
+- [x] Escrever RED para nenhuma amostra, dataset causal válido, treino repetido/idempotente, restart e falha fail-closed.
+- [x] Persistir feature snapshot correlacionado à decisão e settlement antes de montar rows.
+- [x] Construir dataset apenas de rows completas/settled da campanha, com proveniência exata.
+- [x] Treinar candidatos determinísticos e registrar todas as tentativas.
+- [x] Na fronteira semanal, avaliar/rotacionar somente SHADOW executável elegível; nunca Champion.
+- [x] Publicar estado do laboratório e integrar lifecycle start/stop sem bloquear M1.
+- [x] Rodar regressão learning/reports/promotion/runtime e commit local.
 
 ### Task 4: Bollinger e observabilidade visual
 
@@ -88,10 +88,10 @@
 **Interfaces:**
 - Produces: linhas superior/SMA/inferior 20/2/SMA e card de atividade do laboratório.
 
-- [ ] Escrever RED para valores Bollinger determinísticos e séries visíveis.
-- [ ] Garantir contraste, legenda textual e persistência após reconnect.
-- [ ] Mostrar tentativa/candidato/ablação/rotação sem controles no Trial.
-- [ ] Rodar suíte JS e contrato frontend; commit local.
+- [x] Escrever RED para valores Bollinger determinísticos e séries visíveis.
+- [x] Garantir contraste, legenda textual e persistência após reconnect.
+- [x] Mostrar tentativa/candidato/ablação/rotação sem controles no Trial.
+- [x] Rodar suíte JS e contrato frontend; commit local.
 
 ### Task 5: Gate integral de documentação, Docker e navegador
 
@@ -103,12 +103,17 @@
 **Interfaces:**
 - Produces: decisão GO/NO-GO, instruções localhost/VPS e teste manual.
 
-- [ ] Rodar full Python, full JS, compileall, pip check, compose config e diffs protegidos.
-- [ ] Rebuild DEMO-only na porta 8993 preservando o volume real de validação.
-- [ ] Provar no navegador liquidação, gerenciamento, progresso, Bollinger e laboratório sem F5.
-- [ ] Reiniciar API/bot e repetir snapshot/contratos/campanha/jobs.
-- [ ] Conferir banco, eventos, rede/console e logs de API/bot; zero traceback/loop/duplicata/vazamento.
-- [ ] Atualizar instruções VPS/manual, registrar evidências sanitizadas e commit final local.
+- [x] Rodar full Python, full JS, compileall, pip check, compose config e diffs protegidos.
+- [ ] Rebuild DEMO-only da revisão final na porta 8993 preservando o volume real de validação.
+- [x] Provar no navegador liquidação, gerenciamento, progresso, Bollinger e laboratório sem F5 na imagem operacional anterior.
+- [x] Reiniciar API/bot e repetir snapshot/contratos/campanha/jobs na imagem operacional anterior.
+- [ ] Repetir o scan de banco, eventos e logs na imagem da revisão final; o daemon Docker está bloqueado nesta sessão gerenciada.
+- [x] Atualizar instruções VPS/manual e registrar evidências sanitizadas.
+
+As duas caixas restantes são um gate de implantação da revisão final, não uma lacuna de
+código. Os testes completos, a API isolada e o navegador da imagem anterior estão
+verdes; o rebuild deve ser executado por `scripts/rebuild_local_docker.ps1` em um shell
+com acesso ao pipe do Docker antes do deploy.
 
 ## Completion Gate
 

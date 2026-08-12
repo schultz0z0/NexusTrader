@@ -1,6 +1,6 @@
 # Estratégia NexusTrade Champion V1
 
-Status: **rascunho; regras confirmadas e questões abertas estão identificadas**
+Status: **contrato operacional implementado e validado do Champion V1**
 
 ## 1. Dados causais
 
@@ -166,3 +166,23 @@ paralelo sempre registra características, previsão, decisão e resultado hipot
 - Fechamento exatamente igual à banda externa não é rompimento.
 - Abertura ou fechamento exatamente igual à SMA não satisfaz o cruzamento estrito da
   linha central.
+
+## 7. Vínculo obrigatório com a implementação
+
+O Champion V1 não é uma interpretação aproximada deste documento. A implementação em
+`nexus_trade/strategy.py` e seus testes de contrato obedecem exatamente às seções 1 a
+6:
+
+- Bollinger `20/2/SMA` é o indicador primário e não pode ser removido;
+- `ADX <= 22` autoriza a execução e `ADX > 22` consome e bloqueia o sinal;
+- o rompimento externo exige fechamento estritamente fora da banda e inclinação na
+  direção do rompimento;
+- após rompimento externo, a espera pela primeira vela contrária não expira por
+  quantidade de candles;
+- o cruzamento estrito da linha central entra no M1 seguinte sem confirmação extra;
+- o sinal não cria ordem depois do limite absoluto de dois segundos;
+- uma lane nunca possui dois contratos simultâneos.
+
+O gate de aprendizado pode somente converter uma direção determinística já aprovada em
+`DO_NOT_OPERATE`. Ele nunca cria `CALL` ou `PUT`, nunca inverte direção, nunca ignora o
+ADX e nunca modifica gerenciamento, stake ou cooldown do Champion.

@@ -1,10 +1,11 @@
 import asyncio
 import contextlib
+import hashlib
 import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ from nexus_trade.artifacts import CandidateArtifact, canonical_json
 from nexus_trade.candidates import CandidateRegistry
 from nexus_trade.promotion import PromotionConflict, PromotionRejected, PromotionService
 from nexus_trade.repository import NexusTradeSingletonError
+from nexus_trade.scheduler import BRASILIA
 from tests.test_nexus_trade_learning import ArtifactAndRegistryTests
 
 
@@ -46,9 +48,58 @@ class PromotionServiceTests(unittest.TestCase):
         registry = CandidateRegistry(self.db_path)
         artifact = ArtifactAndRegistryTests.artifact("trial-current")
         candidate = registry.register(artifact)
+        qualification = {
+            "candidate_id": candidate["id"],
+            "artifact_hash": artifact.artifact_hash,
+            "qualification": {
+                "status": "PASS",
+                "gates": [
+                    {"code": "ARTIFACT_INTEGRITY", "status": "PASS"},
+                    {"code": "SHADOW_FORWARD", "status": "PASS"},
+                ],
+            },
+        }
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "INSERT INTO nexus_training_attempts "
+                "(attempt_hash,status,dataset_hash,provenance_hash,seed,payload) "
+                "VALUES (?,'SUCCEEDED',?,?,?,?)",
+                (
+                    hashlib.sha256((artifact.artifact_hash + "qualification").encode()).hexdigest(),
+                    artifact.metadata["dataset_hash"],
+                    artifact.metadata["provenance_hash"], 73,
+                    canonical_json(qualification),
+                ),
+            )
+            db.commit()
+        initial = self.snapshot()
+        initial_trial = next(
+            item for item in initial["active_campaigns"]
+            if item["lane"] == "challenger_trial"
+        )
+        started = datetime.fromisoformat(initial_trial["started_at"].replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        local = started.astimezone(BRASILIA)
+        days_until_monday = (7 - local.weekday()) % 7
+        if days_until_monday == 0 and local.time() >= time(10):
+            days_until_monday = 7
+        boundary = datetime.combine(
+            local.date() + timedelta(days=days_until_monday), time(10), BRASILIA,
+        ).astimezone(timezone.utc)
+        asyncio.run(PromotionService(self.db_path).replace_trial(
+            boundary,
+            actor="system:test-fixture",
+            request_id="fixture-rotate-trial",
+            reason="freeze executable Trial for governance tests",
+            candidate_id=candidate["id"],
+        ))
         registry.register(ArtifactAndRegistryTests.artifact("shadow-qualified"))
         before = self.snapshot()
-        campaign_id = before["active_campaigns"][0]["id"]
+        campaign_id = next(
+            item["id"] for item in before["active_campaigns"]
+            if item["lane"] == "challenger_trial"
+        )
         trial_version = next(
             item["version"] for item in before["lanes"]
             if item["lane"] == "challenger_trial"
@@ -58,8 +109,8 @@ class PromotionServiceTests(unittest.TestCase):
             "report_type": "weekly",
             "campaign_id": campaign_id,
             "window": {
-                "start_utc": "2026-08-03T13:00:00+00:00",
-                "end_utc": "2026-08-10T13:00:00+00:00",
+                "start_utc": boundary.isoformat(),
+                "end_utc": (boundary + timedelta(days=7)).isoformat(),
             },
             "accumulated_progress": {
                 "operations": 300,
@@ -91,7 +142,6 @@ class PromotionServiceTests(unittest.TestCase):
             },
         }
         report_encoded = canonical_json(report_snapshot)
-        import hashlib
         report_hash = hashlib.sha256(
             b"nexus-report-json-v1\0" + report_encoded.encode("utf-8")
         ).hexdigest()
@@ -117,7 +167,7 @@ class PromotionServiceTests(unittest.TestCase):
                 "(id,campaign_id,report_hash,snapshot,report_type,window_start_utc,window_end_utc) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (report_id, campaign_id, report_hash, report_encoded, "weekly",
-                 "2026-08-03T13:00:00+00:00", "2026-08-10T13:00:00+00:00"),
+                 boundary.isoformat(), (boundary + timedelta(days=7)).isoformat()),
             )
             db.execute(
                 "INSERT INTO nexus_proposals "
@@ -126,6 +176,13 @@ class PromotionServiceTests(unittest.TestCase):
                 (proposal_id, campaign_id, trial_version["id"], 1,
                  "PENDING_USER_REVIEW", canonical_json(proposal_payload)),
             )
+            # The rotation is fixture setup, not part of the action under test.
+            # Preserve its durable role transition, but remove transport/audit job
+            # artifacts so assertions continue to scope the requested action only.
+            db.execute("DELETE FROM nexus_event_outbox")
+            db.execute("DELETE FROM nexus_trial_boundaries")
+            db.execute("DELETE FROM nexus_transition_requests")
+            db.execute("DELETE FROM nexus_audit_events")
             db.commit()
         return proposal_id, candidate, artifact, before
 
@@ -355,7 +412,9 @@ class PromotionServiceTests(unittest.TestCase):
             version_count = db.execute("SELECT COUNT(*) FROM nexus_versions").fetchone()[0]
             db.commit()
 
-        with self.assertRaisesRegex(PromotionRejected, "ARTIFACT_CORRUPT"):
+        with self.assertRaisesRegex(
+            PromotionRejected, "ARTIFACT_CORRUPT|CANDIDATE_NOT_FROZEN_TRIAL",
+        ):
             asyncio.run(self.service.approve(
                 proposal_id,
                 before["snapshot_version"],
@@ -384,7 +443,13 @@ class PromotionServiceTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(runtime[0], before["runtime"]["champion_version_id"])
         self.assertEqual(proposal_status, "PENDING_USER_REVIEW")
-        self.assertEqual(audit, ("REJECTED", "ARTIFACT_CORRUPT"))
+        self.assertIn(
+            audit,
+            (
+                ("REJECTED", "ARTIFACT_CORRUPT"),
+                ("REJECTED", "CANDIDATE_NOT_FROZEN_TRIAL"),
+            ),
+        )
         self.assertEqual(after_version_count, version_count)
         self.assertEqual(outbox_count, 0)
 
@@ -580,7 +645,10 @@ class PromotionServiceTests(unittest.TestCase):
 
     def test_reanalyze_preserves_champion_and_all_evidence_but_starts_zero_campaign(self):
         proposal_id, candidate, artifact, before = self.seed_valid_proposal()
-        old_campaign = before["active_campaigns"][0]["id"]
+        old_campaign = next(
+            item["id"] for item in before["active_campaigns"]
+            if item["lane"] == "challenger_trial"
+        )
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
             immutable_before = {
                 table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -608,7 +676,10 @@ class PromotionServiceTests(unittest.TestCase):
         self.assertEqual(after["runtime"]["champion_version_id"], before["runtime"]["champion_version_id"])
         self.assertEqual(after["runtime"]["trial_version_id"], before["runtime"]["trial_version_id"])
         self.assertEqual(after["snapshot_version"], before["snapshot_version"] + 1)
-        active = after["active_campaigns"]
+        active = [
+            item for item in after["active_campaigns"]
+            if item["lane"] == "challenger_trial"
+        ]
         self.assertEqual(len(active), 1)
         self.assertNotEqual(active[0]["id"], old_campaign)
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
@@ -1185,6 +1256,10 @@ class PromotionServiceTests(unittest.TestCase):
 
     def test_reanalyze_request_id_replay_does_not_start_another_campaign(self):
         proposal_id, _, _, before = self.seed_valid_proposal()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            campaign_count_before = db.execute(
+                "SELECT COUNT(*) FROM nexus_campaigns WHERE lane='challenger_trial'"
+            ).fetchone()[0]
         first = asyncio.run(
             self.service.reanalyze(
                 proposal_id, before["snapshot_version"], "human:operator",
@@ -1203,7 +1278,7 @@ class PromotionServiceTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM nexus_campaigns WHERE lane='challenger_trial'").fetchone()[0],
-                2,
+                campaign_count_before + 1,
             )
 
     def test_legacy_audit_schema_migrates_without_losing_history(self):

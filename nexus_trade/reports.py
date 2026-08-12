@@ -10,7 +10,12 @@ from datetime import date, datetime, time, timezone
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from nexus_trade.artifacts import canonical_json, validate_safe_json
+from nexus_trade.artifacts import (
+    ArtifactIntegrityError,
+    CandidateArtifact,
+    canonical_json,
+    validate_safe_json,
+)
 from nexus_trade.gates import GateResult, PromotionGateEvaluator
 from nexus_trade.metrics import calculate_lane_metrics
 from nexus_trade.scheduler import BRASILIA, BrasiliaSchedule, ReportWindow
@@ -319,6 +324,22 @@ class ReportService:
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate settlement contract")
         metrics = calculate_lane_metrics(settlements)
+        binding_names = (
+            "candidate_id", "artifact_hash", "metadata_hash",
+            "configuration_hash", "dataset_hash",
+        )
+        present_bindings = {name: value[name] for name in binding_names if name in value}
+        if present_bindings and (
+            len(present_bindings) != len(binding_names)
+            or type(present_bindings["candidate_id"]) is not str
+            or not present_bindings["candidate_id"]
+            or any(
+                type(present_bindings[name]) is not str
+                or len(present_bindings[name]) != 64
+                for name in binding_names[1:]
+            )
+        ):
+            raise ValueError("executable Trial report bindings are incomplete")
         return {
             "lane": lane,
             "campaign_id": campaign_id,
@@ -332,6 +353,7 @@ class ReportService:
             "model": _plain(value["model"]),
             "metrics": metrics.as_dict(),
             "contract_ids": ids,
+            **present_bindings,
         }
 
     @staticmethod
@@ -505,8 +527,11 @@ class ReportService:
                 payload.get("provenance_hash"),
                 payload.get("window_end_utc"),
             )
-            if identity == (
+            if (
+                isinstance(payload.get("promotion_evidence"), Mapping)
+                and identity == (
                 campaign_id, trial_version_id, provenance_hash, window_end_utc,
+                )
             ):
                 matched.append(payload)
         if not matched:
@@ -635,13 +660,40 @@ class ReportService:
         row = db.execute("SELECT * FROM nexus_versions WHERE id=?", (version_id,)).fetchone()
         if row is None:
             raise ValueError("report version provenance is unavailable")
-        snapshot = json.loads(row["snapshot"])
-        configuration = snapshot.get("indicator_configuration", snapshot)
-        features = snapshot.get("feature_schema", sorted(
-            name for name, value in configuration.items() if isinstance(value, Mapping)
-        ))
-        entry_rules = snapshot.get("entry_rules", [snapshot.get("direction_source", "bollinger_v1_deterministic")])
-        model = snapshot.get("model", "deterministic")
+        try:
+            snapshot = json.loads(row["snapshot"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("report version snapshot is invalid") from exc
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("report version snapshot must be a mapping")
+        artifact_bindings = {}
+        artifact_payload = snapshot.get("artifact")
+        if artifact_payload is not None:
+            try:
+                artifact = CandidateArtifact.from_json(canonical_json(artifact_payload))
+                artifact.executable_gate()
+            except (ArtifactIntegrityError, TypeError, ValueError) as exc:
+                raise ValueError("report version artifact is corrupt or non-executable") from exc
+            metadata = artifact.metadata
+            configuration = metadata["indicator_configuration"]
+            features = metadata["feature_schema"]
+            entry_rules = [metadata["direction_source"], *metadata["gate_actions"]]
+            model = metadata["model"]
+            artifact_bindings = {
+                "candidate_id": snapshot.get("candidate_id"),
+                "artifact_hash": artifact.artifact_hash,
+                "metadata_hash": artifact.metadata_hash,
+                "configuration_hash": metadata["configuration_hash"],
+                "dataset_hash": metadata["dataset_hash"],
+                "provenance_hash": metadata["provenance_hash"],
+            }
+        else:
+            configuration = snapshot.get("indicator_configuration", snapshot)
+            features = snapshot.get("feature_schema", sorted(
+                name for name, value in configuration.items() if isinstance(value, Mapping)
+            ))
+            entry_rules = snapshot.get("entry_rules", [snapshot.get("direction_source", "bollinger_v1_deterministic")])
+            model = snapshot.get("model", "deterministic")
         return {
             "version_id": row["id"],
             "version_hash": row["version_hash"],
@@ -652,6 +704,7 @@ class ReportService:
             "symbol": "R_100",
             "timeframe_seconds": 60,
             "duration_seconds": 58,
+            **artifact_bindings,
         }
 
     @staticmethod

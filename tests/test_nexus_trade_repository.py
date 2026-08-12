@@ -1139,6 +1139,76 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "profit": None,
             "date_expiry": None,
         }])
+
+    async def test_control_snapshot_exposes_only_flat_operational_decisions(self):
+        """Internal lane snapshots and settlements must not duplicate the UI journal."""
+        await self.repo.init_db()
+        runtime = await self.nexus.get_runtime_snapshot()
+        trial = next(
+            item for item in runtime["lanes"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        campaign = next(
+            item for item in runtime["active_campaigns"]
+            if item["lane"] == Lane.TRIAL.value
+        )
+        decision = {
+            "id": "decision-operational",
+            "decision_id": "decision-operational",
+            "lane": Lane.TRIAL.value,
+            "contract_type": "CALL",
+            "reason_codes": ["central_cross_up"],
+            "signal_epoch": 1_723_000_000,
+            "target_epoch": 1_723_000_060,
+            "adx": 18.25,
+            "blocked_reason": None,
+            "provenance_hash": NEXUS_PROVENANCE_HASH,
+        }
+        idle_state = {
+            "position_status": "IDLE",
+            "owner_decision_id": None,
+            "contract_id": None,
+        }
+        await self.repo.record_nexus_decision(
+            decision,
+            nexus_version_id=trial["version"]["id"],
+            campaign_id=campaign["id"],
+            state=idle_state,
+            owner=None,
+        )
+        self.assertTrue(await self.repo.save_nexus_lane_state(
+            Lane.TRIAL.value, idle_state, None,
+        ))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO nexus_decisions (
+                    id,lane,nexus_version_id,campaign_id,symbol,signal_epoch,payload
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    "settlement:decision-operational:77", Lane.TRIAL.value,
+                    trial["version"]["id"], campaign["id"], "R_100",
+                    1_723_000_118,
+                    json.dumps({
+                        "decision": {"outcome": "SETTLED"},
+                        "state": idle_state,
+                        "settlement": {"contract_id": 77},
+                    }),
+                ),
+            )
+            await db.commit()
+
+        snapshot = await self.nexus.get_control_snapshot()
+
+        self.assertEqual(len(snapshot["decisions"]), 1)
+        public = snapshot["decisions"][0]
+        self.assertEqual(public["decision_id"], "decision-operational")
+        self.assertEqual(public["contract_type"], "CALL")
+        self.assertEqual(public["adx"], 18.25)
+        self.assertEqual(public["nexus_version_id"], trial["version"]["id"])
+        self.assertEqual(public["campaign_id"], campaign["id"])
+        self.assertNotIn("payload", public)
         self.assertNotIn("account_id", json.dumps(snapshot["positions"]))
 
 

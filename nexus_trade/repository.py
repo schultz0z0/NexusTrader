@@ -884,13 +884,33 @@ class NexusTradeRepository:
 
     async def get_control_snapshot(self) -> dict:
         durable = await self.get_runtime_snapshot()
-        decisions = await self._list_json_rows(
+        stored_decisions = await self._list_json_rows(
             """
             SELECT * FROM nexus_decisions
+            WHERE json_type(payload, '$.decision') = 'object'
+              AND json_type(payload, '$.snapshot') IS NULL
+              AND json_type(payload, '$.settlement') IS NULL
             ORDER BY created_at DESC, id DESC LIMIT 100
             """,
             json_fields=("payload",),
         )
+        decisions = []
+        for row in stored_decisions:
+            decision = row.get("payload", {}).get("decision")
+            if not isinstance(decision, dict):
+                continue
+            public = dict(decision)
+            public.update({
+                "id": row["id"],
+                "decision_id": row["id"],
+                "lane": row["lane"],
+                "nexus_version_id": row["nexus_version_id"],
+                "campaign_id": row["campaign_id"],
+                "symbol": row["symbol"],
+                "signal_epoch": row["signal_epoch"],
+                "entry_delay_ms": row["entry_delay_ms"],
+            })
+            decisions.append(public)
         trades = await self._list_json_rows(
             """
             SELECT * FROM trades WHERE bot_id = ?
