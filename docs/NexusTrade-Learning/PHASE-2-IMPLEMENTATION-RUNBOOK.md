@@ -199,3 +199,55 @@ docker compose ps
 Restore the volume backup only when a database migration or data-integrity check fails;
 restoring it discards data created after the backup. Record the exact reason, timestamp
 and retained logs in `PHASE-2-VALIDATION.md`.
+
+## 8. Next VPS deploy checklist after the 2026-08-12 local regression closure
+
+Execute this checklist only after syncing the reviewed code that restored the local
+green for `learning_lab` and `tick_archive`.
+
+1. In the shell session that will deploy, confirm `docker` is available in the PATH:
+
+```bash
+docker --version
+docker compose version
+```
+
+2. In the VPS `.env`, re-check the four distinct non-empty authorities:
+   `INTERNAL_API_TOKEN`, `DASHBOARD_API_KEY`, `NEXUS_HUMAN_ACTION_KEY`,
+   `NEXUS_HUMAN_ACTOR`.
+3. Keep `DERIV_ACCOUNT_TYPE=demo`, `ALLOW_REAL_TRADING=false` and
+   `REAL_MAX_STAKE_USD=0` during the whole validation window.
+4. Before build, render the compose file and stop only the owned services:
+
+```bash
+docker compose config --quiet
+docker compose stop nexus-bot nexus-api
+```
+
+5. Build and start the updated image:
+
+```bash
+docker compose build --pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:8989/api/v1/health/live
+```
+
+6. Scan logs before opening the browser:
+
+```bash
+docker compose logs --tail=200 nexus-api
+docker compose logs --tail=200 nexus-bot
+```
+
+GO requires zero restart loop, zero traceback, zero REAL attempt and no secret leakage.
+
+7. In the HTTPS page, validate:
+   - dashboard login;
+   - fixed NexusTrade row in DEMO;
+   - `GET /api/v1/nexus-trade` hydration and WSS reconnect;
+   - `OPERAÇÃO`, `RELATÓRIOS` and `EVOLUÇÃO` loading without console errors;
+   - `GERENCIAMENTO` and `INICIAR CHAMPION` visible only in the Champion workspace;
+   - no Donchian/Nexus Speed regression.
+8. If any gate fails, stop `nexus-bot` and `nexus-api`, keep the logs and execute the
+   rollback flow from section 7 without `down -v`.

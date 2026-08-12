@@ -235,3 +235,50 @@ da imagem operacional imediatamente anterior, enquanto as correções finais de
 scheduler, evidência, smoke e journal foram provadas por testes e API isolada. Antes do
 deploy, execute `scripts/rebuild_local_docker.ps1` em um PowerShell com acesso ao Docker
 e repita o scan de logs descrito no runbook. Nenhuma ordem REAL foi autorizada.
+
+## Addendum — regression closure after local retest, 2026-08-12
+
+### Regressions reproduced and closed
+
+1. `tests.test_nexus_trade_learning_lab` falhava em quatro casos por data fixa de
+   boundary (`2026-08-12T13:00:00Z`) que envelheceu além de `campaign.started_at`.
+   A falha era de teste, não do scheduler: o contrato fail-closed de `due_windows()`
+   foi preservado e os testes passaram a derivar a primeira fronteira diária a partir
+   da campanha ativa, como já ocorria nos cenários semanais.
+2. `tests.test_nexus_trade_tick_archive` falhava em três casos de restart causal por
+   divergência apenas textual do mesmo path no Windows. O manifesto agora canoniza
+   paths com `Path.resolve()` e aceita aliases equivalentes sem relaxar a validação de
+   `sha256`, bytes, sequência ou conteúdo.
+
+### Current retest gate
+
+| Gate | Result |
+| --- | --- |
+| `tests.test_nexus_trade_learning_lab` | 19/19 PASS |
+| `tests.test_nexus_trade_tick_archive` | 16/16 PASS |
+| Python focal `test_nexus_trade*.py` | 348/348 PASS em 150,556 s |
+| Python `compileall` | PASS |
+| `pip check` | PASS |
+| `git diff --check` | PASS |
+| `docker compose config --quiet` | não executado nesta sessão, porque `docker` não estava disponível no PATH da sessão gerenciada |
+
+### Local runtime and browser evidence
+
+- `scripts/start_dev.ps1` iniciou com `STARTED_SAFE`, `account_type=demo` e
+  `allow_real_trading=false`.
+- `GET http://127.0.0.1:8990/api/v1/health/live` retornou `{\"status\":\"alive\"}`.
+- O navegador real autenticou no dashboard local, carregou a linha fixa do
+  `NexusTrade R_100 · 1m OFF — APRENDENDO EM DEMO` e abriu a aba `OPERAÇÃO`.
+- A UI exibiu `VER EVOLUÇÃO`, `GERENCIAMENTO`, `PARADA TOTAL`, `INICIAR CHAMPION`,
+  abas `OPERAÇÃO/RELATÓRIOS/EVOLUÇÃO`, cards `Champion V1` e `Trial V1`, além da área
+  `Gráfico operacional`.
+- Console do navegador: sem mensagens.
+- Rede do navegador: carregamento bem-sucedido dos módulos `nexus_trade_*`,
+  `POST /api/v1/ws-tickets/nexus-trade` e `GET /api/v1/nexus-trade`.
+- Log do launcher local: sem `Traceback`; inicialização explícita em DEMO-only.
+
+### Status atualizado
+
+**CODE GO local mantido.** O fechamento focal hoje ficou reproduzível no workspace
+atual. Antes do próximo deploy, ainda é necessário validar `docker compose config --quiet`
+e rebuild da imagem em uma sessão que tenha `docker` disponível no PATH.

@@ -30,6 +30,20 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp_dir.cleanup()
 
+    def next_daily_boundary(self) -> datetime:
+        campaign = LearningLabService(self.db_path)._active_trial_campaign()
+        started = LearningLabService._parse_timestamp(
+            campaign["started_at"]
+        ).astimezone(BRASILIA)
+        boundary_date = started.date()
+        if started.time() >= time(10, 0):
+            boundary_date += timedelta(days=1)
+        return datetime.combine(
+            boundary_date,
+            time(10, 0),
+            BRASILIA,
+        ).astimezone(timezone.utc)
+
     def seed_comparable_week(self, window):
         trial_campaign = next(
             item for item in self.snapshot["active_campaigns"]
@@ -216,7 +230,7 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(trained["nexus_version_id"])
 
     async def test_due_daily_job_records_insufficient_data_once_across_restart(self):
-        boundary = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        boundary = self.next_daily_boundary()
         first_service = LearningLabService(self.db_path)
 
         first = await first_service.run_due(now=boundary)
@@ -236,7 +250,7 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_due_daily_job_closes_one_real_report_and_exposes_its_identity(self):
-        boundary = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        boundary = self.next_daily_boundary()
         service = LearningLabService(self.db_path)
 
         first = await service.run_due(now=boundary)
@@ -256,7 +270,7 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failed_daily_job_is_retried_after_restart_instead_of_stalling_forever(self):
-        boundary = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        boundary = self.next_daily_boundary()
         first_service = LearningLabService(self.db_path)
 
         async def fail_once(campaign, window):
@@ -353,7 +367,7 @@ class LearningEvidenceTests(unittest.IsolatedAsyncioTestCase):
             db.commit()
         finally:
             db.close()
-        boundary = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
+        boundary = self.next_daily_boundary()
         service = LearningLabService(self.db_path)
 
         result = await service.run_due(now=boundary)

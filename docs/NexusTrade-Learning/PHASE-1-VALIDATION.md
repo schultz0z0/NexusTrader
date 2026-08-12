@@ -207,3 +207,22 @@ docker compose -p <projeto-isolado> down
 Para Compose, force no ambiente do comando todos os overrides de segurança descritos
 acima. Nunca use `down -v` sobre o volume de evidência e nunca reutilize projeto/porta
 de outro processo.
+
+## Hardening pós-validação — round 4 (2026-08-12)
+
+Round executado offline no workspace atual, sem deploy nem alteração de estratégia:
+
+- RED reproduzido em `tests.test_nexus_trade_tick_archive` para três cenários de
+  restart causal, todos falhando com `ValueError: manifest diverges from published segment`.
+- Causa raiz confirmada: o manifesto tratava como divergência real duas
+  representações textuais do mesmo path no Windows (`RAPHAE~1` e caminho longo),
+  embora `sha256`, bytes, sequência e conteúdo fossem idênticos.
+- GREEN 16/16 em `tests.test_nexus_trade_tick_archive -v` após canonizar o path do
+  manifesto por `Path.resolve()`, preservar a validação de conteúdo e atualizar o
+  registro persistido somente quando o alias textual apontava para o mesmo arquivo.
+- A correção não relaxa o fail-closed de manifesto adulterado: o teste de tamper
+  continua verde e a divergência material de `sha256`, contagem, sequência ou bytes
+  permanece bloqueante.
+
+Este round reforça o contrato original de restart causal e replay ordenado sem alterar
+o GO da Fase 1 nem introduzir novo comportamento de runtime.

@@ -272,7 +272,7 @@ class TickArchive:
             "tick_count": len(ticks),
             "byte_count": path.stat().st_size,
             "sha256": digest,
-            "path": str(path),
+            "path": self._canonical_path(path),
             "segment_sequence": sequence,
         }
         db = sqlite3.connect(self.db_path)
@@ -286,9 +286,16 @@ class TickArchive:
                 if len(rows) != 1:
                     raise ValueError("manifest identity conflict")
                 existing = dict(rows[0])
-                expected = {key: manifest[key] for key in manifest}
-                if any(existing.get(key) != value for key, value in expected.items()):
+                comparable_existing = {key: existing.get(key) for key in manifest}
+                comparable_existing["path"] = self._canonical_path(existing["path"])
+                if any(comparable_existing.get(key) != value for key, value in manifest.items()):
                     raise ValueError("manifest diverges from published segment")
+                if existing.get("path") != manifest["path"]:
+                    db.execute(
+                        "UPDATE nexus_tick_segments SET path = ? WHERE id = ?",
+                        (manifest["path"], manifest["id"]),
+                    )
+                    db.commit()
                 return existing
             db.execute(
                 """
@@ -324,11 +331,15 @@ class TickArchive:
         return rows
 
     def _manifest_path(self, row: Mapping[str, object]) -> Path:
-        path = Path(str(row["path"])).resolve()
+        path = Path(self._canonical_path(row["path"]))
         root = (self.root_path / self.symbol).resolve()
         if not path.is_relative_to(root) or not path.exists():
             raise ValueError("manifest path is missing or outside the R_100 archive")
         return path
+
+    @staticmethod
+    def _canonical_path(path: Path | str) -> str:
+        return str(Path(path).resolve())
 
     def _validate_segment_ticks(self, ticks: list[dict], path: Path) -> None:
         previous: int | None = None
