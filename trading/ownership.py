@@ -20,11 +20,17 @@ class BuyTransactionTracker:
         if not hasattr(self.connection, "subscribe"):
             logger.warning("Conexao sem transaction stream; reconciliation usara backfill")
             return
-        await self.connection.subscribe(
-            "ownership:transactions",
-            {"transaction": 1},
-            self._on_message,
-        )
+        try:
+            await self.connection.subscribe(
+                "ownership:transactions",
+                {"transaction": 1},
+                self._on_message,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Transaction stream indisponivel; reconciliation usara backfill (%s)",
+                exc,
+            )
 
     async def _on_message(self, response):
         transaction = response.get("transaction") or {}

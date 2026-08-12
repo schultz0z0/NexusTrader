@@ -126,6 +126,43 @@ class OrderExecutionOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.request, {"transaction": 1})
         self.assertEqual(tracker.snapshot()[0]["contract_id"], 42)
 
+    async def test_transaction_stream_failure_falls_back_to_backfill(self):
+        class FailingStreamingConnection:
+            async def subscribe(self, key, request, handler):
+                self.key = key
+                self.request = request
+                raise ConnectionError("Deriv subscription failed")
+
+        connection = FailingStreamingConnection()
+        tracker = BuyTransactionTracker(connection)
+
+        await tracker.start()
+
+        self.assertEqual(connection.request, {"transaction": 1})
+        self.assertEqual(tracker.snapshot(), [])
+
+    async def test_coordinator_start_tolerates_transaction_stream_failure(self):
+        class FailingStreamingConnection:
+            async def subscribe(self, key, request, handler):
+                self.key = key
+                self.request = request
+                raise ConnectionError("Deriv subscription failed")
+
+        tempdir = tempfile.TemporaryDirectory()
+        try:
+            repository = DatabaseRepository(str(Path(tempdir.name) / "coordinator.db"))
+            await repository.init_db()
+            await provision_order_test_bots(repository)
+            coordinator = OrderOwnershipCoordinator(
+                FailingStreamingConnection(),
+                repository,
+                account_type="demo",
+            )
+
+            await coordinator.start()
+        finally:
+            tempdir.cleanup()
+
 
 class OrderReconciliationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
