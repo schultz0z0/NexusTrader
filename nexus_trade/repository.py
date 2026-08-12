@@ -361,6 +361,19 @@ class NexusTradeRepository:
             raise NexusTradeSingletonError(
                 "active Trial campaign does not match the runtime pointer"
             )
+        async with db.execute(
+            """
+            SELECT COUNT(*) AS completed
+            FROM trades
+            WHERE bot_id = ? AND lane = ? AND campaign_id = ? AND status = 'closed'
+            """,
+            (NEXUS_TRADE_BOT_ID, Lane.TRIAL.value, active_trial["id"]),
+        ) as cursor:
+            progress = await cursor.fetchone()
+        active_trial["progress"] = {
+            "completed": int(progress["completed"]),
+            "target": 300,
+        }
         management = await cls._management_from_connection(db)
         lane_states, positions = await cls._lane_runtime_view(db)
         return {

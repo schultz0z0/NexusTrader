@@ -66,7 +66,9 @@ function upsert(items, payload, keys) {
 }
 
 function campaignView(campaigns) {
-  const current = campaigns.find((item) => item?.status === "ACTIVE") || campaigns[0] || null;
+  const current = campaigns.find((item) => (
+    item?.lane === "challenger_trial" && item?.status === "ACTIVE"
+  )) || null;
   const source = current?.progress && typeof current.progress === "object" ? current.progress : current || {};
   const completed = Number(source.completed ?? source.operations ?? source.n_total ?? 0);
   const target = Number(source.target ?? 300);
@@ -211,7 +213,28 @@ export function createNexusTradeStore(initial = {}) {
     } else if (event.type === "nexus.decision") {
       next.decisions = upsert(state.decisions, payload, ["id", "decision_id"]);
     } else if (event.type === "nexus.trade") {
+      const tradeIdentity = identityOf(payload, ["id", "contract_id"]);
+      const alreadyKnown = Boolean(tradeIdentity) && state.trades.some(
+        (item) => identityOf(item, ["id", "contract_id"]) === tradeIdentity,
+      );
       next.trades = upsert(state.trades, payload, ["id", "contract_id"]);
+      const trialCampaign = state.activeCampaigns.find((item) => (
+        item?.lane === "challenger_trial"
+        && item?.status === "ACTIVE"
+        && item?.id === payload.campaign_id
+      ));
+      if (!alreadyKnown && payload.lane === "challenger_trial"
+        && payload.status === "closed" && trialCampaign) {
+        next.activeCampaigns = state.activeCampaigns.map((item) => {
+          if (item.id !== trialCampaign.id) return item;
+          const current = campaignView([item]).progress;
+          return {
+            ...item,
+            progress: { completed: current.completed + 1, target: current.target },
+          };
+        });
+        next.campaign = campaignView(next.activeCampaigns);
+      }
     } else if (event.type === "nexus.position") {
       if (!validPosition(payload)) return false;
       const key = `${payload.lane}:${payload.contract_id}`;

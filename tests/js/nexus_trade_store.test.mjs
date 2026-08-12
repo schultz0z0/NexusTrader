@@ -12,7 +12,10 @@ const baseSnapshot = (revision = 4) => ({
     { lane: "champion_baseline", version: { id: "champion-v1", status: "CHAMPION" } },
     { lane: "challenger_trial", version: { id: "trial-v1", status: "TRIAL" } },
   ],
-  active_campaigns: [{ id: "campaign-a", completed: 12, target: 300 }],
+  active_campaigns: [{
+    id: "campaign-a", lane: "challenger_trial", status: "ACTIVE",
+    progress: { completed: 12, target: 300 },
+  }],
   decisions: [],
   trades: [],
   reports: [],
@@ -52,7 +55,10 @@ test("duplicate and older Nexus events are ignored while one revision may contai
   const changed = event("nexus.trial_changed", "evt-1", 5, {
     id: "trial-change-a",
     version: { id: "trial-v2", status: "TRIAL" },
-    campaign: { id: "campaign-b", completed: 0, target: 300 },
+    campaign: {
+      id: "campaign-b", lane: "challenger_trial", status: "ACTIVE",
+      progress: { completed: 0, target: 300 },
+    },
   });
 
   assert.equal(store.apply(changed), true);
@@ -65,6 +71,39 @@ test("duplicate and older Nexus events are ignored while one revision may contai
   assert.equal(state.campaign.progress.completed, 0);
   assert.equal(state.trialChange.version.id, "trial-v2");
   assert.equal(state.reports[0].id, "report-5");
+});
+
+test("campaign progress selects Trial and advances once per newly settled Trial contract", () => {
+  const snapshot = baseSnapshot();
+  snapshot.active_campaigns.unshift({
+    id: "champion-campaign", lane: "champion_baseline", status: "ACTIVE",
+    progress: { completed: 99, target: 300 },
+  });
+  const store = createNexusTradeStore(snapshot);
+
+  assert.equal(store.get().campaign.current.id, "campaign-a");
+  assert.equal(store.get().campaign.progress.completed, 12);
+
+  const settled = event("nexus.trade", "trade-event-1", 5, {
+    contract_id: 9001,
+    lane: "challenger_trial",
+    campaign_id: "campaign-a",
+    status: "closed",
+    result: "won",
+  });
+  assert.equal(store.apply(settled), true);
+  assert.equal(store.get().campaign.progress.completed, 13);
+
+  assert.equal(store.apply(event("nexus.trade", "trade-event-2", 5, {
+    ...settled.payload,
+  })), true);
+  assert.equal(store.get().campaign.progress.completed, 13);
+  assert.equal(store.apply(event("nexus.trade", "trade-event-3", 5, {
+    ...settled.payload,
+    contract_id: 9002,
+    lane: "champion_baseline",
+  })), true);
+  assert.equal(store.get().campaign.progress.completed, 13);
 });
 
 test("a reconnect snapshot wins only when its revision is current or newer", () => {

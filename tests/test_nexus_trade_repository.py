@@ -108,6 +108,52 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             snapshot["runtime"]["trial_version_id"],
         )
 
+    async def test_snapshot_counts_only_closed_trades_from_the_active_trial_campaign(self):
+        await self.repo.init_db()
+        initial = await self.nexus.get_runtime_snapshot()
+        campaign = initial["active_campaigns"][0]
+        trial_version = initial["runtime"]["trial_version_id"]
+        champion_version = initial["runtime"]["champion_version_id"]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO nexus_campaigns "
+                "(id,lane,nexus_version_id,status,ended_at) "
+                "VALUES ('older-campaign',?,?, 'CLOSED',CURRENT_TIMESTAMP)",
+                (Lane.TRIAL.value, trial_version),
+            )
+            await db.commit()
+
+        trades = (
+            (8101, Lane.TRIAL.value, trial_version, campaign["id"], "closed"),
+            (8102, Lane.TRIAL.value, trial_version, campaign["id"], "closed"),
+            (8103, Lane.TRIAL.value, trial_version, campaign["id"], "open"),
+            (8104, Lane.TRIAL.value, trial_version, "older-campaign", "closed"),
+            (8105, Lane.CHAMPION.value, champion_version, campaign["id"], "closed"),
+        )
+        for contract_id, lane, version_id, campaign_id, status in trades:
+            await self.repo.upsert_trade({
+                "bot_id": NEXUS_TRADE_BOT_ID,
+                "strategy_name": "nexus_trade",
+                "symbol": "R_100",
+                "contract_type": "CALL",
+                "contract_id": contract_id,
+                "stake": 0.35,
+                "payout": 0.66 if status == "closed" else None,
+                "profit": 0.31 if status == "closed" else None,
+                "result": "won" if status == "closed" else None,
+                "status": status,
+                "lane": lane,
+                "nexus_version_id": version_id,
+                "campaign_id": campaign_id,
+            })
+
+        snapshot = await self.nexus.get_runtime_snapshot()
+
+        self.assertEqual(
+            snapshot["active_campaigns"][0].get("progress"),
+            {"completed": 2, "target": 300},
+        )
+
     async def test_exact_legacy_v1_pointer_and_campaign_are_migrated_to_a_trial_role(self):
         await self.repo.init_db()
         snapshot = await self.nexus.get_runtime_snapshot()
