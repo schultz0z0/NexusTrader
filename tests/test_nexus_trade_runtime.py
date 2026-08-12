@@ -2139,6 +2139,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             970, account_id="DEMO-A", account_type="demo",
             management_active=False,
         )
+        shared_monitor = FakeMonitor()
         self.repository.restored_states = {
             Lane.CHAMPION.value: SetupState(
                 position_status="ACTIVE",
@@ -2173,7 +2174,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             account_dispatcher_factory=lambda *args, **kwargs: self.fail(
                 "desired account must remain pending while owner is ACTIVE"
             ),
-            monitor_factory=lambda connection: FakeMonitor(),
+            monitor_factory=lambda connection: shared_monitor,
             cycle_source=source,
             publisher=LiveStorePublisher(self.repository),
         )
@@ -2186,6 +2187,7 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [["DEMO-A"]],
         )
         self.assertIs(runtime.dispatchers[Lane.CHAMPION], owner_dispatcher)
+        self.assertEqual(shared_monitor.contracts, [970])
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 

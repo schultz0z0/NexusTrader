@@ -1025,6 +1025,8 @@ class NexusTradeRuntime:
             monitor = self._champion_monitors.get(identity)
             if monitor is None:
                 monitor = getattr(dispatcher, "monitor", None)
+            if monitor is None and dispatcher is self._shared_demo_dispatcher:
+                monitor = self._shared_demo_monitor
             if monitor is not None:
                 self.monitors[lane] = monitor
 
