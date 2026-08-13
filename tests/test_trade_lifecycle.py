@@ -185,6 +185,86 @@ class BotSessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(repository.trades[0]["is_expired"])
         self.assertIsNone(repository.trades[0]["date_settlement"])
 
+    async def test_trade_loop_blocks_when_same_account_has_foreign_unresolved_intent(self):
+        events = []
+
+        class Repository:
+            async def touch_bot_heartbeat(self, bot_id):
+                return None
+
+            async def list_unresolved_order_intents(self, bot_id=None, account_id=None):
+                if bot_id == "bot-a":
+                    return []
+                if account_id == "DOT-DEMO":
+                    return [{
+                        "id": "nexus-foreign",
+                        "bot_id": "nexus-trade",
+                        "account_id": "DOT-DEMO",
+                        "state": "reconcile_pending",
+                    }]
+                return []
+
+        session = BotSession(
+            Repository(),
+            {
+                "id": "bot-a",
+                "account_id": "DOT-DEMO",
+                "account_type": "demo",
+                "symbol": "R_75",
+                "risk_config": {},
+            },
+            publisher=object(),
+        )
+        proposal_manager = type("ProposalManager", (), {"request_proposal": AsyncMock()})()
+
+        async def publish(event_type, **payload):
+            events.append((event_type, payload))
+            session._stop_requested.set()
+
+        session._publish = publish
+        session._recover_order_intents = AsyncMock()
+        session._market_data = type(
+            "MarketData",
+            (),
+            {
+                "get_latest_tick": lambda self, symbol: {"epoch": 1, "sequence": 1},
+                "get_tick_history": lambda self, symbol: [],
+                "get_candle_history": lambda self, symbol: [],
+            },
+        )()
+        strategy = type(
+            "Strategy",
+            (),
+            {
+                "analyze": lambda self, *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("foreign account quarantine should block before signal analysis")
+                ),
+            },
+        )()
+        risk = type("Risk", (), {"check_trade_allowed": lambda self, *args: (True, None)})()
+        circuit_breaker = type("CircuitBreaker", (), {"is_tripped": lambda self: (False, 0)})()
+
+        with patch("core.bot_session.asyncio.sleep", new=AsyncMock(return_value=None)):
+            await session._trade_loop(
+                strategy=strategy,
+                risk=risk,
+                circuit_breaker=circuit_breaker,
+                proposal_manager=proposal_manager,
+                ownership=object(),
+                monitor=object(),
+            )
+
+        self.assertEqual(events, [(
+            "risk.blocked",
+            {
+                "reason": "account_ownership_quarantine",
+                "account_id": "DOT-DEMO",
+                "blocking_bot_ids": ["nexus-trade"],
+                "order_intent_ids": ["nexus-foreign"],
+            },
+        )])
+        proposal_manager.request_proposal.assert_not_called()
+
     async def test_run_closes_monitor_before_market_and_connection(self):
         events = []
 

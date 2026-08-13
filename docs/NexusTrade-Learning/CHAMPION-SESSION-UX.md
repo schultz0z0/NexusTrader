@@ -34,6 +34,17 @@ persistencia de comparacao/aprendizado do NexusTrade Learning.
 - Deve considerar somente trades fechados da lane `champion_baseline`.
 - Nao atua como gate de risco nem altera a estrategia.
 
+### 5. Quarentena de ownership
+
+- Se uma compra do Champion ficar ambigua (`buy` sem ownership comprovado), a lane nao
+  pode voltar a operar por adivinhacao.
+- O frontend deve diferenciar `QUARANTINED` de mera `liquidacao`, para deixar claro que
+  existe um journal pendente de reconciliacao.
+- Se a reconciliacao nao encontrar contrato apos a janela de espera do servidor, o
+  journal pode ser fechado como `PURCHASE_ABSENT` para liberar a lane com rastreabilidade.
+- Bots comuns que compartilham a mesma conta precisam bloquear novas proposals assim que
+  existir `order_intent` unresolved de outro robo nessa conta.
+
 ## Notas de implementacao
 
 - O backend pode derivar os novos blocos diretamente do snapshot duravel e do journal de
@@ -55,6 +66,14 @@ persistencia de comparacao/aprendizado do NexusTrade Learning.
   - baseline OFF;
   - sugestao da proxima sessao ou gerenciamento da sessao;
   - assertividade da ultima hora do Champion.
+- A sessao ON do Champion agora copia a configuracao sugerida para um estado separado de
+  `sessao ativa`; ao desligar, a sessao ativa deixa de valer e o proximo ON reabre a
+  partir da sugestao persistida mais recente.
+- A UI do Champion agora mostra `QUARENTENA DE OWNERSHIP` quando a lane esta
+  `QUARANTINED`, em vez de rotular esse estado como `AGUARDANDO LIQUIDACAO`.
+- O loop dos robos comuns agora verifica `order_intents` unresolved por `account_id`
+  antes de pedir nova proposal, evitando o ciclo silencioso de proposal sem compra
+  quando outra lane da mesma conta ja esta em quarentena.
 
 ## Validacao prevista
 

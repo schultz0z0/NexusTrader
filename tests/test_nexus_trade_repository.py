@@ -1254,6 +1254,65 @@ class NexusTradeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             suggestion,
         )
 
+    async def test_champion_mode_resets_session_management_between_runs(self):
+        await self.repo.init_db()
+        first = await self.nexus.set_champion_management(
+            expected_revision=1,
+            payload=self._champion_management_payload(
+                initial_stake=0.5,
+                money_management="fixed",
+                money_config={},
+            ),
+        )
+        await self.nexus.set_champion_mode(
+            enabled=True,
+            account_id="DOT-DEMO",
+            account_type="demo",
+        )
+        on_snapshot = await self.nexus.get_control_snapshot()
+        self.assertEqual(on_snapshot["champion_session"]["active_management"], first)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO risk_states (
+                    bot_id, current_stake, current_level, consecutive_wins,
+                    consecutive_losses, circuit_consecutive_losses, circuit_tripped_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("nexus-trade", 1.75, 2, 0, 2, 2, 0.0),
+            )
+            await db.commit()
+
+        await self.nexus.set_champion_mode(
+            enabled=False,
+            account_id="DOT-DEMO",
+            account_type="demo",
+        )
+        off_snapshot = await self.nexus.get_control_snapshot()
+        self.assertIsNone(off_snapshot["champion_session"]["active_management"])
+        self.assertEqual(off_snapshot["champion_session"]["suggestion"], first)
+
+        second = await self.nexus.set_champion_management(
+            expected_revision=first["revision"],
+            payload=self._champion_management_payload(
+                initial_stake=0.9,
+                money_management="martingale",
+                money_config={"multiplier": 2.0, "max_levels": 2},
+            ),
+        )
+        await self.nexus.set_champion_mode(
+            enabled=True,
+            account_id="DOT-DEMO",
+            account_type="demo",
+        )
+        restarted = await self.nexus.get_control_snapshot()
+        self.assertEqual(restarted["champion_session"]["active_management"], second)
+        self.assertEqual(restarted["champion_session"]["suggestion"], second)
+        restored_risk = await self.repo.get_risk_state("nexus-trade", initial_stake=0.9)
+        self.assertEqual(restored_risk["current_stake"], 0.9)
+        self.assertEqual(restored_risk["current_level"], 0)
+
     async def test_control_snapshot_reports_last_hour_accuracy_for_champion_only(self):
         await self.repo.init_db()
         snapshot = await self.nexus.get_runtime_snapshot()

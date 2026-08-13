@@ -429,6 +429,7 @@ class NexusTradeRepository:
             "target": 300,
         }
         management = await cls._management_from_connection(db)
+        session_management = await cls._session_management_from_connection(db)
         lane_states, positions = await cls._lane_runtime_view(db)
         return {
             "bot": dict(bot),
@@ -436,6 +437,7 @@ class NexusTradeRepository:
             "lanes": lanes,
             "active_campaigns": active_campaigns,
             "champion_management": management,
+            "champion_session_management": session_management,
             "lane_states": lane_states,
             "positions": positions,
         }
@@ -647,6 +649,91 @@ class NexusTradeRepository:
         async with self._connection() as db:
             return await self._management_from_connection(db)
 
+    @classmethod
+    async def _session_management_from_connection(
+        cls,
+        db: aiosqlite.Connection,
+    ) -> dict | None:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM nexus_champion_session_management WHERE bot_id = ?",
+            (NEXUS_TRADE_BOT_ID,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            source_revision = row["source_revision"]
+            if (
+                isinstance(source_revision, bool)
+                or type(source_revision) is not int
+                or source_revision < 1
+            ):
+                raise ValueError("source_revision is invalid")
+            money_config = json.loads(row["money_config"])
+            risk_config = json.loads(row["risk_config"])
+            normalized = cls._normalize_champion_management({
+                "initial_stake": row["initial_stake"],
+                "money_management": row["money_management"],
+                "money_config": money_config,
+                "risk_config": risk_config,
+            })
+            if (
+                canonical_json(money_config) != row["money_config"]
+                or canonical_json(risk_config) != row["risk_config"]
+            ):
+                raise ValueError("session management JSON is not canonical")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise NexusTradeSingletonError("Champion session management is corrupt") from exc
+        return {"revision": source_revision, **normalized}
+
+    @classmethod
+    async def _start_champion_session_from_management(
+        cls,
+        db: aiosqlite.Connection,
+        *,
+        management: dict,
+    ) -> dict:
+        await db.execute(
+            """
+            INSERT INTO nexus_champion_session_management (
+                bot_id, source_revision, initial_stake, money_management,
+                money_config, risk_config, activated_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(bot_id) DO UPDATE SET
+                source_revision = excluded.source_revision,
+                initial_stake = excluded.initial_stake,
+                money_management = excluded.money_management,
+                money_config = excluded.money_config,
+                risk_config = excluded.risk_config,
+                activated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                NEXUS_TRADE_BOT_ID,
+                int(management["revision"]),
+                float(management["initial_stake"]),
+                management["money_management"],
+                canonical_json(management["money_config"]),
+                canonical_json(management["risk_config"]),
+            ),
+        )
+        session = await cls._session_management_from_connection(db)
+        if session is None:
+            raise NexusTradeSingletonError("Champion session could not be started")
+        return session
+
+    @staticmethod
+    async def _clear_champion_session(db: aiosqlite.Connection) -> None:
+        await db.execute(
+            "DELETE FROM nexus_champion_session_management WHERE bot_id = ?",
+            (NEXUS_TRADE_BOT_ID,),
+        )
+        await db.execute(
+            "DELETE FROM risk_states WHERE bot_id = ?",
+            (NEXUS_TRADE_BOT_ID,),
+        )
+
     @staticmethod
     async def _champion_lane_is_idle(db: aiosqlite.Connection) -> bool:
         async with db.execute(
@@ -822,8 +909,32 @@ class NexusTradeRepository:
             raise ValueError("Champion OFF must remain on DEMO")
         async with self._connection() as db:
             await db.execute("PRAGMA busy_timeout=30000")
+            db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             try:
+                async with db.execute(
+                    "SELECT champion_enabled FROM nexus_runtime WHERE bot_id = ?",
+                    (NEXUS_TRADE_BOT_ID,),
+                ) as cursor:
+                    current_runtime = await cursor.fetchone()
+                if current_runtime is None:
+                    raise NexusTradeSingletonError("NexusTrade runtime is missing")
+                was_enabled = bool(current_runtime["champion_enabled"])
+                session_management = await self._session_management_from_connection(db)
+                if enabled and (not was_enabled or session_management is None):
+                    management = await self._management_from_connection(db)
+                    await self._start_champion_session_from_management(
+                        db,
+                        management=management,
+                    )
+                    await db.execute(
+                        "DELETE FROM risk_states WHERE bot_id = ?",
+                        (NEXUS_TRADE_BOT_ID,),
+                    )
+                elif not enabled and (
+                    not was_enabled or await self._champion_lane_is_idle(db)
+                ):
+                    await self._clear_champion_session(db)
                 await db.execute(
                     """
                     UPDATE nexus_runtime
@@ -924,6 +1035,7 @@ class NexusTradeRepository:
         champion_session = self._champion_session_summary(
             runtime=runtime,
             management=durable["champion_management"],
+            session_management=durable.get("champion_session_management"),
         )
         champion_last_hour = await self._champion_last_hour_summary()
         learning = {
@@ -964,15 +1076,22 @@ class NexusTradeRepository:
         }
 
     @staticmethod
-    def _champion_session_summary(*, runtime: dict, management: dict) -> dict:
+    def _champion_session_summary(
+        *,
+        runtime: dict,
+        management: dict,
+        session_management: dict | None,
+    ) -> dict:
         enabled = bool(runtime.get("champion_enabled", 0))
         return {
-            "management_active": enabled,
+            "management_active": enabled and session_management is not None,
             "mode": "on" if enabled else "off",
             "baseline_account_type": "demo",
             "baseline_initial_stake": float(NEXUS_DEMO_STAKE),
             "suggestion": dict(management),
-            "active_management": dict(management) if enabled else None,
+            "active_management": (
+                dict(session_management) if enabled and session_management is not None else None
+            ),
         }
 
     async def _champion_last_hour_summary(self) -> dict:

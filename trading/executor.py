@@ -43,4 +43,8 @@ class OrderExecutor:
             logger.info(f"Saldo restante: {buy_data.get('balance_after')}")
             return buy_data
             
-        return None
+        logger.warning(
+            "Resposta de compra ambigua: payload sem 'buy' nem 'error' (%s)",
+            response,
+        )
+        raise AmbiguousBuyError("Resposta de compra vazia ou ambigua")

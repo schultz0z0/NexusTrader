@@ -169,16 +169,18 @@ export function buildNexusOperationalModel(state = {}, account = null) {
     ? (session.active_management || management)
     : (session.suggestion || management);
   let status = enabled ? `ON — ${accountType === "real" ? "REAL" : "DEMO"}` : "OFF — APRENDENDO EM DEMO";
-  if (positionStatus !== "IDLE") status = "AGUARDANDO LIQUIDAÇÃO";
+  if (positionStatus === "QUARANTINED") status = "QUARENTENA DE OWNERSHIP";
+  else if (positionStatus !== "IDLE") status = "AGUARDANDO LIQUIDAÇÃO";
   if (emergency) status = "PARADA TOTAL";
   const pending = (state.proposals || []).filter((proposal) => proposal?.status === "PENDING_USER_REVIEW");
   const completed = Number(state.campaign?.progress?.completed || 0);
   const target = Number(state.campaign?.progress?.target || 300);
+  const quarantined = positionStatus === "QUARANTINED";
   return {
     champion: {
       version: versionLabel(champion, "Champion V1"),
       status,
-      statusTone: emergency ? "danger" : positionStatus !== "IDLE" ? "waiting" : enabled ? "live" : "neutral",
+      statusTone: emergency ? "danger" : quarantined ? "danger" : positionStatus !== "IDLE" ? "waiting" : enabled ? "live" : "neutral",
       enabled,
       positionStatus,
       stake: enabled
@@ -192,9 +194,11 @@ export function buildNexusOperationalModel(state = {}, account = null) {
       baseline: `DEMO · US$ ${Number(session.baseline_initial_stake ?? 0.35).toFixed(2)}`,
       sessionLabel: session.management_active ? "GERENCIAMENTO DA SESSAO" : "SUGESTAO PARA A PROXIMA SESSAO",
       sessionSummary: managementSummary(sessionManagement),
-      sessionHint: session.management_active
-        ? "A sessao ON usa esta configuracao ate voce desligar o Champion."
-        : "OFF segue em DEMO US$ 0,35 sem gerenciamento ativo.",
+      sessionHint: quarantined
+        ? "Champion bloqueado por ownership ambigua pendente de reconciliacao."
+        : session.management_active
+          ? "A sessao ON usa esta configuracao ate voce desligar o Champion."
+          : "OFF segue em DEMO US$ 0,35 sem gerenciamento ativo.",
       lastHourLabel: "ULTIMA HORA DO CHAMPION",
       lastHourSummary: championLastHourSummary(state.championLastHour),
     },

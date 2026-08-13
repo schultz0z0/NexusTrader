@@ -64,6 +64,29 @@ class NexusModels:
         WHEN NEW.bot_id != 'nexus-trade'
         BEGIN SELECT RAISE(ABORT, 'nexus-trade management identity is reserved'); END;
 
+        CREATE TABLE IF NOT EXISTS nexus_champion_session_management (
+            bot_id TEXT PRIMARY KEY CHECK (bot_id = 'nexus-trade'),
+            source_revision INTEGER NOT NULL CHECK (source_revision >= 1),
+            initial_stake REAL NOT NULL CHECK (initial_stake > 0),
+            money_management TEXT NOT NULL
+                CHECK (money_management IN ('fixed', 'martingale', 'soros')),
+            money_config TEXT NOT NULL DEFAULT '{}',
+            risk_config TEXT NOT NULL DEFAULT '{}',
+            activated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(bot_id) REFERENCES bot_instances(id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_champion_session_identity_insert
+        BEFORE INSERT ON nexus_champion_session_management
+        WHEN NEW.bot_id != 'nexus-trade'
+        BEGIN SELECT RAISE(ABORT, 'nexus-trade session identity is reserved'); END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_nexus_champion_session_identity_update
+        BEFORE UPDATE OF bot_id ON nexus_champion_session_management
+        WHEN NEW.bot_id != 'nexus-trade'
+        BEGIN SELECT RAISE(ABORT, 'nexus-trade session identity is reserved'); END;
+
         CREATE TABLE IF NOT EXISTS nexus_campaigns (
             id TEXT PRIMARY KEY,
             lane TEXT NOT NULL CHECK (lane IN ('champion_baseline', 'challenger_trial')),

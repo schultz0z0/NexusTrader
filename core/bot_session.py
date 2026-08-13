@@ -53,6 +53,20 @@ class BotSession:
         await self.repository.set_runtime_state(self.bot_id, status, error)
         await self._publish("runtime.status", status=status, error=error)
 
+    async def _foreign_account_unresolved_intents(self):
+        if not hasattr(self.repository, "list_unresolved_order_intents"):
+            return []
+        account_id = self.bot.get("account_id")
+        if not account_id:
+            return []
+        unresolved = await self.repository.list_unresolved_order_intents(
+            account_id=account_id,
+        )
+        return [
+            item for item in unresolved
+            if item.get("bot_id") and item.get("bot_id") != self.bot_id
+        ]
+
     def _build_strategy(self):
         strategy_id = self.bot.get("strategy_id", "donchian")
         if strategy_id not in ("donchian", "nexus_speed"):
@@ -289,6 +303,28 @@ class BotSession:
                         )
                         await asyncio.sleep(settings.CONTRACT_RECONCILE_INTERVAL_SECONDS)
                         continue
+                foreign_unresolved = await self._foreign_account_unresolved_intents()
+                if foreign_unresolved:
+                    intent_ids = sorted(
+                        str(item["id"]) for item in foreign_unresolved if item.get("id")
+                    )
+                    blocking_bot_ids = sorted({
+                        str(item["bot_id"]) for item in foreign_unresolved if item.get("bot_id")
+                    })
+                    logger.warning(
+                        "Conta %s bloqueada por order_intents pendentes de outros robos: %s",
+                        self.bot.get("account_id"),
+                        ", ".join(intent_ids) if intent_ids else "(desconhecido)",
+                    )
+                    await self._publish(
+                        "risk.blocked",
+                        reason="account_ownership_quarantine",
+                        account_id=self.bot.get("account_id"),
+                        blocking_bot_ids=blocking_bot_ids,
+                        order_intent_ids=intent_ids,
+                    )
+                    await asyncio.sleep(settings.CONTRACT_RECONCILE_INTERVAL_SECONDS)
+                    continue
             latest = self._market_data.get_latest_tick(symbol)
             if hasattr(self.repository, "record_bot_health"):
                 await self.repository.record_bot_health(

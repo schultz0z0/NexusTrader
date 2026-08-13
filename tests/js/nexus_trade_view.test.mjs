@@ -185,6 +185,10 @@ test("ON DEMO, ON REAL, settlement, emergency and proposal states are explicit",
     "AGUARDANDO LIQUIDAÇÃO",
   );
   assert.equal(
+    buildNexusOperationalModel(operationalState({ positionStatus: "QUARANTINED" })).champion.status,
+    "QUARENTENA DE OWNERSHIP",
+  );
+  assert.equal(
     buildNexusOperationalModel(operationalState({ emergencyStop: true })).champion.status,
     "PARADA TOTAL",
   );

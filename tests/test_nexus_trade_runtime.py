@@ -2171,6 +2171,37 @@ class NexusTradeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.request_stop()
         await asyncio.wait_for(task, timeout=1)
 
+    async def test_restart_releases_quarantine_when_purchase_is_confirmed_absent(self):
+        quarantined = SetupState(
+            position_status="QUARANTINED",
+            owner_decision_id="lost-owner",
+            quarantine_correlation_id="nexus-lost-owner",
+        ).to_dict()
+        self.repository.restored_states = {Lane.TRIAL.value: quarantined}
+        self.repository.restored_owners = {Lane.TRIAL.value: {
+            "account_id": "DOT-DEMO",
+            "account_type": "demo",
+            "management_active": False,
+        }}
+        self.shared.reconciliation_result = OwnershipReconciliation(
+            correlation_id="nexus-lost-owner",
+            decision_id="lost-owner",
+            outcome="PURCHASE_ABSENT",
+            contract_id=None,
+        )
+        source = WaitUntilStoppedCycleSource()
+        runtime = self.runtime(cycle_source=source)
+
+        task = asyncio.create_task(runtime.run())
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+
+        state = runtime.strategies[Lane.TRIAL].state
+        self.assertEqual(state.position_status, "IDLE")
+        self.assertIsNone(state.owner_decision_id)
+        self.assertIn((Lane.TRIAL.value, "QUARANTINED"), self.shared.restored)
+        await runtime.request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
     async def test_emergency_stop_is_forwarded_to_both_dispatchers(self):
         runtime = self.runtime()
         runtime.apply_champion_mode({

@@ -130,7 +130,13 @@ class NexusTradeRuntime:
         self._campaigns = {lane: None for lane in Lane}
 
     def _management_from_snapshot(self, snapshot: dict | None) -> dict:
-        raw = (snapshot or {}).get("champion_management")
+        runtime = (snapshot or {}).get("runtime") or {}
+        raw = (
+            (snapshot or {}).get("champion_session_management")
+            if bool(runtime.get("champion_enabled", 0))
+            and (snapshot or {}).get("champion_session_management") is not None
+            else (snapshot or {}).get("champion_management")
+        )
         if raw is None:
             raw = {
                 "revision": 1,
@@ -1750,6 +1756,7 @@ class NexusTradeRuntime:
                     cycle = produced
                 if self._stop_event.is_set():
                     break
+                await self._reconcile_quarantines()
                 await self._refresh_runtime_snapshot()
                 if cycle is not None and not self._stop_event.is_set():
                     await self.process_cycle(cycle)

@@ -204,6 +204,14 @@ class AccountDispatcher:
         else:
             contract = await self._ownership.reconciler.reconcile(intent)
             if contract is None:
+                refreshed = await self.repository.get_order_intent(correlation_id)
+                if refreshed and refreshed.get("state") in {"cancelled", "rejected"}:
+                    return OwnershipReconciliation(
+                        correlation_id=correlation_id,
+                        decision_id=decision_id,
+                        outcome="PURCHASE_ABSENT",
+                        contract_id=None,
+                    )
                 return None
             contract_id = contract.get("contract_id")
         if isinstance(contract_id, bool) or type(contract_id) is not int or contract_id <= 0:

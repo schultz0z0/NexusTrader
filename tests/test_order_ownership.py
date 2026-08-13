@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import aiosqlite
+
 from database.repository import DatabaseRepository
 from trading.executor import AmbiguousBuyError, OrderExecutor
 from trading.ownership import (
@@ -107,6 +109,19 @@ class OrderExecutionOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(connection.sent), 1)
         self.assertEqual(connection.sent[0]["passthrough"]["order_intent_id"], "intent-a")
+
+    async def test_empty_buy_response_is_treated_as_ambiguous(self):
+        connection = FakeConnection([{}])
+        executor = OrderExecutor(connection, account_type="demo")
+
+        with self.assertRaises(AmbiguousBuyError):
+            await executor.buy("proposal-a", 1.0, passthrough={"order_intent_id": "intent-a"})
+
+        self.assertEqual(connection.sent, [{
+            "buy": "proposal-a",
+            "price": 1.0,
+            "passthrough": {"order_intent_id": "intent-a"},
+        }])
 
     async def test_transaction_stream_captures_buy_for_lost_response_reconciliation(self):
         class StreamingConnection:
@@ -261,6 +276,34 @@ class OrderReconciliationTests(unittest.IsolatedAsyncioTestCase):
         pending = await self.repository.list_unresolved_order_intents("bot-a")
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["state"], "reconcile_pending")
+
+    async def test_expired_reconcile_pending_intent_is_cancelled_after_timeout(self):
+        async with aiosqlite.connect(self.repository.db_path) as db:
+            await db.execute(
+                """
+                UPDATE order_intents
+                SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00'
+                WHERE id = ?
+                """,
+                (self.intent["id"],),
+            )
+            await db.commit()
+        connection = FakeConnection([
+            {"portfolio": {"contracts": []}},
+            {"statement": {"transactions": []}},
+        ])
+        reconciler = OrderOwnershipReconciler(
+            connection,
+            self.repository,
+            reconcile_timeout_seconds=1,
+        )
+
+        contract = await reconciler.reconcile(await self.repository.get_order_intent(self.intent["id"]))
+
+        self.assertIsNone(contract)
+        stored = await self.repository.get_order_intent(self.intent["id"])
+        self.assertEqual(stored["state"], "cancelled")
+        self.assertIn("janela de reconciliacao", stored["error"])
 
 
 if __name__ == "__main__":

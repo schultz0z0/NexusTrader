@@ -1,7 +1,9 @@
 """Durable ownership for Deriv buys whose response may be lost in transport."""
 
 from collections import deque
+from datetime import datetime, timezone
 
+from config.settings import settings
 from database.repository import ActiveOrderIntentError
 from trading.executor import AmbiguousBuyError, OrderExecutor
 from utils.logger import setup_logger
@@ -50,11 +52,17 @@ class OrderOwnershipReconciler:
         connection,
         repository,
         time_tolerance_seconds=300,
+        reconcile_timeout_seconds=None,
         transaction_source=None,
     ):
         self.connection = connection
         self.repository = repository
         self.time_tolerance_seconds = int(time_tolerance_seconds)
+        self.reconcile_timeout_seconds = int(
+            settings.SETTLEMENT_WAIT_TIMEOUT_SECONDS
+            if reconcile_timeout_seconds is None
+            else reconcile_timeout_seconds
+        )
         self.transaction_source = transaction_source or (lambda: [])
 
     async def reconcile(self, intent: dict):
@@ -110,12 +118,37 @@ class OrderOwnershipReconciler:
                 metadata={"candidate_contract_ids": sorted(matches)},
             )
             return None
+        if self._reconciliation_expired(intent):
+            await self.repository.update_order_intent(
+                intent["id"],
+                "cancelled",
+                error=(
+                    "Compra ausente apos janela de reconciliacao; "
+                    "journal liberado para nova sessao"
+                ),
+            )
+            return None
         await self.repository.update_order_intent(
             intent["id"],
             "reconcile_pending",
             error=intent.get("error") or "Compra ainda nao encontrada no portfolio/statement",
         )
         return None
+
+    def _reconciliation_expired(self, intent: dict) -> bool:
+        if self.reconcile_timeout_seconds <= 0:
+            return False
+        timestamp = intent.get("created_at") or intent.get("updated_at")
+        if type(timestamp) is not str or not timestamp.strip():
+            return False
+        try:
+            created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        return age >= float(self.reconcile_timeout_seconds)
 
     def _matches(self, intent, candidate):
         contract_id = candidate.get("contract_id")
